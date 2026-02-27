@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use boostr::format::Gguf;
 use boostr::model::{LoadedModel, UniversalConfig};
 use boostr::ops::TensorOps;
-use boostr::{DType, Runtime};
+use boostr::{DType, Runtime, VarBuilder, VarMap};
 
 use crate::config::BlazrConfig;
 
@@ -18,34 +18,53 @@ use crate::config::BlazrConfig;
 /// GGUF files contain both model weights and metadata, so no separate
 /// config file is needed. The metadata is used to construct the configuration.
 pub fn load_gguf<R: Runtime<DType = DType>, P: AsRef<Path>>(
-    _path: P,
-    _device: &R::Device,
+    path: P,
+    device: &R::Device,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R>,
 {
-    // TODO: Implement GGUF weight loading into VarMap.
-    // This requires iterating GGUF tensors, dequantizing to the target dtype,
-    // and inserting into a VarMap.
-    Err(anyhow!(
-        "GGUF weight loading is not yet implemented. \
-        Use SafeTensors format or convert GGUF to SafeTensors first."
-    ))
+    let path = path.as_ref();
+
+    let gguf = Gguf::open(path).map_err(|e| anyhow!("Failed to open GGUF file: {}", e))?;
+    let config = config_from_gguf_metadata(&gguf)?;
+
+    // Load all tensors (names auto-mapped from GGUF to HF convention)
+    let var_map = VarMap::<R>::from_gguf(path, device)
+        .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
+
+    tracing::info!("Loaded {} tensors from GGUF", var_map.len());
+
+    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
+    let mut vb = VarBuilder::new(var_map_ref, device);
+
+    let model = LoadedModel::load(&config.model, &mut vb)
+        .map_err(|e| anyhow!("Failed to load model: {}", e))?;
+
+    Ok((model, config))
 }
 
 /// Load a model from GGUF with explicit configuration
 pub fn load_gguf_with_config<R: Runtime<DType = DType>, P: AsRef<Path>>(
-    _path: P,
-    _config: &UniversalConfig,
-    _device: &R::Device,
+    path: P,
+    config: &UniversalConfig,
+    device: &R::Device,
 ) -> Result<LoadedModel<R>>
 where
     R::Client: TensorOps<R>,
 {
-    Err(anyhow!(
-        "GGUF weight loading is not yet implemented. \
-        Use SafeTensors format or convert GGUF to SafeTensors first."
-    ))
+    let path = path.as_ref();
+
+    let var_map = VarMap::<R>::from_gguf(path, device)
+        .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
+
+    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
+    let mut vb = VarBuilder::new(var_map_ref, device);
+
+    let model =
+        LoadedModel::load(config, &mut vb).map_err(|e| anyhow!("Failed to load model: {}", e))?;
+
+    Ok(model)
 }
 
 /// Load a model from GGUF format with embedded tokenizer
@@ -54,24 +73,31 @@ where
 /// from the GGUF file (SentencePiece format for Llama/Mistral models).
 pub fn load_gguf_with_tokenizer<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
-    _device: &R::Device,
+    device: &R::Device,
 ) -> Result<(LoadedModel<R>, BlazrConfig, crate::tokenizer::GgufTokenizer)>
 where
     R::Client: TensorOps<R>,
 {
     let path = path.as_ref();
 
-    // We can still read GGUF metadata and tokenizer even though weight loading isn't ready
     let gguf = Gguf::open_with_mmap(path, false)
         .map_err(|e| anyhow!("Failed to open GGUF file: {}", e))?;
 
-    // Create tokenizer from GGUF metadata
-    let _tokenizer = crate::tokenizer::GgufTokenizer::from_gguf(&gguf)?;
+    let config = config_from_gguf_metadata(&gguf)?;
+    let tokenizer = crate::tokenizer::GgufTokenizer::from_gguf(&gguf)?;
 
-    Err(anyhow!(
-        "GGUF weight loading is not yet implemented. \
-        Use SafeTensors format or convert GGUF to SafeTensors first."
-    ))
+    let var_map = VarMap::<R>::from_gguf(path, device)
+        .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
+
+    tracing::info!("Loaded {} tensors from GGUF", var_map.len());
+
+    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
+    let mut vb = VarBuilder::new(var_map_ref, device);
+
+    let model = LoadedModel::load(&config.model, &mut vb)
+        .map_err(|e| anyhow!("Failed to load model: {}", e))?;
+
+    Ok((model, config, tokenizer))
 }
 
 /// Create BlazrConfig from GGUF metadata

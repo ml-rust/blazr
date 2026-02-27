@@ -1,0 +1,36 @@
+# Build artifacts
+/target/
+
+# Cargo lock (optional for libraries, but we're a binary)
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model checkpoints (large files)
+*.safetensors
+*.bin
+*.pt
+*.pth
+checkpoints/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+checkpoints
+research
+ClAUDE.md
+
+.cargo

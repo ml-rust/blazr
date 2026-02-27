@@ -1,0 +1,63 @@
+[package]
+name = "blazr"
+version = "0.1.0-beta.1"
+edition = "2021"
+authors = ["Farhan Syah"]
+description = "Blazing-fast inference server for oxidizr models (Mamba2 + MLA + MoE)"
+license = "Apache-2.0"
+repository = "https://github.com/ml-rust/blazr"
+homepage = "https://github.com/ml-rust/blazr"
+keywords = ["inference", "llm", "mamba", "transformer", "server"]
+categories = ["science", "web-programming"]
+
+[features]
+default = []
+cuda = ["boostr/cuda"]
+
+[dependencies]
+# Tensor operations - now using boostr instead of candle
+boostr = { path = "../boostr" }
+
+# Tokenization
+splintr = { path = "../splintr" }
+
+# HTTP server
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+glob = "0.3"
+
+# HuggingFace Hub for model downloading
+hf-hub = "0.4"
+dotenvy = "0.15"
+
+# Async streaming
+futures = "0.3"
+async-stream = "0.3"
+
+# Random number generation
+rand = "0.8"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

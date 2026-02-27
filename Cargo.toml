@@ -11,7 +11,8 @@ keywords = ["inference", "llm", "mamba", "transformer", "server"]
 categories = ["science", "web-programming"]
 
 [features]
-default = []
+default = ["f16"]
+f16 = ["boostr/f16"]
 cuda = ["boostr/cuda"]
 
 [dependencies]

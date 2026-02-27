@@ -13,10 +13,32 @@ pub use server::ServerConfig;
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use boostr::model::UniversalConfig;
+use boostr::DType;
+
+/// Parse a dtype string into a `DType`.
+///
+/// Accepts short and long forms: "f32"/"float32", "f16"/"float16", "bf16"/"bfloat16".
+/// Returns an error for unknown strings or when f16/bf16 is requested without the `f16` feature.
+pub fn parse_dtype(s: &str) -> Result<DType> {
+    match s {
+        "f32" | "float32" => Ok(DType::F32),
+        #[cfg(feature = "f16")]
+        "f16" | "float16" => Ok(DType::F16),
+        #[cfg(feature = "f16")]
+        "bf16" | "bfloat16" => Ok(DType::BF16),
+        #[cfg(not(feature = "f16"))]
+        "f16" | "float16" | "bf16" | "bfloat16" => Err(anyhow!(
+            "dtype '{}' requested but the 'f16' feature is not enabled; \
+             rebuild with `--features f16` or use 'f32'",
+            s
+        )),
+        other => Err(anyhow!("unknown dtype: '{}'", other)),
+    }
+}
 
 /// Blazr configuration
 ///
@@ -67,8 +89,10 @@ impl BlazrConfig {
 
     /// Create from a UniversalConfig with specified dtype
     pub fn from_universal_with_dtype(model: UniversalConfig, dtype: &str) -> Self {
-        let mut inference = InferenceConfig::default();
-        inference.dtype = dtype.to_string();
+        let inference = InferenceConfig {
+            dtype: dtype.to_string(),
+            ..Default::default()
+        };
         Self {
             model,
             inference,
@@ -175,5 +199,36 @@ generation:
         assert_eq!(config.max_seq_len(), 4096); // Uses inference override
         assert!(config.server.is_some());
         assert_eq!(config.server.unwrap().port, 8080);
+    }
+
+    #[test]
+    fn test_parse_dtype_f32() {
+        assert_eq!(parse_dtype("f32").unwrap(), DType::F32);
+        assert_eq!(parse_dtype("float32").unwrap(), DType::F32);
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_parse_dtype_f16() {
+        assert_eq!(parse_dtype("f16").unwrap(), DType::F16);
+        assert_eq!(parse_dtype("float16").unwrap(), DType::F16);
+        assert_eq!(parse_dtype("bf16").unwrap(), DType::BF16);
+        assert_eq!(parse_dtype("bfloat16").unwrap(), DType::BF16);
+    }
+
+    #[cfg(not(feature = "f16"))]
+    #[test]
+    fn test_parse_dtype_f16_without_feature() {
+        assert!(parse_dtype("f16").is_err());
+        assert!(parse_dtype("bf16").is_err());
+        assert!(parse_dtype("float16").is_err());
+        assert!(parse_dtype("bfloat16").is_err());
+    }
+
+    #[test]
+    fn test_parse_dtype_unknown() {
+        assert!(parse_dtype("int8").is_err());
+        assert!(parse_dtype("").is_err());
+        assert!(parse_dtype("F32").is_err());
     }
 }

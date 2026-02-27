@@ -17,6 +17,7 @@ use crate::tokenizer::Tokenizer;
 use boostr::CpuRuntime;
 
 /// Run interactive generation
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     model: String,
     prompt: Option<String>,
@@ -226,7 +227,7 @@ async fn generate_response(
     prompt: &str,
     gen_config: &GenerationConfig,
 ) -> Result<()> {
-    print!("\n");
+    println!();
 
     let start = std::time::Instant::now();
     let mut token_count = 0usize;
@@ -266,7 +267,7 @@ async fn generate_response_cpu(
     prompt: &str,
     gen_config: &GenerationConfig,
 ) -> Result<()> {
-    print!("\n");
+    println!();
 
     let start = std::time::Instant::now();
     let mut token_count = 0usize;

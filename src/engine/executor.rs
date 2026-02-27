@@ -13,10 +13,10 @@ use boostr::model::LoadedModel;
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, ScalarOps, Tensor,
-    UnaryOps,
+    TypeConversionOps, UnaryOps,
 };
 
-use crate::config::{BlazrConfig, GenerationConfig};
+use crate::config::{parse_dtype, BlazrConfig, GenerationConfig};
 use crate::tokenizer::{BoxedTokenizer, TokenizerTrait};
 
 /// Inference executor
@@ -43,7 +43,8 @@ where
         + NormalizationOps<R>
         + UnaryOps<R>
         + ActivationOps<R>
-        + BinaryOps<R>,
+        + BinaryOps<R>
+        + TypeConversionOps<R>,
 {
     /// Create a new executor
     ///
@@ -53,8 +54,8 @@ where
     /// * `tokenizer` - Tokenizer for encoding/decoding (boxed trait object)
     /// * `device` - Device to run on
     /// * `num_ctx` - Initial context size for KV cache (like Ollama's num_ctx).
-    ///               The KV cache will grow dynamically if more tokens are needed,
-    ///               up to the model's max_position_embeddings.
+    ///   The KV cache will grow dynamically if more tokens are needed,
+    ///   up to the model's max_position_embeddings.
     pub fn new<T: TokenizerTrait + 'static>(
         model: LoadedModel<R>,
         config: BlazrConfig,
@@ -96,7 +97,7 @@ where
         let start = std::time::Instant::now();
 
         // Create a single-token input
-        let warmup_input = Tensor::from_slice(&[1u32], &[1, 1], &self.device);
+        let warmup_input = Tensor::from_slice(&[1i64], &[1, 1], &self.device);
 
         if self.model.needs_ssm_state() {
             // Mamba2: warmup with SSM state
@@ -106,12 +107,7 @@ where
                 .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
             let num_layers = self.model.num_layers();
 
-            let warmup_dtype = match self.config.dtype() {
-                "f16" | "float16" => DType::F16,
-                "bf16" | "bfloat16" => DType::BF16,
-                "f32" | "float32" => DType::F32,
-                _ => DType::BF16,
-            };
+            let warmup_dtype = parse_dtype(self.config.dtype())?;
 
             let mut ssm_state =
                 LayeredSsmState::new(num_layers, 1, mamba_config, warmup_dtype, &self.device);
@@ -126,12 +122,7 @@ where
             let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
             let head_dim = self.model.head_dim().unwrap_or(64);
 
-            let kv_dtype = match self.config.dtype() {
-                "f16" | "float16" => DType::F16,
-                "bf16" | "bfloat16" => DType::BF16,
-                "f32" | "float32" => DType::F32,
-                _ => DType::BF16,
-            };
+            let kv_dtype = parse_dtype(self.config.dtype())?;
 
             let mut kv_cache = LayeredKvCache::new_positional(
                 num_layers,
@@ -168,8 +159,6 @@ where
             let prompt_tokens = self.tokenizer.encode(prompt)
                 .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
 
-            eprintln!("[EXEC_DEBUG] Prompt tokens: {:?} (len={})", prompt_tokens, prompt_tokens.len());
-
             if prompt_tokens.is_empty() {
                 return;
             }
@@ -188,12 +177,7 @@ where
                     .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
                 let num_layers = self.model.num_layers();
 
-                let state_dtype = match self.config.dtype() {
-                    "f16" | "float16" => DType::F16,
-                    "bf16" | "bfloat16" => DType::BF16,
-                    "f32" | "float32" => DType::F32,
-                    _ => DType::BF16,
-                };
+                let state_dtype = parse_dtype(self.config.dtype())?;
 
                 let mut ssm_state = LayeredSsmState::new(
                     num_layers,
@@ -229,7 +213,7 @@ where
                     });
 
                     // Decode step: single token, SSM state carries context
-                    let next_input = Tensor::from_slice(&[next_token], &[1, 1], &self.device);
+                    let next_input = Tensor::from_slice(&[next_token as i64], &[1, 1], &self.device);
                     logits = self.model.forward_with_ssm_state(&next_input, &mut ssm_state)
                         .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 }
@@ -240,12 +224,7 @@ where
                 let head_dim = self.model.head_dim().unwrap_or(64);
                 let initial_capacity = self.num_ctx;
 
-                let kv_dtype = match self.config.dtype() {
-                    "f16" | "float16" => DType::F16,
-                    "bf16" | "bfloat16" => DType::BF16,
-                    "f32" | "float32" => DType::F32,
-                    _ => DType::BF16,
-                };
+                let kv_dtype = parse_dtype(self.config.dtype())?;
 
                 let mut kv_cache = LayeredKvCache::new_positional(
                     num_layers,
@@ -283,7 +262,7 @@ where
                         logprob: None,
                     });
 
-                    let next_input = Tensor::from_slice(&[next_token], &[1, 1], &self.device);
+                    let next_input = Tensor::from_slice(&[next_token as i64], &[1, 1], &self.device);
                     let position = kv_cache.seq_len();
                     logits = self.model.forward_with_kv_cache(&next_input, &mut kv_cache, position)
                         .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
@@ -323,53 +302,41 @@ where
 
     /// Create input tensor from token IDs
     fn create_input_tensor(&self, tokens: &[u32]) -> Result<Tensor<R>> {
-        // Use U32 tensors for exact token indices (no f32 precision loss)
-        Ok(Tensor::from_slice(tokens, &[1, tokens.len()], &self.device))
+        // Model embedding expects I64 indices
+        let tokens_i64: Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
+        Ok(Tensor::from_slice(
+            &tokens_i64,
+            &[1, tokens.len()],
+            &self.device,
+        ))
+    }
+
+    /// Cast tensor to F32 if needed (for sampling which requires f32 to_vec)
+    fn ensure_f32(&self, t: &Tensor<R>) -> Result<Tensor<R>> {
+        if t.dtype() != DType::F32 {
+            let client = R::default_client(t.device());
+            client
+                .cast(t, DType::F32)
+                .map_err(|e| anyhow!("Cast to F32 failed: {}", e))
+        } else {
+            Ok(t.clone())
+        }
     }
 
     /// Sample next token from logits
     fn sample_token(&self, logits: &Tensor<R>, gen_config: &GenerationConfig) -> Result<u32> {
-        // Get last position logits
+        // Get last position logits: [B, S, V] -> [V]
         let seq_len = logits.dim(1)?;
         let narrowed = logits.narrow(1, seq_len - 1, 1)?;
-        let squeezed = narrowed.squeeze(Some(1));
-        let last_logits = squeezed.contiguous();
+        // Squeeze both batch and seq dims to get [V]
+        let squeezed = narrowed.squeeze(Some(1)).squeeze(Some(0));
+        let last_logits = self.ensure_f32(&squeezed.contiguous())?;
 
         if gen_config.is_greedy() {
-            tracing::debug!("sample_token: doing argmax");
-
-            // Debug: print top-5 logits
-            if std::env::var("DEBUG_LOGITS").is_ok() {
-                let logits_vec: Vec<f32> = last_logits.to_vec();
-                let mut indexed: Vec<(usize, f32)> =
-                    logits_vec.iter().copied().enumerate().collect();
-                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                eprintln!(
-                    "[DEBUG_LOGITS] Top-5: {:?}",
-                    &indexed[..5.min(indexed.len())]
-                );
-                eprintln!(
-                    "[DEBUG_LOGITS] Logits range: min={:.4}, max={:.4}",
-                    logits_vec.iter().cloned().fold(f32::INFINITY, f32::min),
-                    logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
-                );
-                if logits_vec.len() > 13 {
-                    let newline_logit = logits_vec[13];
-                    let newline_rank = indexed.iter().position(|(id, _)| *id == 13);
-                    eprintln!(
-                        "[DEBUG_LOGITS] Token 13 (newline): logit={:.4}, rank={:?}",
-                        newline_logit, newline_rank
-                    );
-                }
-            }
-
-            // Argmax for greedy decoding - dim 0 since we squeezed to 1D, keepdim=false
+            // Argmax for greedy decoding - dim 0 since we squeezed to 1D [V], keepdim=false
             let token = last_logits.argmax(0, false)?;
-
-            let token_vec: Vec<i32> = token.to_vec();
-            let token_id = token_vec[0];
-            tracing::debug!("sample_token: argmax done, token = {}", token_id);
-            Ok(token_id as u32)
+            let token_vec: Vec<i64> = token.to_vec();
+            Ok(token_vec[0] as u32)
         } else {
             // Temperature sampling
             let scaled = if gen_config.temperature != 1.0 {

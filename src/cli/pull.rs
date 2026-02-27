@@ -33,7 +33,7 @@ pub async fn pull(repo: String, file: Option<String>, output: Option<PathBuf>) -
         println!("Downloaded to: {}", dest.display());
     } else {
         // Download common model files
-        let model_name = repo.split('/').last().unwrap_or(&repo);
+        let model_name = repo.split('/').next_back().unwrap_or(&repo);
         let model_dir = output_dir.join(model_name);
         std::fs::create_dir_all(&model_dir)?;
 

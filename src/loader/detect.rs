@@ -152,14 +152,14 @@ mod tests {
     #[test]
     fn test_format_detection_safetensors() {
         // Test file extension detection
-        let path = Path::new("/models/test.safetensors");
+        let _path = Path::new("/models/test.safetensors");
         // This would fail since file doesn't exist, but logic is tested
     }
 
     #[test]
     fn test_format_detection_gguf() {
         // Test file extension detection
-        let path = Path::new("/models/test.gguf");
+        let _path = Path::new("/models/test.gguf");
         // This would fail since file doesn't exist, but logic is tested
     }
 }

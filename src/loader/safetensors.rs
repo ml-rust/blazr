@@ -518,11 +518,6 @@ fn get_available_vram<R: Runtime>(device: &R::Device) -> Option<u64> {
     }
 }
 
-#[cfg(not(feature = "cuda"))]
-fn get_available_vram<R: Runtime>(_device: &R::Device) -> Option<u64> {
-    None
-}
-
 /// Detect layer prefix from detected config
 #[cfg(feature = "cuda")]
 fn detect_layer_prefix(detected: &DetectedConfig) -> String {

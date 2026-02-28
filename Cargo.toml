@@ -35,6 +35,10 @@ serde_yaml = "0.9"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Byte casting for tensor creation from raw bytes
+bytemuck = "1"
+half = "2"
+
 # Utilities
 anyhow = "1"
 tracing = "0.1"

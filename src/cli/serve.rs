@@ -23,7 +23,7 @@ pub async fn serve(model: Option<String>, port: u16, host: String) -> Result<()>
 
     // Initialize device
     #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new();
+    let device = boostr::CudaDevice::new(0);
     #[cfg(not(feature = "cuda"))]
     let device = boostr::CpuDevice::new();
 

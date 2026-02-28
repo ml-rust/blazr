@@ -174,7 +174,7 @@ pub fn load_safetensors_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path
 where
     R::Client: TensorOps<R>,
 {
-    use boostr::runtime::cpu::{cpu_device, CpuRuntime};
+    use boostr::{CpuDevice, CpuRuntime};
 
     let path = path.as_ref();
 
@@ -209,18 +209,23 @@ where
 
     // Calculate how many layers fit
     let gpu_layers = options.gpu_layers.unwrap_or_else(|| {
-        let device_map = LayerDeviceMap::from_vram_budget(
-            total_layers,
-            model_bytes,
-            vram_limit,
-            options.kv_cache_reserve,
-        );
-        device_map.primary_layers
+        // Estimate layers that fit: usable_vram / bytes_per_layer
+        let usable_vram = vram_limit.saturating_sub(options.kv_cache_reserve);
+        let bytes_per_layer = if total_layers > 0 {
+            model_bytes / total_layers as u64
+        } else {
+            model_bytes
+        };
+        if bytes_per_layer == 0 {
+            total_layers
+        } else {
+            ((usable_vram / bytes_per_layer) as usize).min(total_layers)
+        }
     });
 
     // Create device map
-    let device_map =
-        LayerDeviceMap::new(gpu_layers, total_layers).with_prefix(&detect_layer_prefix(&detected));
+    let device_map = LayerDeviceMap::with_gpu_layers(total_layers, gpu_layers);
+    let layer_prefix = detect_layer_prefix(&detected);
 
     // Check if model will fit on GPU at all
     // Even with staging, the entire model must fit on GPU for inference
@@ -251,7 +256,7 @@ where
     );
 
     let mut var_map = VarMap::<R>::new();
-    let cpu_dev = cpu_device();
+    let cpu_dev = CpuDevice::new();
 
     let tensor_names = loader.tensor_names();
     let mut gpu_direct_count = 0;
@@ -260,13 +265,20 @@ where
     let mut staged_bytes = 0u64;
 
     // First pass: collect tensors by placement
+    // Determine placement by extracting the layer index from the tensor name.
+    // Tensors without a layer index (embeddings, lm_head) go directly to GPU.
     let mut primary_tensors = Vec::new();
     let mut secondary_tensors = Vec::new();
 
     for name in tensor_names {
-        match device_map.placement(&name) {
-            DevicePlacement::Primary => primary_tensors.push(name),
-            DevicePlacement::Secondary => secondary_tensors.push(name),
+        let layer_idx = extract_layer_index(&name, &layer_prefix);
+        let placement = match layer_idx {
+            Some(idx) => device_map.placement(idx),
+            None => DevicePlacement::Gpu, // embeddings/lm_head go to GPU
+        };
+        match placement {
+            DevicePlacement::Gpu => primary_tensors.push(name),
+            DevicePlacement::Cpu => secondary_tensors.push(name),
         }
     }
 
@@ -401,7 +413,7 @@ where
 
 /// Create a GPU tensor from raw bytes
 #[cfg(feature = "cuda")]
-fn create_gpu_tensor_from_bytes<R: Runtime>(
+fn create_gpu_tensor_from_bytes<R: Runtime<DType = DType>>(
     bytes: &[u8],
     shape: &[usize],
     dtype: DType,
@@ -414,55 +426,16 @@ where
 
     match dtype {
         DType::F32 => {
-            let data: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
-            Tensor::from_vec(device, data, shape)
-                .map_err(|e| anyhow!("Failed to create F32 tensor: {}", e))
+            let data: &[f32] = bytemuck::cast_slice(bytes);
+            Ok(Tensor::from_slice(data, shape, device))
         }
         DType::BF16 => {
-            // For BF16, we need to use the raw bytes directly
-            let client =
-                R::client(device).map_err(|e| anyhow!("Failed to get client: {}", e.message))?;
-            let numel = shape.iter().product();
-
-            let output_ptr = client
-                .allocate_bf16(numel)
-                .map_err(|e| anyhow!("Failed to allocate BF16: {}", e.message))?;
-            client
-                .copy_to_device_bf16(output_ptr, bytes)
-                .map_err(|e| anyhow!("Failed to copy BF16 to device: {}", e.message))?;
-
-            Ok(unsafe {
-                Tensor::from_ptr_owned(
-                    output_ptr,
-                    boostr::tensor::Shape::new(shape.to_vec()),
-                    DType::BF16,
-                    device.clone(),
-                )
-            })
+            let data: &[half::bf16] = bytemuck::cast_slice(bytes);
+            Ok(Tensor::from_slice(data, shape, device))
         }
         DType::F16 => {
-            let client =
-                R::client(device).map_err(|e| anyhow!("Failed to get client: {}", e.message))?;
-            let numel = shape.iter().product();
-
-            let output_ptr = client
-                .allocate_f16(numel)
-                .map_err(|e| anyhow!("Failed to allocate F16: {}", e.message))?;
-            client
-                .copy_to_device_f16(output_ptr, bytes)
-                .map_err(|e| anyhow!("Failed to copy F16 to device: {}", e.message))?;
-
-            Ok(unsafe {
-                Tensor::from_ptr_owned(
-                    output_ptr,
-                    boostr::tensor::Shape::new(shape.to_vec()),
-                    DType::F16,
-                    device.clone(),
-                )
-            })
+            let data: &[half::f16] = bytemuck::cast_slice(bytes);
+            Ok(Tensor::from_slice(data, shape, device))
         }
         _ => Err(anyhow!("Unsupported dtype for GPU transfer: {:?}", dtype)),
     }
@@ -493,7 +466,8 @@ fn get_available_vram<R: Runtime>(device: &R::Device) -> Option<u64> {
     if R::name() == "CUDA" {
         // We need to downcast to CudaDevice to call memory_info()
         // Since we're compiled with CUDA feature, we can use the CUDA-specific function
-        use boostr::runtime::cuda::CudaDevice;
+        use boostr::runtime::Device;
+        use boostr::CudaDevice;
 
         // Get device ID from the device
         let device_id = device.id();
@@ -509,13 +483,28 @@ fn get_available_vram<R: Runtime>(device: &R::Device) -> Option<u64> {
                 Some(free)
             }
             Err(e) => {
-                tracing::warn!("Failed to query GPU memory: {}", e.message);
+                tracing::warn!("Failed to query GPU memory: {}", e);
                 None
             }
         }
     } else {
         None
     }
+}
+
+/// Extract the layer index from a tensor name given the layer prefix.
+///
+/// For example, with prefix "model.layers.", the tensor name
+/// "model.layers.3.self_attn.q_proj.weight" returns Some(3).
+/// Returns None for tensors that are not part of a numbered layer
+/// (e.g. embeddings, lm_head, norm).
+#[cfg(feature = "cuda")]
+fn extract_layer_index(tensor_name: &str, layer_prefix: &str) -> Option<usize> {
+    let rest = tensor_name.strip_prefix(layer_prefix)?;
+    // rest is now something like "3.self_attn.q_proj.weight"
+    let dot_pos = rest.find('.')?;
+    let index_str = &rest[..dot_pos];
+    index_str.parse::<usize>().ok()
 }
 
 /// Detect layer prefix from detected config

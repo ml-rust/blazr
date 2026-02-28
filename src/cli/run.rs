@@ -64,7 +64,7 @@ async fn run_cuda(
     num_ctx: usize,
 ) -> Result<()> {
     // Initialize device
-    let device = boostr::CudaDevice::new();
+    let device = boostr::CudaDevice::new(0);
 
     tracing::info!("Loading model: {}", model);
 

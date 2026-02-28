@@ -61,7 +61,8 @@ where
         + UnaryOps<R>
         + ActivationOps<R>
         + BinaryOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::DequantOps<R>,
 {
     /// Create a new scheduler
     pub fn new(model_dir: PathBuf, device: R::Device) -> Self {

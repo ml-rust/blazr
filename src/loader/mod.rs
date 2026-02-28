@@ -34,7 +34,7 @@ pub fn load_model<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let path = path.as_ref();
     let source = detect_model_source(path)?;
@@ -54,7 +54,7 @@ pub fn load_model_with_config<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<LoadedModel<R>>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let weights_path = weights_path.as_ref();
     let source = detect_model_source(weights_path)?;
@@ -85,7 +85,7 @@ pub fn load_model_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path>>(
     options: OffloadingOptions,
 ) -> Result<(LoadedModel<R>, BlazrConfig, OffloadingInfo)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let path = path.as_ref();
     let source = detect_model_source(path)?;

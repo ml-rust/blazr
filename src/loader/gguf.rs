@@ -22,7 +22,7 @@ pub fn load_gguf<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let path = path.as_ref();
 
@@ -51,7 +51,7 @@ pub fn load_gguf_with_config<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<LoadedModel<R>>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let path = path.as_ref();
 
@@ -76,7 +76,7 @@ pub fn load_gguf_with_tokenizer<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<(LoadedModel<R>, BlazrConfig, crate::tokenizer::GgufTokenizer)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let path = path.as_ref();
 

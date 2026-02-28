@@ -42,7 +42,7 @@ pub fn load_safetensors<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     load_safetensors_regular(path, device)
 }
@@ -53,7 +53,7 @@ fn load_safetensors_regular<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let path = path.as_ref();
 
@@ -172,7 +172,7 @@ pub fn load_safetensors_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path
     options: OffloadingOptions,
 ) -> Result<(LoadedModel<R>, BlazrConfig, OffloadingInfo)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     use boostr::{CpuDevice, CpuRuntime};
 
@@ -395,7 +395,7 @@ pub fn load_safetensors_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path
     _options: OffloadingOptions,
 ) -> Result<(LoadedModel<R>, BlazrConfig, OffloadingInfo)>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let (model, config) = load_safetensors(path, device)?;
     Ok((
@@ -420,7 +420,7 @@ fn create_gpu_tensor_from_bytes<R: Runtime<DType = DType>>(
     device: &R::Device,
 ) -> Result<boostr::tensor::Tensor<R>>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     use boostr::tensor::Tensor;
 
@@ -576,7 +576,7 @@ fn load_tensors_from_loader<R: Runtime<DType = DType>>(
     device: &R::Device,
 ) -> Result<VarMap<R>>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let mut var_map = VarMap::<R>::new();
 
@@ -610,7 +610,7 @@ pub fn load_safetensors_with_config<R: Runtime<DType = DType>, P: AsRef<Path>>(
     device: &R::Device,
 ) -> Result<LoadedModel<R>>
 where
-    R::Client: TensorOps<R>,
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let path = path.as_ref();
 

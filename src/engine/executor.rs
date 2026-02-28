@@ -10,6 +10,7 @@ use futures::Stream;
 
 use boostr::inference::{LayeredKvCache, LayeredSsmState};
 use boostr::model::LoadedModel;
+use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, ScalarOps, Tensor,
@@ -44,7 +45,8 @@ where
         + UnaryOps<R>
         + ActivationOps<R>
         + BinaryOps<R>
-        + TypeConversionOps<R>,
+        + TypeConversionOps<R>
+        + ModelClient<R>,
 {
     /// Create a new executor
     ///
@@ -222,7 +224,11 @@ where
                 let num_layers = self.model.num_layers();
                 let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
                 let head_dim = self.model.head_dim().unwrap_or(64);
-                let initial_capacity = self.num_ctx;
+                // Allocate exactly enough for prompt + max generation tokens.
+                // This avoids expensive contiguous() copies when flash attention
+                // reads the narrowed KV cache view (narrow of a larger buffer is
+                // non-contiguous across heads).
+                let initial_capacity = (prompt_tokens.len() + max_tokens).min(max_seq_len);
 
                 let kv_dtype = parse_dtype(self.config.dtype())?;
 

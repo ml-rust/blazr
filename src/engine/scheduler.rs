@@ -10,6 +10,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use tokio::sync::RwLock;
 
+use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, ScalarOps, UnaryOps,
@@ -59,7 +60,8 @@ where
         + NormalizationOps<R>
         + UnaryOps<R>
         + ActivationOps<R>
-        + BinaryOps<R>,
+        + BinaryOps<R>
+        + ModelClient<R>,
 {
     /// Create a new scheduler
     pub fn new(model_dir: PathBuf, device: R::Device) -> Self {

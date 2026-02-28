@@ -197,7 +197,7 @@ where
                 for i in 0..max_tokens {
                     tracing::debug!("Generating token {} / {}", i + 1, max_tokens);
 
-                    let next_token = self.sample_token(&logits, gen_config)?;
+                    let next_token = self.sample_token_stochastic(&logits, gen_config)?;
 
                     if self.tokenizer.is_eos(next_token) {
                         tracing::debug!("Hit EOS token, stopping generation");
@@ -238,34 +238,90 @@ where
                 ).map_err(|e| anyhow!("Failed to create KV cache: {}", e))?;
 
                 // Prefill
-                tracing::debug!("Starting prefill forward pass...");
+                let t0 = std::time::Instant::now();
                 let mut logits = self.model.forward_with_kv_cache(&input, &mut kv_cache, 0)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
-                tracing::debug!("Prefill complete (kv_cache seq_len={})", kv_cache.seq_len());
+                tracing::info!("Prefill: {:?} (seq_len={}, kv={})", t0.elapsed(), prompt_tokens.len(), kv_cache.seq_len());
 
-                // Generate tokens
-                for i in 0..max_tokens {
-                    tracing::debug!("Generating token {} / {}", i + 1, max_tokens);
+                if gen_config.is_greedy() {
+                    // ── Pipelined greedy decode: keep token on GPU, overlap forward with CPU sync ──
+                    //
+                    // Pipeline:
+                    //   1. argmax on GPU (async) → token_gpu
+                    //   2. reshape token_gpu to [1,1] → next forward (async, ALL GPU)
+                    //   3. to_vec token_gpu (SYNC) → CPU gets token_id
+                    //   4. EOS check + yield on CPU (while GPU runs step 2)
+                    //
+                    // The GPU is never idle: the next forward launches BEFORE we sync.
 
-                    let next_token = self.sample_token(&logits, gen_config)?;
+                    for i in 0..max_tokens {
+                        let t1 = std::time::Instant::now();
 
-                    if self.tokenizer.is_eos(next_token) {
-                        tracing::debug!("Hit EOS token, stopping generation");
-                        break;
+                        // Step 1: argmax stays on GPU (no sync)
+                        let token_gpu = self.argmax_on_gpu(&logits)?;
+
+                        // Step 2: record event on compute stream AFTER argmax
+                        // This marks the point where token_gpu is ready to read.
+                        let event = token_gpu.record_event()
+                            .map_err(|e| anyhow!("Record event failed: {}", e))?;
+
+                        // Step 3: launch next forward BEFORE syncing token to CPU
+                        // Reshape [1] i64 → [1, 1] for embedding input
+                        let next_input = token_gpu.reshape(&[1, 1])?;
+                        let position = kv_cache.seq_len();
+                        let next_logits = self.model.forward_with_kv_cache(&next_input, &mut kv_cache, position)
+                            .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
+                        let fwd_time = t1.elapsed();
+
+                        // Step 4: NOW sync to get token_id using copy stream + event
+                        // Copy stream waits on event (fires after argmax, before next forward)
+                        // Compute stream continues running next forward concurrently.
+                        let t2 = std::time::Instant::now();
+                        let next_token = Self::read_token_id(&token_gpu, event)?;
+                        let sync_time = t2.elapsed();
+
+                        tracing::info!("Token {}: fwd_launch={:?} sync={:?} total={:?}", i+1, fwd_time, sync_time, t1.elapsed());
+
+                        if self.tokenizer.is_eos(next_token) {
+                            tracing::debug!("Hit EOS token, stopping generation");
+                            break;
+                        }
+
+                        let text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
+                        yield Ok(GeneratedToken {
+                            token_id: next_token,
+                            text,
+                            logprob: None,
+                        });
+
+                        logits = next_logits;
                     }
+                } else {
+                    // ── Non-greedy decode: needs CPU for stochastic sampling ──
+                    for i in 0..max_tokens {
+                        let t1 = std::time::Instant::now();
+                        let next_token = self.sample_token_stochastic(&logits, gen_config)?;
+                        let sample_time = t1.elapsed();
 
-                    let text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
+                        if self.tokenizer.is_eos(next_token) {
+                            tracing::debug!("Hit EOS token, stopping generation");
+                            break;
+                        }
 
-                    yield Ok(GeneratedToken {
-                        token_id: next_token,
-                        text,
-                        logprob: None,
-                    });
+                        let text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
+                        yield Ok(GeneratedToken {
+                            token_id: next_token,
+                            text,
+                            logprob: None,
+                        });
 
-                    let next_input = Tensor::from_slice(&[next_token as i64], &[1, 1], &self.device);
-                    let position = kv_cache.seq_len();
-                    logits = self.model.forward_with_kv_cache(&next_input, &mut kv_cache, position)
-                        .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
+                        let t2 = std::time::Instant::now();
+                        let next_input = Tensor::from_slice(&[next_token as i64], &[1, 1], &self.device);
+                        let position = kv_cache.seq_len();
+                        logits = self.model.forward_with_kv_cache(&next_input, &mut kv_cache, position)
+                            .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
+                        tracing::info!("Token {}: fwd_launch={:?} sample={:?}", i+1, t2.elapsed(), sample_time);
+                    }
                 }
             }
 
@@ -323,42 +379,55 @@ where
         }
     }
 
-    /// Sample next token from logits
-    fn sample_token(&self, logits: &Tensor<R>, gen_config: &GenerationConfig) -> Result<u32> {
-        // Get last position logits: [B, S, V] -> [V]
+    /// Greedy argmax on GPU — returns the token as a GPU tensor [1] i64.
+    /// No CPU sync happens here; the result stays on device.
+    fn argmax_on_gpu(&self, logits: &Tensor<R>) -> Result<Tensor<R>> {
+        let seq_len = logits.dim(1).map_err(|e| anyhow!("{}", e))?;
+        let narrowed = logits
+            .narrow(1, seq_len - 1, 1)
+            .map_err(|e| anyhow!("{}", e))?;
+        let squeezed = narrowed.squeeze(Some(1)).squeeze(Some(0));
+        squeezed.argmax(0, false).map_err(|e| anyhow!("{}", e))
+    }
+
+    /// Read a scalar i64 GPU tensor to CPU using the pipelined copy stream.
+    /// Only syncs the copy stream — compute stream continues running.
+    fn read_token_id(token_gpu: &Tensor<R>, event: u64) -> Result<u32> {
+        let v: Vec<i64> = token_gpu
+            .to_vec_pipelined(event)
+            .map_err(|e| anyhow!("Pipelined D2H copy failed: {}", e))?;
+        Ok(v[0] as u32)
+    }
+
+    /// Sample next token from logits (non-greedy path — requires CPU)
+    fn sample_token_stochastic(
+        &self,
+        logits: &Tensor<R>,
+        gen_config: &GenerationConfig,
+    ) -> Result<u32> {
         let seq_len = logits.dim(1)?;
         let narrowed = logits.narrow(1, seq_len - 1, 1)?;
-        // Squeeze both batch and seq dims to get [V]
         let squeezed = narrowed.squeeze(Some(1)).squeeze(Some(0));
         let last_logits = self.ensure_f32(&squeezed.contiguous())?;
 
-        if gen_config.is_greedy() {
-            // Argmax for greedy decoding - dim 0 since we squeezed to 1D [V], keepdim=false
-            let token = last_logits.argmax(0, false)?;
-            let token_vec: Vec<i64> = token.to_vec();
-            Ok(token_vec[0] as u32)
+        // Temperature sampling
+        let scaled = if gen_config.temperature != 1.0 {
+            last_logits.scale(1.0 / gen_config.temperature as f64)?
         } else {
-            // Temperature sampling
-            let scaled = if gen_config.temperature != 1.0 {
-                last_logits.scale(1.0 / gen_config.temperature as f64)?
-            } else {
-                last_logits
-            };
+            last_logits
+        };
 
-            // Softmax
-            let probs = scaled.softmax(-1)?;
+        let probs = scaled.softmax(-1)?;
 
-            // Top-p (nucleus) sampling
-            let token = if gen_config.top_p < 1.0 {
-                self.top_p_sample(&probs, gen_config.top_p)?
-            } else if let Some(k) = gen_config.top_k {
-                self.top_k_sample(&probs, k)?
-            } else {
-                self.multinomial_sample(&probs)?
-            };
+        let token = if gen_config.top_p < 1.0 {
+            self.top_p_sample(&probs, gen_config.top_p)?
+        } else if let Some(k) = gen_config.top_k {
+            self.top_k_sample(&probs, k)?
+        } else {
+            self.multinomial_sample(&probs)?
+        };
 
-            Ok(token)
-        }
+        Ok(token)
     }
 
     /// Multinomial sampling from probabilities

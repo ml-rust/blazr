@@ -88,6 +88,19 @@ pub struct InferenceConfig {
     /// Maximum batch size for batched inference
     #[serde(default = "default_max_batch_size")]
     pub max_batch_size: usize,
+
+    /// Enable paged attention (vLLM-style block-based KV cache)
+    #[serde(default)]
+    pub paged_attention: bool,
+
+    /// Block size for paged attention (tokens per block)
+    #[serde(default = "default_block_size")]
+    pub block_size: usize,
+
+    /// Number of KV cache blocks to pre-allocate for paged attention.
+    /// If 0, auto-computed from max_context_len.
+    #[serde(default)]
+    pub num_blocks: usize,
 }
 
 fn default_dtype() -> String {
@@ -102,6 +115,10 @@ fn default_max_batch_size() -> usize {
     1
 }
 
+fn default_block_size() -> usize {
+    16
+}
+
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
@@ -112,6 +129,9 @@ impl Default for InferenceConfig {
             flash_attention: false, // TEMP: Disabled for debugging
             kv_cache: true,
             max_batch_size: 1,
+            paged_attention: false,
+            block_size: default_block_size(),
+            num_blocks: 0,
         }
     }
 }

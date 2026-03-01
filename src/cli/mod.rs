@@ -62,6 +62,10 @@ pub enum Commands {
         /// dynamically if needed (up to the model's max_position_embeddings).
         #[arg(long, default_value = "2048")]
         num_ctx: usize,
+
+        /// Use paged attention (vLLM-style block-based KV cache)
+        #[arg(long)]
+        paged_attention: bool,
     },
 
     /// Start inference server
@@ -138,6 +142,10 @@ pub enum Commands {
         /// dynamically if needed (up to the model's max_position_embeddings).
         #[arg(long, default_value = "2048")]
         num_ctx: usize,
+
+        /// Use paged attention (vLLM-style block-based KV cache)
+        #[arg(long)]
+        paged_attention: bool,
     },
 
     /// Decode a file with a model (for testing)

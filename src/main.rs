@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
             gpu_layers,
             cpu,
             num_ctx,
+            paged_attention,
         } => {
             blazr::cli::run(
                 model,
@@ -37,6 +38,7 @@ async fn main() -> Result<()> {
                 gpu_layers,
                 cpu,
                 num_ctx,
+                paged_attention,
             )
             .await?;
         }
@@ -60,6 +62,7 @@ async fn main() -> Result<()> {
             gpu_layers,
             cpu,
             num_ctx,
+            paged_attention,
         } => {
             blazr::cli::run(
                 model,
@@ -70,6 +73,7 @@ async fn main() -> Result<()> {
                 gpu_layers,
                 cpu,
                 num_ctx,
+                paged_attention,
             )
             .await?;
         }

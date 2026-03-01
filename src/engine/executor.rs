@@ -8,6 +8,8 @@ use anyhow::{anyhow, Result};
 use async_stream::stream;
 use futures::Stream;
 
+use boostr::inference::kv_cache::LayeredPagedKvCache;
+use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
 use boostr::inference::{LayeredKvCache, LayeredSsmState};
 use boostr::model::LoadedModel;
 use boostr::model::ModelClient;
@@ -118,8 +120,76 @@ where
                 .model
                 .forward_with_ssm_state(&warmup_input, &mut ssm_state)
                 .map_err(|e| anyhow!("Warmup forward pass failed: {}", e))?;
+        } else if self.config.inference.paged_attention {
+            // Llama: warmup with paged KV cache (exercises paged decode + reshape_and_cache kernels)
+            let num_layers = self.model.num_layers();
+            let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
+            let head_dim = self.model.head_dim().unwrap_or(64);
+            let block_size = self.config.inference.block_size;
+            let kv_dtype = parse_dtype(self.config.dtype())?;
+
+            let num_blocks = 4; // enough for warmup
+            let allocator = CpuBlockAllocator::new(num_blocks, block_size);
+
+            let mut paged_cache = LayeredPagedKvCache::new(
+                num_layers,
+                num_blocks,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                kv_dtype,
+                &self.device,
+            );
+
+            // Prefill warmup (1 token) — warms up paged_flash_attention + reshape_and_cache
+            paged_cache
+                .allocate_blocks(1, &allocator)
+                .map_err(|e| anyhow!("Warmup paged block alloc failed: {}", e))?;
+            let slot_vec = paged_cache
+                .compute_slot_mapping(0, 1)
+                .map_err(|e| anyhow!("Warmup slot mapping failed: {}", e))?;
+            let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
+            let bt_vec = paged_cache.block_table_device_format(0);
+            let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device);
+            paged_cache.set_seq_len(1);
+
+            let _ = self
+                .model
+                .forward_with_paged_kv_cache(
+                    &warmup_input,
+                    &paged_cache,
+                    &slot_mapping,
+                    &block_table,
+                    1,
+                    0,
+                )
+                .map_err(|e| anyhow!("Warmup paged prefill failed: {}", e))?;
+
+            // Decode warmup (1 token at position 1) — warms up paged_decode_attention kernel
+            paged_cache
+                .allocate_blocks(1, &allocator)
+                .map_err(|e| anyhow!("Warmup paged decode block alloc failed: {}", e))?;
+            let slot_vec = paged_cache
+                .compute_slot_mapping(1, 1)
+                .map_err(|e| anyhow!("Warmup decode slot mapping failed: {}", e))?;
+            let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
+            let bt_vec = paged_cache.block_table_device_format(0);
+            let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device);
+            paged_cache.set_seq_len(2);
+
+            let _ = self
+                .model
+                .forward_with_paged_kv_cache(
+                    &warmup_input,
+                    &paged_cache,
+                    &slot_mapping,
+                    &block_table,
+                    2,
+                    1,
+                )
+                .map_err(|e| anyhow!("Warmup paged decode failed: {}", e))?;
         } else {
-            // Llama: warmup with KV cache
+            // Llama: warmup with contiguous KV cache
             let num_layers = self.model.num_layers();
             let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
             let head_dim = self.model.head_dim().unwrap_or(64);
@@ -141,8 +211,24 @@ where
             let _ = self
                 .model
                 .forward_with_kv_cache(&warmup_input, &mut kv_cache, 0)
-                .map_err(|e| anyhow!("Warmup forward pass failed: {}", e))?;
+                .map_err(|e| anyhow!("Warmup prefill forward pass failed: {}", e))?;
+
+            // Decode warmup (1 token at position 1) — warms up decode_attention + GEMV kernels
+            let _ = self
+                .model
+                .forward_with_kv_cache(&warmup_input, &mut kv_cache, 1)
+                .map_err(|e| anyhow!("Warmup decode forward pass failed: {}", e))?;
         }
+
+        // Warmup argmax + pipelined D2H copy to JIT those kernels too
+        // Create a small dummy logits tensor matching the vocab size
+        let vocab_size = self.model.vocab_size();
+        let dummy_logits = Tensor::zeros(&[1, 1, vocab_size], DType::F32, &self.device);
+        let token_gpu = self.argmax_on_gpu(&dummy_logits)?;
+        let event = token_gpu
+            .record_event()
+            .map_err(|e| anyhow!("Warmup record event failed: {}", e))?;
+        let _ = Self::read_token_id(&token_gpu, event)?;
 
         tracing::debug!("Model warmup complete in {:?}", start.elapsed());
         Ok(())
@@ -219,8 +305,111 @@ where
                     logits = self.model.forward_with_ssm_state(&next_input, &mut ssm_state)
                         .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 }
+            } else if self.config.inference.paged_attention {
+                // ── Llama path: Paged KV cache ──
+                let num_layers = self.model.num_layers();
+                let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
+                let head_dim = self.model.head_dim().unwrap_or(64);
+                let block_size = self.config.inference.block_size;
+                let kv_dtype = parse_dtype(self.config.dtype())?;
+
+                // Compute number of blocks needed
+                let total_tokens = prompt_tokens.len() + max_tokens;
+                let num_blocks = if self.config.inference.num_blocks > 0 {
+                    self.config.inference.num_blocks
+                } else {
+                    BlockTable::blocks_needed(total_tokens, block_size) + 4 // small headroom
+                };
+
+                let allocator = CpuBlockAllocator::new(num_blocks, block_size);
+
+                let mut paged_cache = LayeredPagedKvCache::new(
+                    num_layers,
+                    num_blocks,
+                    block_size,
+                    num_kv_heads,
+                    head_dim,
+                    kv_dtype,
+                    &self.device,
+                );
+
+                // Allocate blocks for prompt
+                paged_cache.allocate_blocks(prompt_tokens.len(), &allocator)
+                    .map_err(|e| anyhow!("Failed to allocate blocks for prefill: {}", e))?;
+
+                // Compute slot mapping for prompt tokens
+                let slot_mapping_vec = paged_cache.compute_slot_mapping(0, prompt_tokens.len())
+                    .map_err(|e| anyhow!("Failed to compute slot mapping: {}", e))?;
+                let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prompt_tokens.len()], &self.device);
+
+                // Block table tensor [1, max_num_blocks]
+                let bt_vec = paged_cache.block_table_device_format(0);
+                let max_num_blocks = bt_vec.len();
+                let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, max_num_blocks], &self.device);
+
+                let seq_len_k = prompt_tokens.len();
+                paged_cache.set_seq_len(seq_len_k);
+
+                // Prefill
+                let t0 = std::time::Instant::now();
+                let mut logits = self.model.forward_with_paged_kv_cache(
+                    &input, &paged_cache, &slot_mapping, &block_table_tensor, seq_len_k, 0,
+                ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
+                tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), prompt_tokens.len(), num_blocks);
+
+                // Decode loop (greedy only for now to keep it simple)
+                for i in 0..max_tokens {
+                    let t1 = std::time::Instant::now();
+
+                    let next_token = if gen_config.is_greedy() {
+                        let token_gpu = self.argmax_on_gpu(&logits)?;
+                        let event = token_gpu.record_event()
+                            .map_err(|e| anyhow!("Record event failed: {}", e))?;
+                        Self::read_token_id(&token_gpu, event)?
+                    } else {
+                        self.sample_token_stochastic(&logits, gen_config)?
+                    };
+
+                    if self.tokenizer.is_eos(next_token) {
+                        tracing::debug!("Hit EOS token, stopping generation");
+                        break;
+                    }
+
+                    let text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
+                    yield Ok(GeneratedToken {
+                        token_id: next_token,
+                        text,
+                        logprob: None,
+                    });
+
+                    // Allocate block if needed for new token
+                    let cur_seq_len = paged_cache.seq_len();
+                    paged_cache.allocate_blocks(1, &allocator)
+                        .map_err(|e| anyhow!("Failed to allocate block for decode: {}", e))?;
+
+                    // Single-token slot mapping
+                    let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
+                        .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
+                    let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
+
+                    // Update block table tensor (may have grown)
+                    let bt_vec = paged_cache.block_table_device_format(0);
+                    let max_num_blocks = bt_vec.len();
+                    let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, max_num_blocks], &self.device);
+
+                    let new_seq_len_k = cur_seq_len + 1;
+                    paged_cache.set_seq_len(new_seq_len_k);
+
+                    let next_input = Tensor::from_slice(&[next_token as i64], &[1, 1], &self.device);
+                    logits = self.model.forward_with_paged_kv_cache(
+                        &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
+                        new_seq_len_k, cur_seq_len,
+                    ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
+
+                    tracing::info!("Paged token {}: {:?}", i + 1, t1.elapsed());
+                }
             } else {
-                // ── Llama path: KV cache ──
+                // ── Llama path: contiguous KV cache ──
                 let num_layers = self.model.num_layers();
                 let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
                 let head_dim = self.model.head_dim().unwrap_or(64);

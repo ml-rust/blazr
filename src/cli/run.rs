@@ -27,6 +27,7 @@ pub async fn run(
     _gpu_layers: i32,
     use_cpu: bool,
     num_ctx: usize,
+    paged_attention: bool,
 ) -> Result<()> {
     if use_cpu {
         run_cpu(model, prompt, max_tokens, temperature, top_p, num_ctx).await
@@ -41,6 +42,7 @@ pub async fn run(
                 top_p,
                 _gpu_layers,
                 num_ctx,
+                paged_attention,
             )
             .await
         }
@@ -62,6 +64,7 @@ async fn run_cuda(
     top_p: f32,
     gpu_layers: i32,
     num_ctx: usize,
+    paged_attention: bool,
 ) -> Result<()> {
     // Initialize device
     let device = boostr::CudaDevice::new(0);
@@ -96,10 +99,29 @@ async fn run_cuda(
     // Create tokenizer
     let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
 
+    // Enable paged attention if requested
+    let mut config = config;
+    if paged_attention {
+        config.inference.paged_attention = true;
+        tracing::info!(
+            "Paged attention enabled (block_size={})",
+            config.inference.block_size
+        );
+    }
+
+    // Pre-load all CUDA PTX modules to avoid JIT compilation on first use
+    {
+        let client = boostr::CudaClient::new(device.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to create CUDA client for preload: {}", e))?;
+        boostr::preload_inference_modules(&client)
+            .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
+        tracing::debug!("Pre-loaded all CUDA PTX modules");
+    }
+
     // Create executor with num_ctx for KV cache initial capacity
     let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?;
 
-    // Warm up kernels to avoid first-run latency (~90ms savings on first generation)
+    // Warm up kernels to avoid first-run latency
     executor.warmup()?;
     tracing::info!("Model ready");
 

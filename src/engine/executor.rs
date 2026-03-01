@@ -357,56 +357,112 @@ where
                 ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
                 tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), prompt_tokens.len(), num_blocks);
 
-                // Decode loop (greedy only for now to keep it simple)
-                for i in 0..max_tokens {
-                    let t1 = std::time::Instant::now();
+                if gen_config.is_greedy() {
+                    // ── Pipelined paged greedy decode ──
+                    //
+                    // Pipeline:
+                    //   1. argmax on GPU (async) → token_gpu
+                    //   2. record event marking argmax completion
+                    //   3. block management (CPU) — doesn't need token value, only seq_len
+                    //   4. reshape token_gpu to [1,1] → launch forward (GPU, async)
+                    //   5. read token via copy stream (overlapped with forward)
+                    //   6. EOS check + yield on CPU
 
-                    let next_token = if gen_config.is_greedy() {
+                    for i in 0..max_tokens {
+                        let t1 = std::time::Instant::now();
+
+                        // Step 1: argmax stays on GPU (no sync)
                         let token_gpu = self.argmax_on_gpu(&logits)?;
+
+                        // Step 2: record event after argmax
                         let event = token_gpu.record_event()
                             .map_err(|e| anyhow!("Record event failed: {}", e))?;
-                        Self::read_token_id(&token_gpu, event)?
-                    } else {
-                        self.sample_token_stochastic(&logits, gen_config)?
-                    };
 
-                    if self.tokenizer.is_eos(next_token) {
-                        tracing::debug!("Hit EOS token, stopping generation");
-                        break;
+                        // Step 3: block management (CPU, independent of token value)
+                        let cur_seq_len = paged_cache.seq_len();
+                        paged_cache.allocate_blocks(1, &allocator)
+                            .map_err(|e| anyhow!("Failed to allocate block for decode: {}", e))?;
+
+                        let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
+                            .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
+                        let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
+
+                        let bt_vec = paged_cache.block_table_device_format(0);
+                        let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device);
+
+                        let new_seq_len_k = cur_seq_len + 1;
+                        paged_cache.set_seq_len(new_seq_len_k);
+
+                        // Step 4: launch forward with GPU token (no CPU roundtrip)
+                        let next_input = token_gpu.reshape(&[1, 1])?;
+                        let next_logits = self.model.forward_with_paged_kv_cache(
+                            &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
+                            new_seq_len_k, cur_seq_len,
+                        ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
+                        let fwd_time = t1.elapsed();
+
+                        // Step 5: read token via copy stream (overlapped with forward)
+                        let t2 = std::time::Instant::now();
+                        let next_token = Self::read_token_id(&token_gpu, event)?;
+                        let sync_time = t2.elapsed();
+
+                        tracing::info!("Paged token {}: fwd_launch={:?} sync={:?} total={:?}", i+1, fwd_time, sync_time, t1.elapsed());
+
+                        if self.tokenizer.is_eos(next_token) {
+                            tracing::debug!("Hit EOS token, stopping generation");
+                            break;
+                        }
+
+                        let text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
+                        yield Ok(GeneratedToken {
+                            token_id: next_token,
+                            text,
+                            logprob: None,
+                        });
+
+                        logits = next_logits;
                     }
+                } else {
+                    // ── Paged non-greedy decode (synchronous) ──
+                    for i in 0..max_tokens {
+                        let t1 = std::time::Instant::now();
 
-                    let text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
-                    yield Ok(GeneratedToken {
-                        token_id: next_token,
-                        text,
-                        logprob: None,
-                    });
+                        let next_token = self.sample_token_stochastic(&logits, gen_config)?;
 
-                    // Allocate block if needed for new token
-                    let cur_seq_len = paged_cache.seq_len();
-                    paged_cache.allocate_blocks(1, &allocator)
-                        .map_err(|e| anyhow!("Failed to allocate block for decode: {}", e))?;
+                        if self.tokenizer.is_eos(next_token) {
+                            tracing::debug!("Hit EOS token, stopping generation");
+                            break;
+                        }
 
-                    // Single-token slot mapping
-                    let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
-                        .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
-                    let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
+                        let text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
+                        yield Ok(GeneratedToken {
+                            token_id: next_token,
+                            text,
+                            logprob: None,
+                        });
 
-                    // Update block table tensor (may have grown)
-                    let bt_vec = paged_cache.block_table_device_format(0);
-                    let max_num_blocks = bt_vec.len();
-                    let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, max_num_blocks], &self.device);
+                        let cur_seq_len = paged_cache.seq_len();
+                        paged_cache.allocate_blocks(1, &allocator)
+                            .map_err(|e| anyhow!("Failed to allocate block for decode: {}", e))?;
 
-                    let new_seq_len_k = cur_seq_len + 1;
-                    paged_cache.set_seq_len(new_seq_len_k);
+                        let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
+                            .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
+                        let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
 
-                    let next_input = Tensor::from_slice(&[next_token as i64], &[1, 1], &self.device);
-                    logits = self.model.forward_with_paged_kv_cache(
-                        &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
-                        new_seq_len_k, cur_seq_len,
-                    ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
+                        let bt_vec = paged_cache.block_table_device_format(0);
+                        let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device);
 
-                    tracing::info!("Paged token {}: {:?}", i + 1, t1.elapsed());
+                        let new_seq_len_k = cur_seq_len + 1;
+                        paged_cache.set_seq_len(new_seq_len_k);
+
+                        let next_input = Tensor::from_slice(&[next_token as i64], &[1, 1], &self.device);
+                        logits = self.model.forward_with_paged_kv_cache(
+                            &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
+                            new_seq_len_k, cur_seq_len,
+                        ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
+
+                        tracing::info!("Paged token {}: {:?}", i + 1, t1.elapsed());
+                    }
                 }
             } else {
                 // ── Llama path: contiguous KV cache ──

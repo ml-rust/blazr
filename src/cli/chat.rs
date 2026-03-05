@@ -6,10 +6,10 @@ use anyhow::Result;
 use colored::Colorize;
 use futures::StreamExt;
 
-use crate::chat_template::{ChatMessage, ChatTemplate};
 use crate::config::GenerationConfig;
 use crate::engine::Executor;
 use crate::loader::{self, detect_model_source, ModelFormat};
+use crate::model::chat_template::{ChatMessage, ChatTemplate};
 use crate::tokenizer::{BoxedTokenizer, Tokenizer};
 
 #[cfg(feature = "cuda")]
@@ -63,7 +63,7 @@ pub async fn chat(
         "/system <msg>".dimmed(),
         "/exit".dimmed()
     );
-    eprintln!();
+    eprintln!("Use arrow keys for history navigation.\n");
 
     let mut history: Vec<ChatMessage> = Vec::new();
 
@@ -75,21 +75,41 @@ pub async fn chat(
         });
     }
 
+    // Set up rustyline
+    let history_path = dirs::data_dir()
+        .map(|d| d.join("blazr").join("chat_history.txt"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".blazr_chat_history"));
+
+    if let Some(parent) = history_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let mut rl = rustyline::DefaultEditor::new()?;
+    let _ = rl.load_history(&history_path);
+
     loop {
-        print!(">>> ");
-        io::stdout().flush()?;
+        let readline = rl.readline(">>> ");
+        let input = match readline {
+            Ok(line) => line,
+            Err(
+                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
+            ) => break,
+            Err(e) => {
+                eprintln!("Input error: {}", e);
+                break;
+            }
+        };
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
-
+        let input = input.trim().to_string();
         if input.is_empty() {
             continue;
         }
 
+        rl.add_history_entry(&input)?;
+
         // Handle slash commands
         if input.starts_with('/') {
-            match input {
+            match input.as_str() {
                 "/exit" | "/quit" => break,
                 "/clear" => {
                     history.clear();
@@ -99,14 +119,13 @@ pub async fn chat(
                             content: sys.clone(),
                         });
                     }
-                    println!("Conversation cleared.");
+                    eprintln!("Conversation cleared.");
                     continue;
                 }
                 s if s.starts_with("/system ") => {
                     let new_system = s[8..].to_string();
-                    // Replace or add system message
                     if let Some(msg) = history.iter_mut().find(|m| m.role == "system") {
-                        msg.content = new_system.clone();
+                        msg.content.clone_from(&new_system);
                     } else {
                         history.insert(
                             0,
@@ -116,11 +135,11 @@ pub async fn chat(
                             },
                         );
                     }
-                    println!("System prompt updated: {}", new_system);
+                    eprintln!("System prompt updated: {}", new_system);
                     continue;
                 }
                 _ => {
-                    println!("Unknown command. Use /clear, /system <msg>, or /exit");
+                    eprintln!("Unknown command. Use /clear, /system <msg>, or /exit");
                     continue;
                 }
             }
@@ -129,7 +148,7 @@ pub async fn chat(
         // Add user message to history
         history.push(ChatMessage {
             role: "user".to_string(),
-            content: input.to_string(),
+            content: input,
         });
 
         // Format with chat template
@@ -186,6 +205,7 @@ pub async fn chat(
         }
     }
 
+    let _ = rl.save_history(&history_path);
     Ok(())
 }
 

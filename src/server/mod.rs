@@ -2,6 +2,7 @@
 //!
 //! Provides OpenAI-compatible REST API.
 
+mod config_watch;
 mod handlers;
 mod management;
 pub mod metrics;
@@ -162,6 +163,9 @@ pub async fn start(
     let metrics_handle = metrics::install_recorder()
         .map_err(|e| anyhow::anyhow!("Failed to install Prometheus metrics recorder: {}", e))?;
     let state = Arc::new(AppState::new(scheduler, metrics_handle));
+
+    // Start config file watcher for hot-reload
+    config_watch::spawn_config_watcher(state.user_config.clone());
 
     // CORS: respect cors_enabled and cors_origins config
     let cors = if config.cors_enabled {

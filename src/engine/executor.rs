@@ -531,10 +531,18 @@ where
         let mut completion_tokens = 0usize;
         let mut finish_reason = FinishReason::Length; // default if stream ends without explicit reason
         let mut stream = std::pin::pin!(self.generate(prompt, gen_config));
+        let prefill_start = std::time::Instant::now();
+        let mut prompt_eval_duration_ms = 0u64;
 
         while let Some(token_result) = stream.next().await {
             let token = token_result?;
             completion_tokens += 1;
+
+            // First token marks end of prefill
+            if completion_tokens == 1 {
+                prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
+            }
+
             result.push_str(&token.text);
 
             if let Some(reason) = token.finish_reason {
@@ -550,6 +558,7 @@ where
                         prompt_tokens,
                         completion_tokens,
                         finish_reason: FinishReason::Stop,
+                        prompt_eval_duration_ms,
                     });
                 }
             }
@@ -560,6 +569,7 @@ where
             prompt_tokens,
             completion_tokens,
             finish_reason,
+            prompt_eval_duration_ms,
         })
     }
 
@@ -898,4 +908,6 @@ pub struct GenerationResult {
     pub completion_tokens: usize,
     /// Why generation finished
     pub finish_reason: FinishReason,
+    /// Time to first token (prefill duration) in milliseconds
+    pub prompt_eval_duration_ms: u64,
 }

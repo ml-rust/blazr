@@ -8,10 +8,12 @@
 
 mod cuda_graphs;
 pub(crate) mod executor;
+mod generate_text;
 pub(crate) mod sampling;
 mod scheduler;
 pub mod slots;
 mod types;
+mod warmup;
 
 pub use executor::Executor;
 pub use scheduler::{parse_keep_alive, Scheduler};

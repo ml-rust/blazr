@@ -10,6 +10,7 @@ use futures::Stream;
 
 use boostr::inference::kv_cache::LayeredPagedKvCache;
 use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
+use boostr::inference::prefix_cache::{PrefixCache, PrefixCacheConfig};
 use boostr::inference::{LayeredKvCache, LayeredSsmState};
 use boostr::model::LoadedModel;
 use boostr::model::ModelClient;
@@ -24,7 +25,7 @@ use crate::model::chat_template::ChatTemplate;
 use crate::tokenizer::{BoxedTokenizer, TokenizerTrait};
 
 use super::sampling::MirostatState;
-use super::types::{is_valid_json, FinishReason, GeneratedToken, GenerationResult};
+use super::types::{FinishReason, GeneratedToken};
 
 /// Inference executor
 ///
@@ -43,6 +44,8 @@ pub struct Executor<R: Runtime<DType = DType>> {
     num_ctx: usize,
     /// Chat template for this model
     chat_template: ChatTemplate,
+    /// Shared prefix cache for paged attention (persists across requests)
+    prefix_cache: Option<std::sync::Mutex<PrefixCache<CpuBlockAllocator>>>,
 }
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -67,6 +70,32 @@ where
         num_ctx: usize,
     ) -> Result<Self> {
         let chat_template = ChatTemplate::from_model_type(config.model_type());
+
+        let prefix_cache = if config.inference.prefix_cache && config.inference.paged_attention {
+            let block_size = config.inference.block_size;
+            let max_cached = config.inference.max_cached_blocks;
+            // Allocate a large shared block pool for prefix caching
+            let total_blocks = max_cached + 1024; // extra blocks for active requests
+            let allocator = CpuBlockAllocator::new(total_blocks, block_size);
+            let cache_config = PrefixCacheConfig {
+                enabled: true,
+                max_cached_blocks: max_cached,
+                block_size,
+                ..PrefixCacheConfig::default()
+            };
+            tracing::info!(
+                "Prefix cache enabled: max_cached_blocks={}, block_size={}",
+                max_cached,
+                block_size
+            );
+            Some(std::sync::Mutex::new(PrefixCache::new(
+                allocator,
+                cache_config,
+            )))
+        } else {
+            None
+        };
+
         Ok(Self {
             model: Arc::new(model),
             config,
@@ -74,6 +103,7 @@ where
             device,
             num_ctx,
             chat_template,
+            prefix_cache,
         })
     }
 
@@ -98,6 +128,13 @@ where
         self.tokenizer.as_ref()
     }
 
+    /// Get prefix cache statistics (if enabled)
+    pub fn prefix_cache_stats(&self) -> Option<boostr::inference::PrefixCacheStats> {
+        self.prefix_cache
+            .as_ref()
+            .and_then(|pc| pc.lock().ok().map(|c| c.stats()))
+    }
+
     /// Get vocabulary size
     pub fn vocab_size(&self) -> usize {
         self.model.vocab_size()
@@ -109,7 +146,6 @@ where
     }
 
     /// Get the loaded model
-    #[cfg(feature = "cuda")]
     pub(crate) fn model(&self) -> &LoadedModel<R> {
         &self.model
     }
@@ -118,147 +154,6 @@ where
     #[cfg(feature = "cuda")]
     pub(crate) fn num_ctx(&self) -> usize {
         self.num_ctx
-    }
-
-    /// Warm up the model by running a dummy forward pass
-    ///
-    /// This pre-loads all CUDA PTX modules and triggers JIT compilation,
-    /// eliminating the ~90ms first-run overhead from TTFT.
-    /// Call this after model loading, before the first generation.
-    pub fn warmup(&self) -> Result<()> {
-        tracing::debug!("Warming up model kernels...");
-        let start = std::time::Instant::now();
-
-        // Create a single-token input
-        let warmup_input = Tensor::from_slice(&[1i64], &[1, 1], &self.device);
-
-        if self.model.needs_ssm_state() {
-            // Mamba2: warmup with SSM state
-            let mamba_config = self
-                .model
-                .mamba_config()
-                .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
-            let num_layers = self.model.num_layers();
-
-            let warmup_dtype = parse_dtype(self.config.dtype())?;
-
-            let mut ssm_state =
-                LayeredSsmState::new(num_layers, 1, mamba_config, warmup_dtype, &self.device);
-
-            let _ = self
-                .model
-                .forward_with_ssm_state(&warmup_input, &mut ssm_state)
-                .map_err(|e| anyhow!("Warmup forward pass failed: {}", e))?;
-        } else if self.config.inference.paged_attention {
-            // Llama: warmup with paged KV cache
-            let num_layers = self.model.num_layers();
-            let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
-            let head_dim = self.model.head_dim().unwrap_or(64);
-            let block_size = self.config.inference.block_size;
-            let kv_dtype = parse_dtype(self.config.dtype())?;
-
-            let num_blocks = 4;
-            let allocator = CpuBlockAllocator::new(num_blocks, block_size);
-
-            let mut paged_cache = LayeredPagedKvCache::new(
-                num_layers,
-                num_blocks,
-                block_size,
-                num_kv_heads,
-                head_dim,
-                kv_dtype,
-                &self.device,
-            );
-
-            // Prefill warmup
-            paged_cache
-                .allocate_blocks(1, &allocator)
-                .map_err(|e| anyhow!("Warmup paged block alloc failed: {}", e))?;
-            let slot_vec = paged_cache
-                .compute_slot_mapping(0, 1)
-                .map_err(|e| anyhow!("Warmup slot mapping failed: {}", e))?;
-            let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
-            let bt_vec = paged_cache.block_table_device_format(0);
-            let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device);
-            paged_cache.set_seq_len(1);
-
-            let _ = self
-                .model
-                .forward_with_paged_kv_cache(
-                    &warmup_input,
-                    &paged_cache,
-                    &slot_mapping,
-                    &block_table,
-                    1,
-                    0,
-                )
-                .map_err(|e| anyhow!("Warmup paged prefill failed: {}", e))?;
-
-            // Decode warmup
-            paged_cache
-                .allocate_blocks(1, &allocator)
-                .map_err(|e| anyhow!("Warmup paged decode block alloc failed: {}", e))?;
-            let slot_vec = paged_cache
-                .compute_slot_mapping(1, 1)
-                .map_err(|e| anyhow!("Warmup decode slot mapping failed: {}", e))?;
-            let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
-            let bt_vec = paged_cache.block_table_device_format(0);
-            let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device);
-            paged_cache.set_seq_len(2);
-
-            let _ = self
-                .model
-                .forward_with_paged_kv_cache(
-                    &warmup_input,
-                    &paged_cache,
-                    &slot_mapping,
-                    &block_table,
-                    2,
-                    1,
-                )
-                .map_err(|e| anyhow!("Warmup paged decode failed: {}", e))?;
-        } else {
-            // Llama: warmup with contiguous KV cache
-            let num_layers = self.model.num_layers();
-            let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
-            let head_dim = self.model.head_dim().unwrap_or(64);
-
-            let kv_dtype = parse_dtype(self.config.dtype())?;
-
-            let mut kv_cache = LayeredKvCache::new_positional(
-                num_layers,
-                1,
-                num_kv_heads,
-                16,
-                16,
-                head_dim,
-                kv_dtype,
-                &self.device,
-            )
-            .map_err(|e| anyhow!("Failed to create warmup KV cache: {}", e))?;
-
-            let _ = self
-                .model
-                .forward_with_kv_cache(&warmup_input, &mut kv_cache, 0)
-                .map_err(|e| anyhow!("Warmup prefill forward pass failed: {}", e))?;
-
-            let _ = self
-                .model
-                .forward_with_kv_cache(&warmup_input, &mut kv_cache, 1)
-                .map_err(|e| anyhow!("Warmup decode forward pass failed: {}", e))?;
-        }
-
-        // Warmup argmax + pipelined D2H copy
-        let vocab_size = self.model.vocab_size();
-        let dummy_logits = Tensor::zeros(&[1, 1, vocab_size], DType::F32, &self.device);
-        let token_gpu = self.argmax_on_gpu(&dummy_logits)?;
-        let event = token_gpu
-            .record_event()
-            .map_err(|e| anyhow!("Warmup record event failed: {}", e))?;
-        let _ = Self::read_token_id(&token_gpu, event)?;
-
-        tracing::debug!("Model warmup complete in {:?}", start.elapsed());
-        Ok(())
     }
 
     /// Generate text from a prompt
@@ -360,6 +255,25 @@ where
                 let head_dim = self.model.head_dim().unwrap_or(64);
                 let block_size = self.config.inference.block_size;
                 let kv_dtype = parse_dtype(self.config.dtype())?;
+
+                // Prefix cache lookup (tracking only — actual KV reuse requires shared KV memory)
+                if let Some(ref pc) = self.prefix_cache {
+                    if let Ok(mut cache) = pc.lock() {
+                        let cached = cache.cached_block_count(&prompt_tokens);
+                        if cached > 0 {
+                            tracing::info!(
+                                prefix_cache_hit = true,
+                                cached_blocks = cached,
+                                total_prompt_tokens = prompt_tokens.len(),
+                                "Prefix cache: {} blocks cached ({} tokens reusable)",
+                                cached, cached * block_size
+                            );
+                        }
+                        // Register this sequence's tokens for future lookups
+                        let seq_id = uuid::Uuid::new_v4().as_u128() as u64;
+                        let _ = cache.get_or_allocate_blocks(seq_id, &prompt_tokens);
+                    }
+                }
 
                 let total_tokens = prompt_tokens.len() + max_tokens;
                 let num_blocks = if self.config.inference.num_blocks > 0 {
@@ -508,101 +422,6 @@ where
 
             tracing::debug!("Generation loop complete");
         }
-    }
-
-    /// Generate text and return the complete result with metadata
-    pub async fn generate_text(
-        &self,
-        prompt: &str,
-        gen_config: &GenerationConfig,
-    ) -> Result<GenerationResult> {
-        let max_attempts = if gen_config.json_mode { 3 } else { 1 };
-        for attempt in 0..max_attempts {
-            let result = self.generate_text_once(prompt, gen_config).await?;
-            if !gen_config.json_mode || is_valid_json(&result.text) {
-                return Ok(result);
-            }
-            tracing::warn!(
-                "JSON mode: attempt {}/{} produced invalid JSON, retrying",
-                attempt + 1,
-                max_attempts
-            );
-        }
-        self.generate_text_once(prompt, gen_config).await
-    }
-
-    /// Single generation attempt (used by generate_text for JSON retry)
-    async fn generate_text_once(
-        &self,
-        prompt: &str,
-        gen_config: &GenerationConfig,
-    ) -> Result<GenerationResult> {
-        use futures::StreamExt;
-
-        let prompt_tokens = self
-            .tokenizer
-            .encode(prompt)
-            .map_err(|e| anyhow!("Tokenization failed: {}", e))?
-            .len();
-
-        let mut result = String::new();
-        let mut completion_tokens = 0usize;
-        let mut finish_reason = FinishReason::Length;
-        let mut stream = std::pin::pin!(self.generate(prompt, gen_config));
-        let prefill_start = std::time::Instant::now();
-        let mut prompt_eval_duration_ms = 0u64;
-        let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
-
-        while let Some(token_result) = stream.next().await {
-            let token = token_result?;
-            completion_tokens += 1;
-
-            if completion_tokens == 1 {
-                prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
-            }
-
-            result.push_str(&token.text);
-
-            if let Some(reason) = token.finish_reason {
-                finish_reason = reason;
-            }
-
-            if gen_config.logprobs {
-                token_logprobs.push(token);
-            }
-
-            // Check stop sequences
-            for stop in &gen_config.stop_sequences {
-                if result.ends_with(stop) {
-                    result.truncate(result.len() - stop.len());
-                    return Ok(GenerationResult {
-                        text: result,
-                        prompt_tokens,
-                        completion_tokens,
-                        finish_reason: FinishReason::Stop,
-                        prompt_eval_duration_ms,
-                        token_logprobs: if gen_config.logprobs {
-                            Some(token_logprobs)
-                        } else {
-                            None
-                        },
-                    });
-                }
-            }
-        }
-
-        Ok(GenerationResult {
-            text: result,
-            prompt_tokens,
-            completion_tokens,
-            finish_reason,
-            prompt_eval_duration_ms,
-            token_logprobs: if gen_config.logprobs {
-                Some(token_logprobs)
-            } else {
-                None
-            },
-        })
     }
 
     /// Create input tensor from token IDs

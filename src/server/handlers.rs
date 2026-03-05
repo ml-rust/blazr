@@ -1,6 +1,7 @@
 //! HTTP request handlers
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -17,7 +18,7 @@ use tokio::sync::RwLock;
 use super::metrics;
 use super::streaming::{create_chat_stream, create_completion_stream, StreamToken};
 use crate::config::{GenerationConfig, UserConfig};
-use crate::engine::{FinishReason, Scheduler};
+use crate::engine::{parse_keep_alive, FinishReason, Scheduler};
 
 #[cfg(feature = "cuda")]
 type ServerRuntime = boostr::CudaRuntime;
@@ -29,6 +30,10 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler<ServerRuntime>>,
     pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
     pub user_config: Arc<RwLock<UserConfig>>,
+    /// Current in-flight token count (prompt + estimated decode tokens)
+    pub inflight_tokens: AtomicUsize,
+    /// Maximum in-flight token budget (0 = unlimited)
+    pub max_inflight_tokens: usize,
 }
 
 impl AppState {
@@ -40,7 +45,50 @@ impl AppState {
             scheduler,
             metrics_handle,
             user_config: Arc::new(RwLock::new(UserConfig::load())),
+            inflight_tokens: AtomicUsize::new(0),
+            max_inflight_tokens: 0,
         }
+    }
+
+    pub fn with_max_inflight_tokens(mut self, max: usize) -> Self {
+        self.max_inflight_tokens = max;
+        self
+    }
+
+    /// Try to admit a request with the given token budget.
+    /// Returns `false` (and does not increment) if the budget would be exceeded.
+    pub fn try_admit(&self, tokens: usize) -> bool {
+        if self.max_inflight_tokens == 0 {
+            self.inflight_tokens.fetch_add(tokens, Ordering::Relaxed);
+            metrics::adjust_inflight_tokens(tokens as f64);
+            return true;
+        }
+        // CAS loop to atomically check and increment
+        loop {
+            let current = self.inflight_tokens.load(Ordering::Relaxed);
+            if current + tokens > self.max_inflight_tokens {
+                return false;
+            }
+            if self
+                .inflight_tokens
+                .compare_exchange_weak(
+                    current,
+                    current + tokens,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                metrics::adjust_inflight_tokens(tokens as f64);
+                return true;
+            }
+        }
+    }
+
+    /// Release tokens back to the budget after a request completes
+    pub fn release(&self, tokens: usize) {
+        self.inflight_tokens.fetch_sub(tokens, Ordering::Relaxed);
+        metrics::adjust_inflight_tokens(-(tokens as f64));
     }
 }
 
@@ -359,17 +407,34 @@ pub async fn completions(
     }
     .into_gen_config();
 
+    // Token budget admission control
+    let prompt_token_count = executor
+        .tokenizer()
+        .encode(&prompt)
+        .map(|t| t.len())
+        .unwrap_or(prompt.len() / 4);
+    let estimated_tokens = prompt_token_count + gen_config.max_tokens;
+    if !state.try_admit(estimated_tokens) {
+        return overloaded_response();
+    }
+
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
+        let state_clone = Arc::clone(&state);
+        let budget = estimated_tokens;
 
-        tokio::spawn(stream_with_stop_sequences(executor, prompt, gen_config, tx));
+        tokio::spawn(async move {
+            stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
+            state_clone.release(budget);
+        });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_completion_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
         let echo = request.echo.unwrap_or(false);
+        let model_name = request.model.clone();
         let start = Instant::now();
         match executor.generate_text(&prompt, &gen_config).await {
             Ok(result) => {
@@ -405,14 +470,24 @@ pub async fn completions(
                     },
                     done_reason: Some(done_reason),
                 };
-                metrics::record_tokens(result.prompt_tokens, result.completion_tokens);
+                record_generation_metrics(
+                    result.prompt_tokens,
+                    result.completion_tokens,
+                    result.prompt_eval_duration_ms,
+                    elapsed,
+                );
+                apply_keep_alive(&state, &model_name, &request.keep_alive).await;
+                state.release(estimated_tokens);
                 (StatusCode::OK, Json(response)).into_response()
             }
-            Err(e) => error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &e.to_string(),
-                "server_error",
-            ),
+            Err(e) => {
+                state.release(estimated_tokens);
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &e.to_string(),
+                    "server_error",
+                )
+            }
         }
     }
 }
@@ -515,21 +590,52 @@ pub async fn chat_completions(
     }
     .into_gen_config();
 
+    // Token budget admission control
+    let prompt_token_count = executor
+        .tokenizer()
+        .encode(&prompt)
+        .map(|t| t.len())
+        .unwrap_or(prompt.len() / 4);
+    let estimated_tokens = prompt_token_count + gen_config.max_tokens;
+    if !state.try_admit(estimated_tokens) {
+        return overloaded_response();
+    }
+
     if request.stream.unwrap_or(false) {
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
+        let state_clone = Arc::clone(&state);
+        let budget = estimated_tokens;
 
-        tokio::spawn(stream_with_stop_sequences(executor, prompt, gen_config, tx));
+        tokio::spawn(async move {
+            stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
+            state_clone.release(budget);
+        });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_chat_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
         let start = Instant::now();
+        let think_enabled = request.think.unwrap_or(false);
+        let model_name = request.model.clone();
         match executor.generate_text(&prompt, &gen_config).await {
             Ok(result) => {
                 let elapsed = start.elapsed();
                 let done_reason = result.finish_reason.as_str().to_string();
+
+                let (content, thinking) = if think_enabled {
+                    let extracted = crate::model::think::extract_thinking(&result.text);
+                    let thinking = if extracted.thinking.is_empty() {
+                        None
+                    } else {
+                        Some(extracted.thinking.join("\n\n"))
+                    };
+                    (extracted.content, thinking)
+                } else {
+                    (result.text, None)
+                };
+
                 let response = ChatResponse {
                     id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
                     object: "chat.completion".to_string(),
@@ -539,10 +645,11 @@ pub async fn chat_completions(
                         index: 0,
                         message: ChatMessage {
                             role: "assistant".to_string(),
-                            content: result.text,
+                            content,
                         },
                         finish_reason: done_reason.clone(),
                     }],
+                    thinking,
                     usage: Usage {
                         prompt_tokens: result.prompt_tokens,
                         completion_tokens: result.completion_tokens,
@@ -558,20 +665,46 @@ pub async fn chat_completions(
                     },
                     done_reason: Some(done_reason),
                 };
-                metrics::record_tokens(result.prompt_tokens, result.completion_tokens);
+                record_generation_metrics(
+                    result.prompt_tokens,
+                    result.completion_tokens,
+                    result.prompt_eval_duration_ms,
+                    elapsed,
+                );
+                apply_keep_alive(&state, &model_name, &request.keep_alive).await;
+                state.release(estimated_tokens);
                 (StatusCode::OK, Json(response)).into_response()
             }
-            Err(e) => error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &e.to_string(),
-                "server_error",
-            ),
+            Err(e) => {
+                state.release(estimated_tokens);
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &e.to_string(),
+                    "server_error",
+                )
+            }
         }
     }
 }
 
 /// Decode context tokens (from a previous turn) into a string prefix.
 /// Returns an empty string if no context tokens are provided.
+/// Record generation metrics (tokens, TTFT, throughput) after a non-streaming request.
+fn record_generation_metrics(
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    prompt_eval_ms: u64,
+    elapsed: std::time::Duration,
+) {
+    metrics::record_tokens(prompt_tokens, completion_tokens);
+    metrics::record_ttft(prompt_eval_ms as f64 / 1000.0);
+    metrics::record_tokens_per_second(if elapsed.as_secs_f64() > 0.0 {
+        completion_tokens as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    });
+}
+
 fn decode_context_prefix(
     executor: &std::sync::Arc<crate::engine::Executor<ServerRuntime>>,
     context: &Option<Vec<i64>>,
@@ -609,6 +742,29 @@ fn validate_generation_params(
         }
     }
     Ok(())
+}
+
+/// Return a 503 Service Unavailable response with Retry-After header
+fn overloaded_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "5")],
+        axum::Json(serde_json::json!({
+            "error": {
+                "message": "Server overloaded: in-flight token budget exceeded. Retry after a short delay.",
+                "type": "server_overloaded"
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// Apply per-request keep_alive to the model's scheduler entry
+async fn apply_keep_alive(state: &AppState, model_name: &str, keep_alive: &Option<String>) {
+    if let Some(ref ka) = keep_alive {
+        let duration = parse_keep_alive(ka);
+        state.scheduler.set_keep_alive(model_name, duration).await;
+    }
 }
 
 /// Build a standard OpenAI error response
@@ -658,6 +814,9 @@ pub struct CompletionRequest {
     /// Conversational context: token IDs from a previous response to prepend (Ollama-compatible)
     #[serde(default)]
     pub context: Option<Vec<i64>>,
+    /// Model keep-alive duration (e.g., "5m", "1h", "0" to unload immediately, "-1" for forever)
+    #[serde(default)]
+    pub keep_alive: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
@@ -724,6 +883,13 @@ pub struct ChatRequest {
     /// Conversational context: token IDs from a previous response to prepend (Ollama-compatible)
     #[serde(default)]
     pub context: Option<Vec<i64>>,
+    /// Enable think mode: extract `<think>` blocks from reasoning models (DeepSeek-R1, QwQ)
+    #[serde(default)]
+    pub think: Option<bool>,
+    /// Model keep-alive duration (e.g., "5m", "1h", "0" to unload immediately, "-1" for forever).
+    /// Overrides the server default for this request.
+    #[serde(default)]
+    pub keep_alive: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
@@ -745,6 +911,9 @@ pub struct ChatResponse {
     /// Ollama-compatible done_reason field
     #[serde(skip_serializing_if = "Option::is_none")]
     pub done_reason: Option<String>,
+    /// Extracted thinking content from reasoning models (when `think: true`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 #[derive(Serialize)]

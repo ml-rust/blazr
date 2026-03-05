@@ -19,6 +19,9 @@ pub mod names {
     pub const TOKENS_PROMPTED: &str = "blazr_tokens_prompted_total";
     pub const TOKENS_GENERATED: &str = "blazr_tokens_generated_total";
     pub const MODELS_LOADED: &str = "blazr_models_loaded";
+    pub const TIME_TO_FIRST_TOKEN: &str = "blazr_time_to_first_token_seconds";
+    pub const TOKENS_PER_SECOND: &str = "blazr_tokens_per_second";
+    pub const INFLIGHT_TOKENS: &str = "blazr_inflight_tokens";
 }
 
 /// Install the global Prometheus recorder and return its handle for rendering.
@@ -34,6 +37,15 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
     metrics::describe_counter!(names::TOKENS_PROMPTED, "Total prompt tokens processed");
     metrics::describe_counter!(names::TOKENS_GENERATED, "Total tokens generated");
     metrics::describe_gauge!(names::MODELS_LOADED, "Number of loaded models");
+    metrics::describe_histogram!(names::TIME_TO_FIRST_TOKEN, "Time to first token in seconds");
+    metrics::describe_histogram!(
+        names::TOKENS_PER_SECOND,
+        "Decode tokens per second per request"
+    );
+    metrics::describe_gauge!(
+        names::INFLIGHT_TOKENS,
+        "Estimated in-flight tokens (prompt + decode)"
+    );
 
     Ok(handle)
 }
@@ -63,6 +75,27 @@ pub async fn metrics_middleware(request: Request, next: Next) -> Response {
 pub fn record_tokens(prompt_tokens: usize, completion_tokens: usize) {
     metrics::counter!(names::TOKENS_PROMPTED).increment(prompt_tokens as u64);
     metrics::counter!(names::TOKENS_GENERATED).increment(completion_tokens as u64);
+}
+
+/// Record time-to-first-token (TTFT) in seconds
+pub fn record_ttft(ttft_secs: f64) {
+    metrics::histogram!(names::TIME_TO_FIRST_TOKEN).record(ttft_secs);
+}
+
+/// Record decode throughput (tokens/second) for a completed request
+pub fn record_tokens_per_second(tps: f64) {
+    if tps > 0.0 {
+        metrics::histogram!(names::TOKENS_PER_SECOND).record(tps);
+    }
+}
+
+/// Adjust the in-flight token gauge (positive = add, negative = subtract)
+pub fn adjust_inflight_tokens(delta: f64) {
+    if delta >= 0.0 {
+        metrics::gauge!(names::INFLIGHT_TOKENS).increment(delta);
+    } else {
+        metrics::gauge!(names::INFLIGHT_TOKENS).decrement(-delta);
+    }
 }
 
 /// GET /metrics — Prometheus text exposition format

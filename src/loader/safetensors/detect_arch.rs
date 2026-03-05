@@ -1,0 +1,197 @@
+//! Architecture detection from SafeTensors tensor names and shapes
+
+use anyhow::Result;
+
+use boostr::format::SafeTensorsLoader;
+
+use crate::model::detect::DetectedConfig;
+
+/// Detect architecture from SafeTensorsLoader
+pub fn detect_architecture_from_loader(loader: &SafeTensorsLoader) -> Result<DetectedConfig> {
+    let tensor_names = loader.tensor_names();
+
+    let mut config = crate::model::detect::detect_architecture_from_names(&tensor_names)?;
+
+    let format = config.format;
+    let prefix = match format {
+        crate::model::detect::ModelFormat::HuggingFace => "model.",
+        crate::model::detect::ModelFormat::Oxidizr => "",
+    };
+
+    // Detect hidden_size and vocab_size from embedding layer
+    let embed_key = format!("{}embed_tokens.weight", prefix);
+    if let Ok(info) = loader.tensor_info(&embed_key) {
+        if info.shape.len() == 2 {
+            config.vocab_size = info.shape[0];
+            config.hidden_size = info.shape[1];
+        }
+    }
+
+    // Detect intermediate_size from MLP if present
+    let mlp_gate_key = format!("{}layers.0.mlp.gate_proj.weight", prefix);
+    if let Ok(info) = loader.tensor_info(&mlp_gate_key) {
+        if info.shape.len() == 2 {
+            config.intermediate_size = Some(info.shape[0]);
+        }
+    }
+
+    // Detect number of attention heads from q_proj if present
+    let q_proj_key = format!("{}layers.0.self_attn.q_proj.weight", prefix);
+    if let Ok(info) = loader.tensor_info(&q_proj_key) {
+        if info.shape.len() == 2 && config.hidden_size > 0 {
+            let head_dim = 128; // Default head dimension for most models
+            config.num_attention_heads = Some(info.shape[0] / head_dim);
+            config.head_dim = Some(head_dim);
+        }
+    }
+
+    // Detect KV heads from k_proj
+    let k_proj_key = format!("{}layers.0.self_attn.k_proj.weight", prefix);
+    if let Ok(info) = loader.tensor_info(&k_proj_key) {
+        if info.shape.len() == 2 {
+            let head_dim = config.head_dim.unwrap_or(128);
+            config.num_kv_heads = Some(info.shape[0] / head_dim);
+        }
+    }
+
+    Ok(config)
+}
+
+/// Detect AWQ quantization from tensor names and optional quant_config.json
+pub fn detect_awq(loader: &SafeTensorsLoader, model_dir: Option<&std::path::Path>) -> bool {
+    // Check quant_config.json first
+    if let Some(dir) = model_dir {
+        let quant_config_path = dir.join("quant_config.json");
+        if quant_config_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&quant_config_path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(method) = json.get("quant_method").and_then(|v| v.as_str()) {
+                        return method.eq_ignore_ascii_case("awq");
+                    }
+                }
+            }
+        }
+
+        // Also check config.json for quantization_config
+        let config_path = dir.join("config.json");
+        if config_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(qc) = json.get("quantization_config") {
+                        if let Some(method) = qc.get("quant_method").and_then(|v| v.as_str()) {
+                            return method.eq_ignore_ascii_case("awq");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: check tensor names for AWQ patterns (qweight/qzeros/scales triplets)
+    let names = loader.tensor_names();
+    names.iter().any(|n| n.ends_with(".qweight"))
+}
+
+/// Detect GPTQ quantization from tensor names and optional quantize_config.json
+pub fn detect_gptq(loader: &SafeTensorsLoader, model_dir: Option<&std::path::Path>) -> bool {
+    // Check quantize_config.json first (GPTQ standard)
+    if let Some(dir) = model_dir {
+        for config_name in &["quantize_config.json", "quant_config.json"] {
+            let path = dir.join(config_name);
+            if path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(method) = json.get("quant_method").and_then(|v| v.as_str()) {
+                            if method.eq_ignore_ascii_case("gptq") {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check config.json for quantization_config
+        let config_path = dir.join("config.json");
+        if config_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(qc) = json.get("quantization_config") {
+                        if let Some(method) = qc.get("quant_method").and_then(|v| v.as_str()) {
+                            return method.eq_ignore_ascii_case("gptq");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: check for g_idx tensors (GPTQ-specific, AWQ doesn't have these)
+    let names = loader.tensor_names();
+    names.iter().any(|n| n.ends_with(".g_idx"))
+}
+
+/// Read GPTQ group_size from quantize_config.json or config.json
+pub fn read_gptq_group_size(model_dir: &std::path::Path) -> Result<usize> {
+    for config_name in &["quantize_config.json", "quant_config.json"] {
+        let path = model_dir.join(config_name);
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(gs) = json.get("group_size").and_then(|v| v.as_u64()) {
+                        return Ok(gs as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    // Try config.json quantization_config
+    let config_path = model_dir.join("config.json");
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(qc) = json.get("quantization_config") {
+                    if let Some(gs) = qc.get("group_size").and_then(|v| v.as_u64()) {
+                        return Ok(gs as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    // Default group_size for GPTQ
+    Ok(128)
+}
+
+/// Read AWQ group_size from quant_config.json or config.json
+pub fn read_awq_group_size(model_dir: &std::path::Path) -> Result<usize> {
+    // Try quant_config.json first
+    let quant_config_path = model_dir.join("quant_config.json");
+    if quant_config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&quant_config_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(gs) = json.get("group_size").and_then(|v| v.as_u64()) {
+                    return Ok(gs as usize);
+                }
+            }
+        }
+    }
+
+    // Try config.json quantization_config
+    let config_path = model_dir.join("config.json");
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(qc) = json.get("quantization_config") {
+                    if let Some(gs) = qc.get("group_size").and_then(|v| v.as_u64()) {
+                        return Ok(gs as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    // Default group_size for AWQ
+    Ok(128)
+}

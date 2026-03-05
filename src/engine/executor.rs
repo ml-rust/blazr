@@ -318,14 +318,12 @@ where
                 );
 
                 // Prefill
-                tracing::debug!("Starting Mamba2 prefill...");
+                tracing::info!(phase = "prefill_start", backend = "mamba2", prompt_tokens = prompt_tokens.len());
                 let mut logits = self.model.forward_with_ssm_state(&input, &mut ssm_state)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
-                tracing::debug!("Mamba2 prefill complete");
-
+                tracing::info!(phase = "prefill_end", backend = "mamba2");
+                tracing::info!(phase = "decode_start", backend = "mamba2", max_tokens = max_tokens);
                 for i in 0..max_tokens {
-                    tracing::debug!("Generating token {} / {}", i + 1, max_tokens);
-
                     let cur_logits = &logits;
                     let (token_gpu, miro_id) = self.sample_token_dispatch(cur_logits, &token_history, gen_config, &mut mirostat)?;
                     let event = token_gpu.record_event()
@@ -354,6 +352,7 @@ where
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
+                tracing::info!(phase = "decode_end", backend = "mamba2");
             } else if self.config.inference.paged_attention {
                 // ── Llama path: Paged KV cache ──
                 let num_layers = self.model.num_layers();
@@ -389,12 +388,14 @@ where
                 let seq_len_k = prompt_tokens.len();
                 paged_cache.set_seq_len(seq_len_k);
 
+                tracing::info!(phase = "prefill_start", backend = "paged", prompt_tokens = prompt_tokens.len(), num_blocks = num_blocks);
                 let t0 = std::time::Instant::now();
                 let mut logits = self.model.forward_with_paged_kv_cache(
                     &input, &paged_cache, &slot_mapping, &block_table_tensor, seq_len_k, 0,
                 ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
                 tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), prompt_tokens.len(), num_blocks);
-
+                tracing::info!(phase = "prefill_end", backend = "paged");
+                tracing::info!(phase = "decode_start", backend = "paged", max_tokens = max_tokens);
                 for i in 0..max_tokens {
                     let t1 = std::time::Instant::now();
 
@@ -445,6 +446,7 @@ where
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
+                tracing::info!(phase = "decode_end", backend = "paged");
             } else {
                 // ── Llama path: contiguous KV cache ──
                 let num_layers = self.model.num_layers();
@@ -459,11 +461,13 @@ where
                     head_dim, kv_dtype, &self.device,
                 ).map_err(|e| anyhow!("Failed to create KV cache: {}", e))?;
 
+                tracing::info!(phase = "prefill_start", backend = "contiguous", prompt_tokens = prompt_tokens.len());
                 let t0 = std::time::Instant::now();
                 let mut logits = self.model.forward_with_kv_cache(&input, &mut kv_cache, 0)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 tracing::info!("Prefill: {:?} (seq_len={}, kv={})", t0.elapsed(), prompt_tokens.len(), kv_cache.seq_len());
-
+                tracing::info!(phase = "prefill_end", backend = "contiguous");
+                tracing::info!(phase = "decode_start", backend = "contiguous", max_tokens = max_tokens);
                 for i in 0..max_tokens {
                     let t1 = std::time::Instant::now();
 
@@ -499,6 +503,7 @@ where
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
+                tracing::info!(phase = "decode_end", backend = "contiguous");
             }
 
             tracing::debug!("Generation loop complete");

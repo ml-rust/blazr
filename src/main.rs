@@ -56,8 +56,13 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Serve { model, port, host } => {
-            blazr::cli::serve(model, port, host).await?;
+        Commands::Serve {
+            model,
+            port,
+            host,
+            api_key,
+        } => {
+            blazr::cli::serve(model, port, host, api_key).await?;
         }
         Commands::List { verbose } => {
             blazr::cli::list(verbose).await?;
@@ -107,6 +112,14 @@ async fn main() -> Result<()> {
                 graphs,
             )
             .await?;
+        }
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut <Cli as clap::CommandFactory>::command(),
+                "blazr",
+                &mut std::io::stdout(),
+            );
         }
         Commands::Decode { model: _, input: _ } => {
             eprintln!("Decode command not yet implemented");

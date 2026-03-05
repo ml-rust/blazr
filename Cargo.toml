@@ -3,11 +3,11 @@ name = "blazr"
 version = "0.1.0-beta.1"
 edition = "2021"
 authors = ["Farhan Syah"]
-description = "Blazing-fast inference server for oxidizr models (Mamba2 + MLA + MoE)"
+description = "Production-grade LLM inference server with OpenAI-compatible API. Supports Llama, Mistral, Mamba2, MLA+MoE, and hybrid architectures across SafeTensors, AWQ, GPTQ, and GGUF formats."
 license = "Apache-2.0"
 repository = "https://github.com/ml-rust/blazr"
 homepage = "https://github.com/ml-rust/blazr"
-keywords = ["inference", "llm", "mamba", "transformer", "server"]
+keywords = ["inference", "llm", "server", "openai", "gguf"]
 categories = ["science", "web-programming"]
 
 [features]
@@ -16,7 +16,7 @@ f16 = ["boostr/f16"]
 cuda = ["boostr/cuda"]
 
 [dependencies]
-# Tensor operations - now using boostr instead of candle
+# ML framework (model architectures, quant kernels, tensors via numr)
 boostr = { path = "../boostr" }
 
 # Tokenization
@@ -34,7 +34,8 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 
 # Byte casting for tensor creation from raw bytes
 bytemuck = "1"

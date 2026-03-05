@@ -101,6 +101,10 @@ pub enum Commands {
         /// Host to bind to
         #[arg(long, default_value = "0.0.0.0")]
         host: String,
+
+        /// API key for authentication (also reads BLAZR_API_KEY env var)
+        #[arg(long, env = "BLAZR_API_KEY")]
+        api_key: Option<String>,
     },
 
     /// List available models
@@ -194,6 +198,13 @@ pub enum Commands {
         /// Print prompt tokens before generation (like llama-cli --verbose-prompt)
         #[arg(long)]
         verbose_prompt: bool,
+    },
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 
     /// Decode a file with a model (for testing)

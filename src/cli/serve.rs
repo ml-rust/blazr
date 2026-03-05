@@ -22,6 +22,8 @@ pub async fn serve(
     host: String,
     api_key: Option<String>,
     api_key_file: Option<PathBuf>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
 ) -> Result<()> {
     // Get model directory
     let model_dir = std::env::var("BLAZR_MODEL_DIR")
@@ -88,6 +90,8 @@ pub async fn serve(
     let server_config = ServerConfig {
         port,
         host,
+        tls_cert,
+        tls_key,
         ..Default::default()
     };
 
@@ -112,7 +116,15 @@ pub async fn serve(
     let addr = server_config.addr();
     eprintln!();
     eprintln!("  {} v{}", "blazr".bold().cyan(), env!("CARGO_PKG_VERSION"));
-    eprintln!("  Listening on {}", format!("http://{}", addr).underline());
+    let scheme = if server_config.tls_enabled() {
+        "https"
+    } else {
+        "http"
+    };
+    eprintln!(
+        "  Listening on {}",
+        format!("{}://{}", scheme, addr).underline()
+    );
     if let Some(ref m) = model {
         eprintln!("  Model: {}", m.bold());
     }

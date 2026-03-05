@@ -79,6 +79,12 @@ rustyline = "15"
 # HTTP client (for blazr ps)
 reqwest = { version = "0.13", features = ["json"] }
 
+# TLS support
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 

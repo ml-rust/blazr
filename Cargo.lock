@@ -283,17 +283,21 @@ dependencies = [
  "glob",
  "half",
  "hf-hub",
+ "hyper-util",
  "indicatif",
  "metrics",
  "metrics-exporter-prometheus",
  "rand 0.8.5",
  "reqwest 0.13.2",
+ "rustls",
+ "rustls-pemfile",
  "rustyline",
  "serde",
  "serde-saphyr",
  "serde_json",
  "splintr",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-test",
  "tower",
@@ -804,7 +808,7 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2421,6 +2425,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework 3.7.0",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

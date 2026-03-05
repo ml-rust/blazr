@@ -152,6 +152,14 @@ pub enum Commands {
         /// File containing API keys (one per line)
         #[arg(long)]
         api_key_file: Option<std::path::PathBuf>,
+
+        /// TLS certificate file (PEM format) — enables HTTPS
+        #[arg(long)]
+        tls_cert: Option<std::path::PathBuf>,
+
+        /// TLS private key file (PEM format)
+        #[arg(long)]
+        tls_key: Option<std::path::PathBuf>,
     },
 
     /// List available models

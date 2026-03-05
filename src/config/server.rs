@@ -1,5 +1,7 @@
 //! Server configuration settings
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// HTTP server configuration
@@ -36,6 +38,14 @@ pub struct ServerConfig {
     /// Maximum request body size in bytes
     #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
+
+    /// Path to TLS certificate file (PEM format)
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Path to TLS private key file (PEM format)
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
 }
 
 fn default_port() -> u16 {
@@ -73,6 +83,8 @@ impl Default for ServerConfig {
             cors_origins: Vec::new(),
             request_logging: true,
             max_body_size: default_max_body_size(),
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }
@@ -81,5 +93,10 @@ impl ServerConfig {
     /// Get the socket address string
     pub fn addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// Check if TLS is configured
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert.is_some() && self.tls_key.is_some()
     }
 }

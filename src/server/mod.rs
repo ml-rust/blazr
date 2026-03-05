@@ -222,9 +222,40 @@ pub async fn start(
         .with_state(state);
 
     let addr = config.addr();
-    let listener = TcpListener::bind(&addr).await?;
+    let tls_config = if config.tls_enabled() {
+        let cert_path = config.tls_cert.as_ref().unwrap();
+        let key_path = config.tls_key.as_ref().unwrap();
 
-    tracing::info!("Server listening on http://{}", addr);
+        let cert_pem = std::fs::read(cert_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read TLS cert {:?}: {}", cert_path, e))?;
+        let key_pem = std::fs::read(key_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read TLS key {:?}: {}", key_path, e))?;
+
+        let certs = rustls_pemfile::certs(&mut &cert_pem[..])
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse TLS certificates: {}", e))?;
+        let key = rustls_pemfile::private_key(&mut &key_pem[..])
+            .map_err(|e| anyhow::anyhow!("Failed to parse TLS private key: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("No private key found in {:?}", key_path))?;
+
+        let tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| anyhow::anyhow!("Failed to build TLS config: {}", e))?;
+
+        Some(tls)
+    } else {
+        None
+    };
+
+    let listener = TcpListener::bind(&addr).await?;
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+
+    tracing::info!("Server listening on {}://{}", scheme, addr);
     tracing::info!(
         "  Timeout: {}s | Max body: {} bytes | Max concurrent: {}",
         config.request_timeout_secs,
@@ -245,6 +276,9 @@ pub async fn start(
     tracing::info!("  GET  /api/tags - List local models with metadata");
     tracing::info!("  POST /api/show - Model details");
     tracing::info!("  GET  /api/ps - Currently loaded models");
+    tracing::info!("  DEL  /api/delete - Delete local model");
+    tracing::info!("  POST /api/copy - Copy/alias model");
+    tracing::info!("  POST /api/pull - Pull model from HuggingFace");
     tracing::info!("  GET  /metrics - Prometheus metrics (no auth required)");
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async {
@@ -266,9 +300,47 @@ pub async fn start(
         }
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    if let Some(tls) = tls_config {
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+
+        // Manual TLS accept loop with graceful shutdown
+        let shutdown = std::pin::pin!(shutdown);
+        let mut shutdown = shutdown;
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _addr)) => {
+                            let acceptor = tls_acceptor.clone();
+                            let app = app.clone();
+                            tokio::spawn(async move {
+                                let Ok(tls_stream) = acceptor.accept(stream).await else {
+                                    return;
+                                };
+                                let io = hyper_util::rt::TokioIo::new(tls_stream);
+                                let service = hyper_util::service::TowerToHyperService::new(
+                                    app.into_service(),
+                                );
+                                let _ = hyper_util::server::conn::auto::Builder::new(
+                                    hyper_util::rt::TokioExecutor::new(),
+                                )
+                                .serve_connection(io, service)
+                                .await;
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("TCP accept error: {}", e);
+                        }
+                    }
+                }
+                _ = &mut shutdown => break,
+            }
+        }
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    }
 
     tracing::info!("Server shut down gracefully");
     Ok(())

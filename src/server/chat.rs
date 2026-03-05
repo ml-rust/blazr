@@ -19,8 +19,10 @@ use super::generation::{
 use super::handlers::AppState;
 use super::metrics;
 use super::streaming::{create_chat_stream, StreamToken};
-
-pub use crate::model::chat_template::ChatMessage;
+use super::tools::{
+    build_tools_system_prompt, extract_tool_calls, request_msg_to_chat_msg, ChatRequestMessage,
+    ChatResponseMessage, Tool,
+};
 
 /// Chat completion endpoint
 pub async fn chat_completions(
@@ -65,37 +67,41 @@ pub async fn chat_completions(
         }
     };
 
-    let prompt =
-        if request.raw.unwrap_or(false) {
-            request
-                .messages
-                .iter()
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
+    let tools_system_prompt = request.tools.as_deref().and_then(build_tools_system_prompt);
+    let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
+
+    let prompt = if request.raw.unwrap_or(false) {
+        request
+            .messages
+            .iter()
+            .map(|m| m.content.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        let mut msgs: Vec<crate::model::chat_template::ChatMessage> = Vec::new();
+        if let Some(ref sys) = request.system {
+            let has_system = request.messages.iter().any(|m| m.role == "system");
+            if !has_system {
+                msgs.push(crate::model::chat_template::ChatMessage {
+                    role: "system".to_string(),
+                    content: sys.clone(),
+                });
+            }
+        }
+        // Inject tools system prompt
+        if let Some(ref tools_prompt) = tools_system_prompt {
+            msgs.push(crate::model::chat_template::ChatMessage {
+                role: "system".to_string(),
+                content: tools_prompt.clone(),
+            });
+        }
+        msgs.extend(request.messages.iter().map(request_msg_to_chat_msg));
+        if let Some(ref tpl_name) = request.template {
+            crate::model::chat_template::ChatTemplate::from_name(tpl_name).apply(&msgs)
         } else {
-            let mut msgs: Vec<crate::model::chat_template::ChatMessage> = Vec::new();
-            if let Some(ref sys) = request.system {
-                let has_system = request.messages.iter().any(|m| m.role == "system");
-                if !has_system {
-                    msgs.push(crate::model::chat_template::ChatMessage {
-                        role: "system".to_string(),
-                        content: sys.clone(),
-                    });
-                }
-            }
-            msgs.extend(request.messages.iter().map(|m| {
-                crate::model::chat_template::ChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                }
-            }));
-            if let Some(ref tpl_name) = request.template {
-                crate::model::chat_template::ChatTemplate::from_name(tpl_name).apply(&msgs)
-            } else {
-                executor.chat_template().apply(&msgs)
-            }
-        };
+            executor.chat_template().apply(&msgs)
+        }
+    };
     let prompt = if context_prefix.is_empty() {
         prompt
     } else {
@@ -177,13 +183,27 @@ pub async fn chat_completions(
                         .as_ref()
                         .map(|tl| convert_logprobs(tl));
 
+                    // Extract tool calls if tools were provided
+                    let (final_content, tool_calls) = if has_tools {
+                        extract_tool_calls(&content)
+                    } else {
+                        (Some(content), None)
+                    };
+
+                    let finish = if tool_calls.is_some() {
+                        "tool_calls".to_string()
+                    } else {
+                        result.finish_reason.as_str().to_string()
+                    };
+
                     choices.push(ChatChoice {
                         index: i,
-                        message: ChatMessage {
+                        message: ChatResponseMessage {
                             role: "assistant".to_string(),
-                            content,
+                            content: final_content,
+                            tool_calls,
                         },
-                        finish_reason: result.finish_reason.as_str().to_string(),
+                        finish_reason: finish,
                         logprobs,
                     });
                 }
@@ -246,7 +266,12 @@ pub async fn chat_completions(
 #[derive(Deserialize)]
 pub struct ChatRequest {
     pub model: String,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<ChatRequestMessage>,
+    #[serde(default)]
+    pub tools: Option<Vec<Tool>>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
     #[serde(default)]
@@ -366,7 +391,7 @@ pub struct ChatResponse {
 #[derive(Serialize)]
 pub struct ChatChoice {
     pub index: usize,
-    pub message: ChatMessage,
+    pub message: ChatResponseMessage,
     pub finish_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<LogprobResult>,

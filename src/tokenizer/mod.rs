@@ -21,6 +21,13 @@ pub trait TokenizerTrait: Send + Sync {
 
     /// Get EOS token ID
     fn eos_token_id(&self) -> u32;
+
+    /// Look up a special token by name (e.g. "<|fim_prefix|>").
+    /// Returns None if the token is not in this vocabulary.
+    fn special_token_id(&self, name: &str) -> Option<u32> {
+        let _ = name;
+        None
+    }
 }
 
 /// Boxed tokenizer type for use in executors
@@ -41,6 +48,9 @@ impl TokenizerTrait for BoxedTokenizer {
     }
     fn eos_token_id(&self) -> u32 {
         (**self).eos_token_id()
+    }
+    fn special_token_id(&self, name: &str) -> Option<u32> {
+        (**self).special_token_id(name)
     }
 }
 
@@ -235,6 +245,12 @@ impl TokenizerTrait for Tokenizer {
 
     fn eos_token_id(&self) -> u32 {
         Tokenizer::eos_token_id(self)
+    }
+
+    fn special_token_id(&self, name: &str) -> Option<u32> {
+        splintr::PretrainedVocab::from_name(&self.vocab_name)
+            .map(splintr::special_tokens)
+            .and_then(|tokens| tokens.get(name).copied())
     }
 }
 

@@ -98,6 +98,49 @@ fn test_chat_template_from_name() {
     assert_eq!(ChatTemplate::from_name("unknown"), ChatTemplate::Generic);
 }
 
+#[test]
+fn test_seed_does_not_force_greedy() {
+    // Seed with temperature > 0 should use seeded stochastic sampling, not greedy
+    let config = blazr::GenerationConfig {
+        temperature: 0.8,
+        seed: Some(42),
+        ..Default::default()
+    };
+    assert!(
+        !config.is_greedy(),
+        "seed with temperature > 0 should not force greedy"
+    );
+
+    // Temperature 0 is still greedy regardless of seed
+    let greedy_config = blazr::GenerationConfig {
+        temperature: 0.0,
+        seed: Some(42),
+        ..Default::default()
+    };
+    assert!(greedy_config.is_greedy());
+
+    let no_seed = blazr::GenerationConfig {
+        temperature: 0.8,
+        ..Default::default()
+    };
+    assert!(!no_seed.is_greedy());
+}
+
+#[test]
+fn test_logit_bias_in_config() {
+    use std::collections::HashMap;
+    let mut bias = HashMap::new();
+    bias.insert(100u32, 5.0f32);
+    bias.insert(200, -10.0);
+    let config = blazr::GenerationConfig {
+        logit_bias: bias,
+        ..Default::default()
+    };
+    assert_eq!(config.logit_bias.len(), 2);
+    assert_eq!(config.logit_bias[&100], 5.0);
+    assert_eq!(config.logit_bias[&200], -10.0);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Live server tests — require BLAZR_TEST_SERVER env var
 // ═══════════════════════════════════════════════════════════

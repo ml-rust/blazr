@@ -148,18 +148,125 @@ fn find_gguf_in_dir(dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    #[test]
-    fn test_format_detection_safetensors() {
-        // Test file extension detection
-        let _path = Path::new("/models/test.safetensors");
-        // This would fail since file doesn't exist, but logic is tested
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn make_tempdir(name: &str) -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "blazr_detect_{}_{}_{}",
+            name,
+            std::process::id(),
+            id
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
-    fn test_format_detection_gguf() {
-        // Test file extension detection
-        let _path = Path::new("/models/test.gguf");
-        // This would fail since file doesn't exist, but logic is tested
+    fn test_detect_safetensors_file() {
+        let dir = make_tempdir("st_file");
+        let file = dir.join("model.safetensors");
+        fs::write(&file, b"dummy").unwrap();
+
+        let source = detect_model_source(&file).unwrap();
+        assert_eq!(source.format, ModelFormat::SafeTensors);
+        assert_eq!(source.weights_path, file);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_gguf_file() {
+        let dir = make_tempdir("gguf_file");
+        let file = dir.join("model.gguf");
+        fs::write(&file, b"dummy").unwrap();
+
+        let source = detect_model_source(&file).unwrap();
+        assert_eq!(source.format, ModelFormat::Gguf);
+        assert_eq!(source.weights_path, file);
+        assert!(source.config_path.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_safetensors_directory() {
+        let dir = make_tempdir("st_dir");
+        fs::write(dir.join("model.safetensors"), b"dummy").unwrap();
+        fs::write(dir.join("config.json"), b"{}").unwrap();
+
+        let source = detect_model_source(&dir).unwrap();
+        assert_eq!(source.format, ModelFormat::SafeTensors);
+        assert!(source.config_path.is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_gguf_directory() {
+        let dir = make_tempdir("gguf_dir");
+        fs::write(dir.join("model-q4.gguf"), b"dummy").unwrap();
+
+        let source = detect_model_source(&dir).unwrap();
+        assert_eq!(source.format, ModelFormat::Gguf);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_safetensors_with_config_in_parent() {
+        let dir = make_tempdir("st_parent");
+        fs::write(dir.join("config.json"), b"{}").unwrap();
+        let file = dir.join("model.safetensors");
+        fs::write(&file, b"dummy").unwrap();
+
+        let source = detect_model_source(&file).unwrap();
+        assert_eq!(source.format, ModelFormat::SafeTensors);
+        assert!(source.config_path.is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_unsupported_extension() {
+        let dir = make_tempdir("unsupported");
+        let file = dir.join("model.bin");
+        fs::write(&file, b"dummy").unwrap();
+
+        let result = detect_model_source(&file);
+        assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_nonexistent_path() {
+        let result = detect_model_source("/nonexistent/path/model");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_detect_empty_directory() {
+        let dir = make_tempdir("empty");
+        let result = detect_model_source(&dir);
+        assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_safetensors_preferred_over_gguf() {
+        let dir = make_tempdir("mixed");
+        fs::write(dir.join("model.safetensors"), b"dummy").unwrap();
+        fs::write(dir.join("model.gguf"), b"dummy").unwrap();
+
+        let source = detect_model_source(&dir).unwrap();
+        assert_eq!(source.format, ModelFormat::SafeTensors);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

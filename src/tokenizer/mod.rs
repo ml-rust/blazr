@@ -260,3 +260,95 @@ impl TokenizerTrait for GgufTokenizer {
         GgufTokenizer::eos_token_id(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_vocab_size_mistral() {
+        let tok = Tokenizer::from_vocab_size(32000).unwrap();
+        assert_eq!(tok.vocab_name(), "mistral");
+    }
+
+    #[test]
+    fn test_from_vocab_size_mistral_upper_bound() {
+        let tok = Tokenizer::from_vocab_size(32100).unwrap();
+        assert_eq!(tok.vocab_name(), "mistral");
+    }
+
+    #[test]
+    fn test_from_vocab_size_cl100k() {
+        let tok = Tokenizer::from_vocab_size(100257).unwrap();
+        assert_eq!(tok.vocab_name(), "cl100k_base");
+    }
+
+    #[test]
+    fn test_from_vocab_size_cl100k_with_agents() {
+        let tok = Tokenizer::from_vocab_size(100331).unwrap();
+        assert_eq!(tok.vocab_name(), "cl100k_base");
+    }
+
+    #[test]
+    fn test_from_vocab_size_llama3() {
+        let tok = Tokenizer::from_vocab_size(128000).unwrap();
+        assert_eq!(tok.vocab_name(), "llama3");
+    }
+
+    #[test]
+    fn test_from_vocab_size_llama3_with_agents() {
+        let tok = Tokenizer::from_vocab_size(128354).unwrap();
+        assert_eq!(tok.vocab_name(), "llama3");
+    }
+
+    #[test]
+    fn test_from_vocab_size_deepseek() {
+        let tok = Tokenizer::from_vocab_size(128954).unwrap();
+        assert_eq!(tok.vocab_name(), "deepseek_v3");
+    }
+
+    #[test]
+    fn test_from_vocab_size_o200k() {
+        let tok = Tokenizer::from_vocab_size(200073).unwrap();
+        assert_eq!(tok.vocab_name(), "o200k_base");
+    }
+
+    #[test]
+    fn test_from_vocab_size_unknown_defaults_llama3() {
+        let tok = Tokenizer::from_vocab_size(500000).unwrap();
+        assert_eq!(tok.vocab_name(), "llama3");
+    }
+
+    #[test]
+    fn test_from_pretrained_llama3_variants() {
+        for name in &["llama3", "llama3.1", "llama3.2", "llama3.3"] {
+            let tok = Tokenizer::from_pretrained(name).unwrap();
+            assert!(tok.vocab_size() > 100000, "llama3 vocab should be >100k");
+        }
+    }
+
+    #[test]
+    fn test_from_pretrained_custom_errors() {
+        assert!(Tokenizer::from_pretrained("custom").is_err());
+        assert!(Tokenizer::from_pretrained("Custom").is_err());
+        assert!(Tokenizer::from_pretrained("CUSTOM").is_err());
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip() {
+        let tok = Tokenizer::from_pretrained("mistral").unwrap();
+        let text = "Hello, world!";
+        let ids = tok.encode(text).unwrap();
+        assert!(!ids.is_empty());
+        let decoded = tok.decode(&ids).unwrap();
+        assert!(decoded.contains("Hello"));
+    }
+
+    #[test]
+    fn test_eos_token() {
+        let tok = Tokenizer::from_pretrained("llama3").unwrap();
+        let eos = tok.eos_token_id();
+        assert!(tok.is_eos(eos));
+        assert!(!tok.is_eos(0));
+    }
+}

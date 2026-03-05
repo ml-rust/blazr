@@ -195,3 +195,121 @@ pub fn read_awq_group_size(model_dir: &std::path::Path) -> Result<usize> {
     // Default group_size for AWQ
     Ok(128)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::model::detect::{detect_architecture_from_names, LayerType, ModelFormat};
+
+    fn hf_transformer_names(num_layers: usize) -> Vec<String> {
+        let mut names = vec![
+            "model.embed_tokens.weight".into(),
+            "model.norm.weight".into(),
+            "lm_head.weight".into(),
+        ];
+        for i in 0..num_layers {
+            let p = format!("model.layers.{}.", i);
+            names.push(format!("{}self_attn.q_proj.weight", p));
+            names.push(format!("{}self_attn.k_proj.weight", p));
+            names.push(format!("{}self_attn.v_proj.weight", p));
+            names.push(format!("{}self_attn.o_proj.weight", p));
+            names.push(format!("{}mlp.gate_proj.weight", p));
+            names.push(format!("{}mlp.up_proj.weight", p));
+            names.push(format!("{}mlp.down_proj.weight", p));
+            names.push(format!("{}input_layernorm.weight", p));
+            names.push(format!("{}post_attention_layernorm.weight", p));
+        }
+        names
+    }
+
+    fn hf_mla_moe_names(num_layers: usize) -> Vec<String> {
+        let mut names = vec![
+            "model.embed_tokens.weight".into(),
+            "model.norm.weight".into(),
+            "lm_head.weight".into(),
+        ];
+        for i in 0..num_layers {
+            let p = format!("model.layers.{}.", i);
+            names.push(format!("{}self_attn.w_dkv.weight", p));
+            names.push(format!("{}self_attn.w_q.weight", p));
+            names.push(format!("{}self_attn.w_o.weight", p));
+            names.push(format!("{}moe.gate.weight", p));
+            names.push(format!("{}moe.experts.0.up_proj.weight", p));
+            names.push(format!("{}moe.experts.0.down_proj.weight", p));
+            names.push(format!("{}input_layernorm.weight", p));
+        }
+        names
+    }
+
+    #[test]
+    fn test_hf_llama_32_layers() {
+        let names = hf_transformer_names(32);
+        let config = detect_architecture_from_names(&names).unwrap();
+        assert_eq!(config.format, ModelFormat::HuggingFace);
+        assert_eq!(config.num_layers, 32);
+        assert!(!config.tie_word_embeddings);
+        assert!(config
+            .layer_types
+            .iter()
+            .all(|&t| t == LayerType::StandardTransformer));
+    }
+
+    #[test]
+    fn test_hf_small_model_2_layers() {
+        let names = hf_transformer_names(2);
+        let config = detect_architecture_from_names(&names).unwrap();
+        assert_eq!(config.num_layers, 2);
+        assert_eq!(config.format, ModelFormat::HuggingFace);
+    }
+
+    #[test]
+    fn test_hf_tied_embeddings() {
+        let mut names = hf_transformer_names(4);
+        names.retain(|n| n != "lm_head.weight");
+        let config = detect_architecture_from_names(&names).unwrap();
+        assert!(config.tie_word_embeddings);
+    }
+
+    #[test]
+    fn test_hf_deepseek_mla_moe() {
+        let names = hf_mla_moe_names(8);
+        let config = detect_architecture_from_names(&names).unwrap();
+        assert_eq!(config.format, ModelFormat::HuggingFace);
+        assert_eq!(config.num_layers, 8);
+        assert!(config
+            .layer_types
+            .iter()
+            .all(|&t| t == LayerType::MlaWithMoe));
+    }
+
+    #[test]
+    fn test_hf_hybrid_transformer_and_mamba() {
+        let mut names = vec![
+            "model.embed_tokens.weight".into(),
+            "model.norm.weight".into(),
+            "lm_head.weight".into(),
+        ];
+        for suffix in &[
+            "self_attn.q_proj.weight",
+            "self_attn.k_proj.weight",
+            "mlp.gate_proj.weight",
+        ] {
+            names.push(format!("model.layers.0.{}", suffix));
+        }
+        for suffix in &["mamba2.mixer.A_log", "mamba2.mixer.conv1d.weight"] {
+            names.push(format!("model.layers.1.{}", suffix));
+        }
+        let config = detect_architecture_from_names(&names).unwrap();
+        assert_eq!(config.num_layers, 2);
+        assert_eq!(config.layer_types[0], LayerType::StandardTransformer);
+        assert_eq!(config.layer_types[1], LayerType::Mamba2);
+    }
+
+    #[test]
+    fn test_hf_no_layers_errors() {
+        let names: Vec<String> = vec![
+            "model.embed_tokens.weight".into(),
+            "model.norm.weight".into(),
+        ];
+        assert!(detect_architecture_from_names(&names).is_err());
+    }
+}

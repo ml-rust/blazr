@@ -98,6 +98,17 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Bench {
+            model,
+            num_ctx,
+            decode_tokens,
+            runs,
+        } => {
+            blazr::cli::bench(model, num_ctx, decode_tokens, runs).await?;
+        }
+        Commands::Ps { server } => {
+            blazr::cli::ps(server).await?;
+        }
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,

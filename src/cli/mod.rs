@@ -2,17 +2,21 @@
 //!
 //! Provides ollama-like CLI interface for blazr.
 
+mod bench;
 mod chat;
 mod info;
 mod list;
+mod ps;
 mod pull;
 mod run;
 mod serve;
 mod util;
 
+pub use bench::bench;
 pub use chat::chat;
 pub use info::info;
 pub use list::list;
+pub use ps::ps;
 pub use pull::pull;
 pub use run::run;
 pub use serve::serve;
@@ -224,6 +228,31 @@ pub enum Commands {
         /// Show debug info (token IDs, timing breakdown)
         #[arg(long, short)]
         verbose: bool,
+    },
+
+    /// Benchmark model performance (tok/s, TTFT)
+    Bench {
+        /// Model name or path
+        model: String,
+
+        /// Context window size
+        #[arg(long, default_value = "2048")]
+        num_ctx: usize,
+
+        /// Number of tokens to generate per run
+        #[arg(long)]
+        decode_tokens: Option<usize>,
+
+        /// Number of measurement runs
+        #[arg(long)]
+        runs: Option<usize>,
+    },
+
+    /// Show running models on a blazr server
+    Ps {
+        /// Server URL (default: http://localhost:8080)
+        #[arg(long, default_value = "http://localhost:8080")]
+        server: String,
     },
 
     /// Generate shell completions

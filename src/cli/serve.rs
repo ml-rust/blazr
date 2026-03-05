@@ -41,6 +41,10 @@ pub async fn serve(
     if let Some(ref model_name) = model {
         let spinner = super::util::spinner(format!("Loading model '{}'...", model_name));
 
+        // Snapshot VRAM before loading (CUDA only)
+        #[cfg(feature = "cuda")]
+        let vram_before = device.memory_info().ok().map(|(free, _)| free);
+
         let load_start = std::time::Instant::now();
         let executor = scheduler.get_executor(model_name).await?;
         let load_time = load_start.elapsed();
@@ -49,13 +53,34 @@ pub async fn serve(
         }
 
         spinner.finish_and_clear();
+
+        // Calculate VRAM usage
+        #[cfg(feature = "cuda")]
+        let vram_str = {
+            let vram_info = device.memory_info().ok();
+            match (vram_before, vram_info) {
+                (Some(free_before), Some((free_after, total))) => {
+                    let used = free_before.saturating_sub(free_after);
+                    format!(
+                        ", VRAM: {:.1}/{:.1} GB",
+                        used as f64 / (1024.0 * 1024.0 * 1024.0),
+                        total as f64 / (1024.0 * 1024.0 * 1024.0),
+                    )
+                }
+                _ => String::new(),
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
+        let vram_str = String::new();
+
         eprintln!(
-            "  {} {} in {:.1}s (vocab={}, ctx={})",
+            "  {} {} in {:.1}s (vocab={}, ctx={}{})",
             "Loaded".green(),
             model_name.bold(),
             load_time.as_secs_f64(),
             executor.vocab_size(),
             executor.config().max_seq_len(),
+            vram_str,
         );
     }
 

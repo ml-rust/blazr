@@ -74,9 +74,12 @@ metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
 colored = "3"
 indicatif = "0.18"
 dirs = "6"
+rustyline = "15"
+
+# HTTP client (for blazr ps)
+reqwest = { version = "0.13", features = ["json"] }
 
 [dev-dependencies]
-reqwest = { version = "0.13", features = ["json"] }
 tokio-test = "0.4"
 
 [profile.release]

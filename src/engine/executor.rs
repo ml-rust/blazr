@@ -19,6 +19,7 @@ use boostr::{
     Tensor, TypeConversionOps, UnaryOps,
 };
 
+use crate::chat_template::ChatTemplate;
 use crate::config::{parse_dtype, BlazrConfig, GenerationConfig};
 use crate::tokenizer::{BoxedTokenizer, TokenizerTrait};
 
@@ -37,6 +38,8 @@ pub struct Executor<R: Runtime<DType = DType>> {
     device: R::Device,
     /// Initial context size for KV cache (like Ollama's num_ctx)
     num_ctx: usize,
+    /// Chat template for this model
+    chat_template: ChatTemplate,
 }
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -69,13 +72,26 @@ where
         device: R::Device,
         num_ctx: usize,
     ) -> Result<Self> {
+        let chat_template = ChatTemplate::from_model_type(config.model_type());
         Ok(Self {
             model: Arc::new(model),
             config,
             tokenizer: Box::new(tokenizer),
             device,
             num_ctx,
+            chat_template,
         })
+    }
+
+    /// Create a new executor with a specific chat template detected from model directory
+    pub fn with_chat_template(mut self, template: ChatTemplate) -> Self {
+        self.chat_template = template;
+        self
+    }
+
+    /// Get the chat template for this model
+    pub fn chat_template(&self) -> &ChatTemplate {
+        &self.chat_template
     }
 
     /// Get model configuration
@@ -505,7 +521,9 @@ where
     ) -> Result<GenerationResult> {
         use futures::StreamExt;
 
-        let prompt_tokens = self.tokenizer.encode(prompt)
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
             .map_err(|e| anyhow!("Tokenization failed: {}", e))?
             .len();
 

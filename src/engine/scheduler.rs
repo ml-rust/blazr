@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
+
+use crate::chat_template::ChatTemplate;
 use tokio::sync::RwLock;
 
 use boostr::model::ModelClient;
@@ -118,14 +120,14 @@ where
         // Create tokenizer
         let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
 
+        // Detect chat template from model directory
+        let chat_template = ChatTemplate::detect(&model_path, config.model_type());
+
         // Create executor with num_ctx for KV cache initial capacity
-        let executor = Arc::new(Executor::new(
-            model,
-            config,
-            tokenizer,
-            self.device.clone(),
-            self.num_ctx,
-        )?);
+        let executor = Arc::new(
+            Executor::new(model, config, tokenizer, self.device.clone(), self.num_ctx)?
+                .with_chat_template(chat_template),
+        );
 
         // Store in cache
         {

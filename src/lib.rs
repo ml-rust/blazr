@@ -27,6 +27,7 @@
 //! blazr list
 //! ```
 
+pub mod chat_template;
 pub mod cli;
 pub mod config;
 pub mod engine;
@@ -36,6 +37,7 @@ pub mod server;
 pub mod tokenizer;
 
 // Re-export key types
+pub use chat_template::ChatTemplate;
 pub use config::{BlazrConfig, GenerationConfig, ServerConfig};
 pub use engine::{Executor, Scheduler};
 pub use loader::{load_model, ModelFormat, ModelSource};

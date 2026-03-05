@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     extract::{Json, Path, State},
@@ -31,9 +32,29 @@ impl AppState {
     }
 }
 
-/// Health check endpoint
-pub async fn health() -> impl IntoResponse {
-    (StatusCode::OK, "OK")
+/// Health check endpoint — returns status and loaded model info
+pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let loaded = state
+        .scheduler
+        .list_loaded()
+        .await
+        .into_iter()
+        .map(|m| m.name)
+        .collect::<Vec<_>>();
+
+    let response = HealthResponse {
+        status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        loaded_models: loaded,
+    };
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+#[derive(Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub version: String,
+    pub loaded_models: Vec<String>,
 }
 
 /// List available models
@@ -270,11 +291,9 @@ pub async fn completions(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CompletionRequest>,
 ) -> Response {
-    if let Err(e) = validate_generation_params(
-        request.temperature,
-        request.top_p,
-        request.max_tokens,
-    ) {
+    if let Err(e) =
+        validate_generation_params(request.temperature, request.top_p, request.max_tokens)
+    {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 
@@ -303,6 +322,9 @@ pub async fn completions(
     }
     .into_gen_config();
 
+    let echo = request.stream.is_none() && request.echo.unwrap_or(false);
+    let prompt_text = request.prompt.clone();
+
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model;
@@ -314,15 +336,22 @@ pub async fn completions(
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_completion_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
+        let start = Instant::now();
         match executor.generate_text(&request.prompt, &gen_config).await {
             Ok(result) => {
+                let elapsed = start.elapsed();
+                let text = if echo {
+                    format!("{}{}", prompt_text, result.text)
+                } else {
+                    result.text
+                };
                 let response = CompletionResponse {
                     id: format!("cmpl-{}", uuid::Uuid::new_v4()),
                     object: "text_completion".to_string(),
                     created: chrono::Utc::now().timestamp(),
                     model: request.model,
                     choices: vec![CompletionChoice {
-                        text: result.text,
+                        text,
                         index: 0,
                         finish_reason: result.finish_reason.as_str().to_string(),
                     }],
@@ -330,6 +359,12 @@ pub async fn completions(
                         prompt_tokens: result.prompt_tokens,
                         completion_tokens: result.completion_tokens,
                         total_tokens: result.prompt_tokens + result.completion_tokens,
+                        total_duration_ms: elapsed.as_millis() as u64,
+                        tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
+                            result.completion_tokens as f64 / elapsed.as_secs_f64()
+                        } else {
+                            0.0
+                        },
                     },
                 };
                 (StatusCode::OK, Json(response)).into_response()
@@ -348,11 +383,9 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Response {
-    if let Err(e) = validate_generation_params(
-        request.temperature,
-        request.top_p,
-        request.max_tokens,
-    ) {
+    if let Err(e) =
+        validate_generation_params(request.temperature, request.top_p, request.max_tokens)
+    {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 
@@ -375,7 +408,37 @@ pub async fn chat_completions(
         }
     };
 
-    let prompt = format_chat_messages(&request.messages);
+    let prompt = if request.raw.unwrap_or(false) {
+        // Raw mode: concatenate message contents without template
+        request
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        let mut msgs: Vec<crate::chat_template::ChatMessage> = Vec::new();
+        // Prepend system override if provided and no system message exists
+        if let Some(ref sys) = request.system {
+            let has_system = request.messages.iter().any(|m| m.role == "system");
+            if !has_system {
+                msgs.push(crate::chat_template::ChatMessage {
+                    role: "system".to_string(),
+                    content: sys.clone(),
+                });
+            }
+        }
+        msgs.extend(
+            request
+                .messages
+                .iter()
+                .map(|m| crate::chat_template::ChatMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                }),
+        );
+        executor.chat_template().apply(&msgs)
+    };
 
     let gen_config = SamplingParams {
         max_tokens: request.max_tokens,
@@ -401,8 +464,10 @@ pub async fn chat_completions(
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_chat_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
+        let start = Instant::now();
         match executor.generate_text(&prompt, &gen_config).await {
             Ok(result) => {
+                let elapsed = start.elapsed();
                 let response = ChatResponse {
                     id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
                     object: "chat.completion".to_string(),
@@ -420,6 +485,12 @@ pub async fn chat_completions(
                         prompt_tokens: result.prompt_tokens,
                         completion_tokens: result.completion_tokens,
                         total_tokens: result.prompt_tokens + result.completion_tokens,
+                        total_duration_ms: elapsed.as_millis() as u64,
+                        tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
+                            result.completion_tokens as f64 / elapsed.as_secs_f64()
+                        } else {
+                            0.0
+                        },
                     },
                 };
                 (StatusCode::OK, Json(response)).into_response()
@@ -441,10 +512,7 @@ fn validate_generation_params(
 ) -> Result<(), String> {
     if let Some(t) = temperature {
         if !(0.0..=2.0).contains(&t) {
-            return Err(format!(
-                "temperature must be between 0 and 2, got {}",
-                t
-            ));
+            return Err(format!("temperature must be between 0 and 2, got {}", t));
         }
     }
     if let Some(p) = top_p {
@@ -458,31 +526,6 @@ fn validate_generation_params(
         }
     }
     Ok(())
-}
-
-/// Format chat messages into a prompt string
-fn format_chat_messages(messages: &[ChatMessage]) -> String {
-    let mut prompt = String::new();
-
-    for msg in messages {
-        match msg.role.as_str() {
-            "system" => {
-                prompt.push_str(&format!("<|system|>\n{}\n", msg.content));
-            }
-            "user" => {
-                prompt.push_str(&format!("<|user|>\n{}\n", msg.content));
-            }
-            "assistant" => {
-                prompt.push_str(&format!("<|assistant|>\n{}\n", msg.content));
-            }
-            _ => {
-                prompt.push_str(&format!("{}: {}\n", msg.role, msg.content));
-            }
-        }
-    }
-
-    prompt.push_str("<|assistant|>\n");
-    prompt
 }
 
 /// Build a standard OpenAI error response
@@ -527,6 +570,8 @@ pub struct CompletionRequest {
     pub stop: Option<Vec<String>>,
     #[serde(default)]
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub echo: Option<bool>,
     #[serde(default)]
     #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
@@ -578,6 +623,12 @@ pub struct ChatRequest {
     pub stop: Option<Vec<String>>,
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Bypass chat template and send raw prompt (Ollama-compatible)
+    #[serde(default)]
+    pub raw: Option<bool>,
+    /// Override system prompt (Ollama-compatible, prepended as system message)
+    #[serde(default)]
+    pub system: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
@@ -586,11 +637,7 @@ pub struct ChatRequest {
     pub user: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
+pub use crate::chat_template::ChatMessage;
 
 #[derive(Serialize)]
 pub struct ChatResponse {
@@ -614,6 +661,20 @@ pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    /// Total request duration in milliseconds (blazr extension)
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub total_duration_ms: u64,
+    /// Decode tokens per second (blazr extension)
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub tokens_per_second: f64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Serialize)]

@@ -15,7 +15,12 @@ type ServerRuntime = boostr::CudaRuntime;
 type ServerRuntime = boostr::CpuRuntime;
 
 /// Start the inference server
-pub async fn serve(model: Option<String>, port: u16, host: String) -> Result<()> {
+pub async fn serve(
+    model: Option<String>,
+    port: u16,
+    host: String,
+    api_key: Option<String>,
+) -> Result<()> {
     // Get model directory
     let model_dir = std::env::var("BLAZR_MODEL_DIR")
         .map(PathBuf::from)
@@ -49,9 +54,12 @@ pub async fn serve(model: Option<String>, port: u16, host: String) -> Result<()>
 
     let addr = server_config.addr();
     tracing::info!("Starting server at http://{}", addr);
+    if api_key.is_some() {
+        tracing::info!("API key authentication enabled");
+    }
 
     // Start server
-    server::start(scheduler, server_config).await?;
+    server::start(scheduler, server_config, api_key).await?;
 
     Ok(())
 }

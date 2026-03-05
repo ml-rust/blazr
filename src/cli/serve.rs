@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use colored::Colorize;
 
 use crate::config::ServerConfig;
 use crate::engine::Scheduler;
@@ -38,16 +39,20 @@ pub async fn serve(
 
     // Pre-load and warm up model if specified
     if let Some(ref model_name) = model {
-        tracing::info!("Pre-loading model: {}", model_name);
+        let spinner = super::util::spinner(format!("Loading model '{}'...", model_name));
+
         let load_start = std::time::Instant::now();
         let executor = scheduler.get_executor(model_name).await?;
         let load_time = load_start.elapsed();
         if let Err(e) = executor.warmup() {
             tracing::warn!("Model warmup failed (first request may be slower): {}", e);
         }
-        tracing::info!(
-            "Model '{}' loaded in {:.1}s (vocab={}, ctx={})",
-            model_name,
+
+        spinner.finish_and_clear();
+        eprintln!(
+            "  {} {} in {:.1}s (vocab={}, ctx={})",
+            "Loaded".green(),
+            model_name.bold(),
             load_time.as_secs_f64(),
             executor.vocab_size(),
             executor.config().max_seq_len(),
@@ -78,22 +83,23 @@ pub async fn serve(
         tracing::info!("Loaded {} API key(s) from {:?}", api_keys.len(), path);
     }
 
+    // Startup banner
     let addr = server_config.addr();
     eprintln!();
-    eprintln!("  blazr v{}", env!("CARGO_PKG_VERSION"));
-    eprintln!("  Listening on http://{}", addr);
+    eprintln!("  {} v{}", "blazr".bold().cyan(), env!("CARGO_PKG_VERSION"));
+    eprintln!("  Listening on {}", format!("http://{}", addr).underline());
     if let Some(ref m) = model {
-        eprintln!("  Model: {}", m);
+        eprintln!("  Model: {}", m.bold());
     }
     #[cfg(feature = "cuda")]
-    eprintln!("  Backend: CUDA");
+    eprintln!("  Backend: {}", "CUDA".green());
     #[cfg(not(feature = "cuda"))]
-    eprintln!("  Backend: CPU");
+    eprintln!("  Backend: {}", "CPU".yellow());
     if !api_keys.is_empty() {
         eprintln!("  Auth: {} API key(s)", api_keys.len());
     }
     if server_config.cors_enabled {
-        eprintln!("  CORS: enabled");
+        eprintln!("  CORS: {}", "enabled".yellow());
     }
     eprintln!();
 

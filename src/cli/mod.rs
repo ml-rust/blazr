@@ -8,6 +8,7 @@ mod list;
 mod pull;
 mod run;
 mod serve;
+mod util;
 
 pub use chat::chat;
 pub use info::info;
@@ -113,6 +114,10 @@ pub enum Commands {
         #[arg(long, short)]
         prompt: Option<String>,
 
+        /// Show debug info (token IDs, timing breakdown)
+        #[arg(long, short)]
+        verbose: bool,
+
         #[command(flatten)]
         sampling: SamplingArgs,
 
@@ -215,6 +220,10 @@ pub enum Commands {
         /// Context window size
         #[arg(long, default_value = "4096")]
         num_ctx: usize,
+
+        /// Show debug info (token IDs, timing breakdown)
+        #[arg(long, short)]
+        verbose: bool,
     },
 
     /// Generate shell completions

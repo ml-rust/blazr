@@ -21,13 +21,16 @@ async fn main() -> Result<()> {
         Commands::Run {
             model,
             prompt,
+            verbose,
             sampling,
             runtime,
         } => {
+            let mut gen_config = sampling.into_gen_config();
+            gen_config.verbose_prompt = verbose;
             blazr::cli::run(
                 model,
                 prompt,
-                sampling.into_gen_config(),
+                gen_config,
                 runtime.gpu_layers,
                 runtime.cpu,
                 runtime.num_ctx,
@@ -82,8 +85,18 @@ async fn main() -> Result<()> {
             temperature,
             top_p,
             num_ctx,
+            verbose,
         } => {
-            blazr::cli::chat(model, system, max_tokens, temperature, top_p, num_ctx).await?;
+            blazr::cli::chat(
+                model,
+                system,
+                max_tokens,
+                temperature,
+                top_p,
+                num_ctx,
+                verbose,
+            )
+            .await?;
         }
         Commands::Completions { shell } => {
             clap_complete::generate(

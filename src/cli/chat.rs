@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
+use colored::Colorize;
 use futures::StreamExt;
 
 use crate::chat_template::{ChatMessage, ChatTemplate};
@@ -25,11 +26,13 @@ pub async fn chat(
     temperature: f32,
     top_p: f32,
     num_ctx: usize,
+    verbose: bool,
 ) -> Result<()> {
     let gen_config = GenerationConfig {
         max_tokens,
         temperature,
         top_p,
+        verbose_prompt: verbose,
         ..Default::default()
     };
 
@@ -42,15 +45,25 @@ pub async fn chat(
     let model_path = std::path::Path::new(&model);
     let chat_template = ChatTemplate::detect(model_path, executor.config().model_type());
 
+    // Warmup with spinner
+    let spinner = super::util::spinner("Warming up model...");
     executor.warmup()?;
-    tracing::info!("Model ready");
+    spinner.finish_and_clear();
 
-    println!("blazr chat - Interactive multi-turn conversation");
-    println!("Model: {}", model);
-    println!("Template: {:?}", chat_template);
-    println!();
-    println!("Commands: /clear (reset), /system <msg> (set system), /exit (quit)");
-    println!();
+    eprintln!(
+        "{} - Interactive multi-turn conversation",
+        "blazr chat".bold().cyan()
+    );
+    eprintln!("Model: {}", model.bold());
+    eprintln!("Template: {:?}", chat_template);
+    eprintln!();
+    eprintln!(
+        "Commands: {} {} {}",
+        "/clear".dimmed(),
+        "/system <msg>".dimmed(),
+        "/exit".dimmed()
+    );
+    eprintln!();
 
     let mut history: Vec<ChatMessage> = Vec::new();
 
@@ -153,11 +166,15 @@ pub async fn chat(
         };
 
         println!();
-        println!(
-            "\n[{} tokens, {:.1} tok/s, {:.2}s]",
-            token_count,
-            tok_per_sec,
-            elapsed.as_secs_f64()
+        eprintln!(
+            "\n{}",
+            format!(
+                "[{} tokens, {:.1} tok/s, {:.2}s]",
+                token_count,
+                tok_per_sec,
+                elapsed.as_secs_f64()
+            )
+            .dimmed()
         );
 
         // Add assistant response to history

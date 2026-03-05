@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
+use colored::Colorize;
 use futures::StreamExt;
 
 #[cfg(feature = "cuda")]
@@ -153,8 +154,8 @@ async fn run_cuda(
 
     // Interactive loop
     tracing::info!("Starting interactive session.");
-    println!("Model: {}", model);
-    println!("Type your prompt and press Enter. Type 'exit' or Ctrl+C to quit.\n");
+    eprintln!("Model: {}", model);
+    eprintln!("Type your prompt and press Enter. Type 'exit' or Ctrl+C to quit.\n");
     loop {
         print!("> ");
         io::stdout().flush()?;
@@ -230,8 +231,8 @@ async fn run_cpu(
 
     // Interactive loop
     tracing::info!("Starting interactive session.");
-    println!("Model: {}", model);
-    println!("Type your prompt and press Enter. Type 'exit' or Ctrl+C to quit.\n");
+    eprintln!("Model: {}", model);
+    eprintln!("Type your prompt and press Enter. Type 'exit' or Ctrl+C to quit.\n");
     loop {
         print!("> ");
         io::stdout().flush()?;
@@ -284,21 +285,22 @@ async fn print_generation_stream(
     let tok_per_sec = token_count as f64 / elapsed.as_secs_f64();
 
     println!();
-    if mode.is_empty() {
-        tracing::info!(
-            "Generated {} tokens in {:.2}s ({:.1} tok/s)",
+    let stats = if mode.is_empty() {
+        format!(
+            "[{} tokens, {:.1} tok/s, {:.2}s]",
             token_count,
-            elapsed.as_secs_f64(),
-            tok_per_sec
-        );
-    } else {
-        tracing::info!(
-            "Generated {} tokens in {:.2}s ({:.1} tok/s) [{}]",
-            token_count,
-            elapsed.as_secs_f64(),
             tok_per_sec,
+            elapsed.as_secs_f64()
+        )
+    } else {
+        format!(
+            "[{} tokens, {:.1} tok/s, {:.2}s, {}]",
+            token_count,
+            tok_per_sec,
+            elapsed.as_secs_f64(),
             mode
-        );
-    }
+        )
+    };
+    eprintln!("{}", stats.dimmed());
     Ok(())
 }

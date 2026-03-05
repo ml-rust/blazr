@@ -4,6 +4,7 @@
 
 mod bench;
 mod chat;
+mod convert;
 mod info;
 mod list;
 mod ps;
@@ -14,6 +15,7 @@ mod util;
 
 pub use bench::bench;
 pub use chat::chat;
+pub use convert::convert;
 pub use info::info;
 pub use list::list;
 pub use ps::ps;
@@ -253,6 +255,28 @@ pub enum Commands {
         /// Server URL (default: http://localhost:8080)
         #[arg(long, default_value = "http://localhost:8080")]
         server: String,
+    },
+
+    /// Convert model format (delegates to compressr)
+    Convert {
+        /// Input model path
+        input: String,
+
+        /// Output path (default: auto-generated)
+        #[arg(long, short)]
+        output: Option<String>,
+
+        /// Target format (gguf, awq, gptq, fp8, safetensors)
+        #[arg(long, short, default_value = "gguf")]
+        format: String,
+
+        /// Quantization method (e.g., q4_k_m, q8_0, q5_k_s)
+        #[arg(long, short)]
+        quantization: Option<String>,
+
+        /// Verbose output
+        #[arg(long, short)]
+        verbose: bool,
     },
 
     /// Generate shell completions

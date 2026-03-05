@@ -109,6 +109,15 @@ async fn main() -> Result<()> {
         Commands::Ps { server } => {
             blazr::cli::ps(server).await?;
         }
+        Commands::Convert {
+            input,
+            output,
+            format,
+            quantization,
+            verbose,
+        } => {
+            blazr::cli::convert(input, output, format, quantization, verbose)?;
+        }
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,

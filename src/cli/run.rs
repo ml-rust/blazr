@@ -15,7 +15,7 @@ use crate::engine::Executor;
 use crate::loader::OffloadingOptions;
 use crate::loader::{self, detect_model_source, ModelFormat};
 use crate::tokenizer::Tokenizer;
-use boostr::CpuRuntime;
+use boostr::{CpuRuntime, DType, Runtime};
 
 /// Run interactive generation
 #[allow(clippy::too_many_arguments)]
@@ -152,39 +152,8 @@ async fn run_cuda(
         return Ok(());
     }
 
-    // Interactive loop
-    tracing::info!("Starting interactive session.");
-    eprintln!("Model: {}", model);
-    eprintln!("Type your prompt and press Enter. Type 'exit' or Ctrl+C to quit.\n");
-    loop {
-        print!("> ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
-
-        if input.is_empty() {
-            continue;
-        }
-
-        if input == "exit" || input == "quit" {
-            break;
-        }
-
-        if graphs && gen_config.is_greedy() {
-            print_generation_stream(
-                executor.generate_with_graphs(input, &gen_config),
-                "CUDA graph mode",
-            )
-            .await?;
-        } else {
-            print_generation_stream(executor.generate(input, &gen_config), "").await?;
-        }
-        println!();
-    }
-
-    Ok(())
+    // Interactive REPL (graph mode uses standard generate in REPL for simplicity)
+    interactive_repl(&executor, &gen_config, &model, graphs).await
 }
 
 async fn run_cpu(
@@ -229,30 +198,101 @@ async fn run_cpu(
         return Ok(());
     }
 
-    // Interactive loop
-    tracing::info!("Starting interactive session.");
-    eprintln!("Model: {}", model);
-    eprintln!("Type your prompt and press Enter. Type 'exit' or Ctrl+C to quit.\n");
+    // Interactive REPL
+    interactive_repl(&executor, &gen_config, &model, false).await
+}
+
+/// Interactive multi-turn REPL with arrow key history and slash commands
+async fn interactive_repl<R>(
+    executor: &Executor<R>,
+    gen_config: &GenerationConfig,
+    model_name: &str,
+    _graphs: bool,
+) -> Result<()>
+where
+    R: Runtime<DType = DType>,
+    R::Client: boostr::ops::TensorOps<R>
+        + boostr::ScalarOps<R>
+        + boostr::ConvOps<R>
+        + boostr::NormalizationOps<R>
+        + boostr::UnaryOps<R>
+        + boostr::ActivationOps<R>
+        + boostr::BinaryOps<R>
+        + boostr::TypeConversionOps<R>
+        + boostr::SamplingOps<R>
+        + boostr::model::ModelClient<R>,
+{
+    eprintln!("{} - Interactive generation", "blazr run".bold().cyan());
+    eprintln!("Model: {}", model_name.bold());
+    eprintln!();
+    eprintln!(
+        "Commands: {} {} {}",
+        "/clear".dimmed(),
+        "/history".dimmed(),
+        "/exit".dimmed(),
+    );
+    eprintln!("Use arrow keys for history navigation.\n");
+
+    let history_path = dirs::data_dir()
+        .map(|d| d.join("blazr").join("run_history.txt"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".blazr_history"));
+
+    // Ensure parent directory exists
+    if let Some(parent) = history_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let mut rl = rustyline::DefaultEditor::new()?;
+    let _ = rl.load_history(&history_path);
+
+    let mut turn_count = 0u32;
+
     loop {
-        print!("> ");
-        io::stdout().flush()?;
+        let readline = rl.readline("> ");
+        let input = match readline {
+            Ok(line) => line,
+            Err(
+                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
+            ) => break,
+            Err(e) => {
+                eprintln!("Input error: {}", e);
+                break;
+            }
+        };
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
-
+        let input = input.trim().to_string();
         if input.is_empty() {
             continue;
         }
 
-        if input == "exit" || input == "quit" {
-            break;
+        rl.add_history_entry(&input)?;
+
+        // Slash commands
+        if input.starts_with('/') {
+            match input.as_str() {
+                "/exit" | "/quit" => break,
+                "/clear" => {
+                    turn_count = 0;
+                    eprintln!("Session cleared.");
+                    continue;
+                }
+                "/history" => {
+                    eprintln!("{} turns in this session", turn_count);
+                    continue;
+                }
+                _ => {
+                    eprintln!("Unknown command. Use /clear, /history, or /exit");
+                    continue;
+                }
+            }
         }
 
-        print_generation_stream(executor.generate(input, &gen_config), "").await?;
+        turn_count += 1;
+        print_generation_stream(executor.generate(&input, gen_config), "").await?;
         println!();
     }
 
+    let _ = rl.save_history(&history_path);
     Ok(())
 }
 

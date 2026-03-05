@@ -12,9 +12,11 @@ use axum::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use tokio::sync::RwLock;
+
 use super::metrics;
 use super::streaming::{create_chat_stream, create_completion_stream, StreamToken};
-use crate::config::GenerationConfig;
+use crate::config::{GenerationConfig, UserConfig};
 use crate::engine::{FinishReason, Scheduler};
 
 #[cfg(feature = "cuda")]
@@ -26,6 +28,7 @@ type ServerRuntime = boostr::CpuRuntime;
 pub struct AppState {
     pub scheduler: Arc<Scheduler<ServerRuntime>>,
     pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+    pub user_config: Arc<RwLock<UserConfig>>,
 }
 
 impl AppState {
@@ -36,6 +39,7 @@ impl AppState {
         Self {
             scheduler,
             metrics_handle,
+            user_config: Arc::new(RwLock::new(UserConfig::load())),
         }
     }
 }
@@ -457,42 +461,40 @@ pub async fn chat_completions(
         }
     };
 
-    let prompt = if request.raw.unwrap_or(false) {
-        // Raw mode: concatenate message contents without template
-        request
-            .messages
-            .iter()
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        let mut msgs: Vec<crate::chat_template::ChatMessage> = Vec::new();
-        // Prepend system override if provided and no system message exists
-        if let Some(ref sys) = request.system {
-            let has_system = request.messages.iter().any(|m| m.role == "system");
-            if !has_system {
-                msgs.push(crate::chat_template::ChatMessage {
-                    role: "system".to_string(),
-                    content: sys.clone(),
-                });
-            }
-        }
-        msgs.extend(
+    let prompt =
+        if request.raw.unwrap_or(false) {
+            // Raw mode: concatenate message contents without template
             request
                 .messages
                 .iter()
-                .map(|m| crate::chat_template::ChatMessage {
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            let mut msgs: Vec<crate::model::chat_template::ChatMessage> = Vec::new();
+            // Prepend system override if provided and no system message exists
+            if let Some(ref sys) = request.system {
+                let has_system = request.messages.iter().any(|m| m.role == "system");
+                if !has_system {
+                    msgs.push(crate::model::chat_template::ChatMessage {
+                        role: "system".to_string(),
+                        content: sys.clone(),
+                    });
+                }
+            }
+            msgs.extend(request.messages.iter().map(|m| {
+                crate::model::chat_template::ChatMessage {
                     role: m.role.clone(),
                     content: m.content.clone(),
-                }),
-        );
-        // Use per-request template override if provided, otherwise model's template
-        if let Some(ref tpl_name) = request.template {
-            crate::chat_template::ChatTemplate::from_name(tpl_name).apply(&msgs)
-        } else {
-            executor.chat_template().apply(&msgs)
-        }
-    };
+                }
+            }));
+            // Use per-request template override if provided, otherwise model's template
+            if let Some(ref tpl_name) = request.template {
+                crate::model::chat_template::ChatTemplate::from_name(tpl_name).apply(&msgs)
+            } else {
+                executor.chat_template().apply(&msgs)
+            }
+        };
     let prompt = if context_prefix.is_empty() {
         prompt
     } else {
@@ -730,7 +732,7 @@ pub struct ChatRequest {
     pub user: Option<String>,
 }
 
-pub use crate::chat_template::ChatMessage;
+pub use crate::model::chat_template::ChatMessage;
 
 #[derive(Serialize)]
 pub struct ChatResponse {

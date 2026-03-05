@@ -19,8 +19,8 @@ use boostr::{
     Tensor, TypeConversionOps, UnaryOps,
 };
 
-use crate::chat_template::ChatTemplate;
 use crate::config::{parse_dtype, BlazrConfig, GenerationConfig};
+use crate::model::chat_template::ChatTemplate;
 use crate::tokenizer::{BoxedTokenizer, TokenizerTrait};
 
 /// Inference executor

@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 
-use crate::chat_template::ChatTemplate;
+use crate::model::chat_template::ChatTemplate;
 use tokio::sync::RwLock;
 
 use boostr::model::ModelClient;

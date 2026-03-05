@@ -325,4 +325,144 @@ mod tests {
             ChatTemplate::Generic
         );
     }
+
+    #[test]
+    fn test_deepseek_format() {
+        let messages = msgs(&[("system", "You are a helpful assistant."), ("user", "Hi")]);
+        let result = ChatTemplate::DeepSeek.apply(&messages);
+        assert!(result.starts_with("<|begin▁of▁sentence|>"));
+        assert!(result.contains("You are a helpful assistant."));
+        assert!(result.contains("<|User|>Hi"));
+        assert!(result.ends_with("<|Assistant|>"));
+    }
+
+    #[test]
+    fn test_deepseek_multi_turn() {
+        let messages = msgs(&[
+            ("user", "Hello"),
+            ("assistant", "Hi there!"),
+            ("user", "How are you?"),
+        ]);
+        let result = ChatTemplate::DeepSeek.apply(&messages);
+        assert!(result.contains("<|User|>Hello"));
+        assert!(result.contains("<|Assistant|>Hi there!<|end▁of▁sentence|>"));
+        assert!(result.contains("<|User|>How are you?"));
+        assert!(result.ends_with("<|Assistant|>"));
+    }
+
+    #[test]
+    fn test_generic_format() {
+        let messages = msgs(&[("system", "Be brief."), ("user", "Hi")]);
+        let result = ChatTemplate::Generic.apply(&messages);
+        assert_eq!(result, "system: Be brief.\nuser: Hi\nassistant: ");
+    }
+
+    #[test]
+    fn test_multi_turn_llama3() {
+        let messages = msgs(&[
+            ("user", "Hello"),
+            ("assistant", "Hi! How can I help?"),
+            ("user", "What is 2+2?"),
+        ]);
+        let result = ChatTemplate::Llama3.apply(&messages);
+        assert!(result.contains("Hello<|eot_id|>"));
+        assert!(result.contains("Hi! How can I help?<|eot_id|>"));
+        assert!(result.contains("What is 2+2?<|eot_id|>"));
+        assert!(result.ends_with("<|start_header_id|>assistant<|end_header_id|>\n\n"));
+    }
+
+    #[test]
+    fn test_multi_turn_chatml() {
+        let messages = msgs(&[
+            ("system", "You are helpful."),
+            ("user", "Hello"),
+            ("assistant", "Hi!"),
+            ("user", "Bye"),
+        ]);
+        let result = ChatTemplate::ChatML.apply(&messages);
+        assert!(result.contains("<|im_start|>system\nYou are helpful.<|im_end|>"));
+        assert!(result.contains("<|im_start|>assistant\nHi!<|im_end|>"));
+        assert!(result.contains("<|im_start|>user\nBye<|im_end|>"));
+        assert!(result.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn test_mistral_multi_turn() {
+        let messages = msgs(&[
+            ("user", "Hello"),
+            ("assistant", "Hi!"),
+            ("user", "How are you?"),
+        ]);
+        let result = ChatTemplate::MistralInstruct.apply(&messages);
+        assert!(result.contains("[INST] Hello [/INST]"));
+        assert!(result.contains(" Hi!</s>"));
+        assert!(result.contains("[INST] How are you? [/INST]"));
+    }
+
+    #[test]
+    fn test_gemma_role_mapping() {
+        let messages = msgs(&[("user", "Hello"), ("assistant", "Hi!")]);
+        let result = ChatTemplate::Gemma.apply(&messages);
+        // Gemma maps "assistant" -> "model"
+        assert!(result.contains("<start_of_turn>user\nHello<end_of_turn>"));
+        assert!(result.contains("<start_of_turn>model\nHi!<end_of_turn>"));
+        assert!(result.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn test_from_name() {
+        assert_eq!(ChatTemplate::from_name("llama3"), ChatTemplate::Llama3);
+        assert_eq!(ChatTemplate::from_name("LLAMA"), ChatTemplate::Llama3);
+        assert_eq!(
+            ChatTemplate::from_name("mistral"),
+            ChatTemplate::MistralInstruct
+        );
+        assert_eq!(ChatTemplate::from_name("chatml"), ChatTemplate::ChatML);
+        assert_eq!(ChatTemplate::from_name("qwen"), ChatTemplate::ChatML);
+        assert_eq!(ChatTemplate::from_name("phi3"), ChatTemplate::Phi3);
+        assert_eq!(ChatTemplate::from_name("gemma"), ChatTemplate::Gemma);
+        assert_eq!(ChatTemplate::from_name("deepseek"), ChatTemplate::DeepSeek);
+        assert_eq!(ChatTemplate::from_name("raw"), ChatTemplate::Generic);
+        assert_eq!(ChatTemplate::from_name("unknown"), ChatTemplate::Generic);
+    }
+
+    #[test]
+    fn test_empty_messages() {
+        let messages: Vec<ChatMessage> = vec![];
+        // Should not panic on empty messages
+        let result = ChatTemplate::Llama3.apply(&messages);
+        assert!(result.contains("assistant"));
+        let result = ChatTemplate::ChatML.apply(&messages);
+        assert!(result.contains("assistant"));
+        let result = ChatTemplate::Generic.apply(&messages);
+        assert_eq!(result, "assistant: ");
+    }
+
+    #[test]
+    fn test_model_type_aliases() {
+        // Yi uses ChatML
+        assert_eq!(ChatTemplate::from_model_type("yi"), ChatTemplate::ChatML);
+        // InternLM2 uses ChatML
+        assert_eq!(
+            ChatTemplate::from_model_type("internlm2"),
+            ChatTemplate::ChatML
+        );
+        // qwen2_moe uses ChatML
+        assert_eq!(
+            ChatTemplate::from_model_type("qwen2_moe"),
+            ChatTemplate::ChatML
+        );
+        // phi uses Phi3
+        assert_eq!(ChatTemplate::from_model_type("phi"), ChatTemplate::Phi3);
+        // deepseek_v2 uses DeepSeek
+        assert_eq!(
+            ChatTemplate::from_model_type("deepseek_v2"),
+            ChatTemplate::DeepSeek
+        );
+        // starcoder2 uses Generic
+        assert_eq!(
+            ChatTemplate::from_model_type("starcoder2"),
+            ChatTemplate::Generic
+        );
+    }
 }

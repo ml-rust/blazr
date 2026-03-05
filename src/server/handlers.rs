@@ -243,10 +243,17 @@ struct SamplingParams {
     presence_penalty: Option<f32>,
     stop: Option<Vec<String>>,
     seed: Option<u64>,
+    logit_bias: Option<HashMap<String, f32>>,
 }
 
 impl SamplingParams {
     fn into_gen_config(self) -> GenerationConfig {
+        let logit_bias = self
+            .logit_bias
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, v)| k.parse::<u32>().ok().map(|id| (id, v)))
+            .collect();
         GenerationConfig {
             max_tokens: self.max_tokens.unwrap_or(256),
             temperature: self.temperature.unwrap_or(1.0),
@@ -258,6 +265,7 @@ impl SamplingParams {
             presence_penalty: self.presence_penalty.unwrap_or(0.0),
             stop_sequences: self.stop.unwrap_or_default(),
             seed: self.seed,
+            logit_bias,
             ..Default::default()
         }
     }
@@ -404,6 +412,7 @@ pub async fn completions(
         presence_penalty: request.presence_penalty,
         stop: request.stop.clone(),
         seed: request.seed,
+        logit_bias: request.logit_bias.clone(),
     }
     .into_gen_config();
 
@@ -434,61 +443,93 @@ pub async fn completions(
         create_completion_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
         let echo = request.echo.unwrap_or(false);
+        let n = request.n.unwrap_or(1).max(1);
+        let suffix = request.suffix.clone();
         let model_name = request.model.clone();
         let start = Instant::now();
-        match executor.generate_text(&prompt, &gen_config).await {
-            Ok(result) => {
-                let elapsed = start.elapsed();
-                let text = if echo {
-                    format!("{}{}", prompt, result.text)
-                } else {
-                    result.text
-                };
-                let done_reason = result.finish_reason.as_str().to_string();
-                let response = CompletionResponse {
-                    id: format!("cmpl-{}", uuid::Uuid::new_v4()),
-                    object: "text_completion".to_string(),
-                    created: chrono::Utc::now().timestamp(),
-                    model: request.model,
-                    choices: vec![CompletionChoice {
-                        text,
-                        index: 0,
-                        finish_reason: done_reason.clone(),
-                    }],
-                    usage: Usage {
-                        prompt_tokens: result.prompt_tokens,
-                        completion_tokens: result.completion_tokens,
-                        total_tokens: result.prompt_tokens + result.completion_tokens,
-                        total_duration_ms: elapsed.as_millis() as u64,
-                        prompt_eval_duration_ms: result.prompt_eval_duration_ms,
-                        load_duration_ms,
-                        tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
-                            result.completion_tokens as f64 / elapsed.as_secs_f64()
-                        } else {
-                            0.0
-                        },
-                    },
-                    done_reason: Some(done_reason),
-                };
-                record_generation_metrics(
-                    result.prompt_tokens,
-                    result.completion_tokens,
-                    result.prompt_eval_duration_ms,
-                    elapsed,
-                );
-                apply_keep_alive(&state, &model_name, &request.keep_alive).await;
-                state.release(estimated_tokens);
-                (StatusCode::OK, Json(response)).into_response()
+
+        let mut choices = Vec::with_capacity(n);
+        let mut total_prompt_tokens = 0;
+        let mut total_completion_tokens = 0;
+        let mut first_prompt_eval_ms = 0u64;
+
+        for i in 0..n {
+            // Vary seed per sample so n > 1 produces independent outputs
+            let mut iter_config = gen_config.clone();
+            if let Some(s) = iter_config.seed {
+                iter_config.seed = Some(s.wrapping_add(i as u64));
             }
-            Err(e) => {
-                state.release(estimated_tokens);
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &e.to_string(),
-                    "server_error",
-                )
+            match executor.generate_text(&prompt, &iter_config).await {
+                Ok(result) => {
+                    if i == 0 {
+                        total_prompt_tokens = result.prompt_tokens;
+                        first_prompt_eval_ms = result.prompt_eval_duration_ms;
+                    }
+                    total_completion_tokens += result.completion_tokens;
+
+                    let mut text = if echo {
+                        format!("{}{}", prompt, result.text)
+                    } else {
+                        result.text
+                    };
+                    if let Some(ref sfx) = suffix {
+                        text.push_str(sfx);
+                    }
+
+                    choices.push(CompletionChoice {
+                        text,
+                        index: i,
+                        finish_reason: result.finish_reason.as_str().to_string(),
+                    });
+                }
+                Err(e) => {
+                    state.release(estimated_tokens);
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &e.to_string(),
+                        "server_error",
+                    );
+                }
             }
         }
+
+        let elapsed = start.elapsed();
+        let done_reason = choices
+            .last()
+            .map(|c| c.finish_reason.clone())
+            .unwrap_or_default();
+        let response = CompletionResponse {
+            id: format!("cmpl-{}", uuid::Uuid::new_v4()),
+            object: "text_completion".to_string(),
+            created: chrono::Utc::now().timestamp(),
+            model: request.model,
+            choices,
+            usage: Usage {
+                prompt_tokens: total_prompt_tokens,
+                completion_tokens: total_completion_tokens,
+                total_tokens: total_prompt_tokens + total_completion_tokens,
+                total_duration_ms: elapsed.as_millis() as u64,
+                prompt_eval_duration_ms: first_prompt_eval_ms,
+                load_duration_ms,
+                tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
+                    total_completion_tokens as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                },
+            },
+            done_reason: Some(done_reason),
+        };
+        record_generation_metrics(
+            &model_name,
+            &request.user,
+            total_prompt_tokens,
+            total_completion_tokens,
+            first_prompt_eval_ms,
+            elapsed,
+        );
+        apply_keep_alive(&state, &model_name, &request.keep_alive).await;
+        state.release(estimated_tokens);
+        (StatusCode::OK, Json(response)).into_response()
     }
 }
 
@@ -587,6 +628,7 @@ pub async fn chat_completions(
         presence_penalty: request.presence_penalty,
         stop: request.stop.clone(),
         seed: request.seed,
+        logit_bias: request.logit_bias.clone(),
     }
     .into_gen_config();
 
@@ -618,72 +660,102 @@ pub async fn chat_completions(
     } else {
         let start = Instant::now();
         let think_enabled = request.think.unwrap_or(false);
+        let n = request.n.unwrap_or(1).max(1);
         let model_name = request.model.clone();
-        match executor.generate_text(&prompt, &gen_config).await {
-            Ok(result) => {
-                let elapsed = start.elapsed();
-                let done_reason = result.finish_reason.as_str().to_string();
 
-                let (content, thinking) = if think_enabled {
-                    let extracted = crate::model::think::extract_thinking(&result.text);
-                    let thinking = if extracted.thinking.is_empty() {
-                        None
+        let mut choices = Vec::with_capacity(n);
+        let mut total_prompt_tokens = 0;
+        let mut total_completion_tokens = 0;
+        let mut first_prompt_eval_ms = 0u64;
+        let mut thinking = None;
+
+        for i in 0..n {
+            // Vary seed per sample so n > 1 produces independent outputs
+            let mut iter_config = gen_config.clone();
+            if let Some(s) = iter_config.seed {
+                iter_config.seed = Some(s.wrapping_add(i as u64));
+            }
+            match executor.generate_text(&prompt, &iter_config).await {
+                Ok(result) => {
+                    if i == 0 {
+                        total_prompt_tokens = result.prompt_tokens;
+                        first_prompt_eval_ms = result.prompt_eval_duration_ms;
+                    }
+                    total_completion_tokens += result.completion_tokens;
+
+                    let (content, think_content) = if think_enabled {
+                        let extracted = crate::model::think::extract_thinking(&result.text);
+                        let t = if extracted.thinking.is_empty() {
+                            None
+                        } else {
+                            Some(extracted.thinking.join("\n\n"))
+                        };
+                        (extracted.content, t)
                     } else {
-                        Some(extracted.thinking.join("\n\n"))
+                        (result.text, None)
                     };
-                    (extracted.content, thinking)
-                } else {
-                    (result.text, None)
-                };
+                    if i == 0 {
+                        thinking = think_content;
+                    }
 
-                let response = ChatResponse {
-                    id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-                    object: "chat.completion".to_string(),
-                    created: chrono::Utc::now().timestamp(),
-                    model: request.model,
-                    choices: vec![ChatChoice {
-                        index: 0,
+                    choices.push(ChatChoice {
+                        index: i,
                         message: ChatMessage {
                             role: "assistant".to_string(),
                             content,
                         },
-                        finish_reason: done_reason.clone(),
-                    }],
-                    thinking,
-                    usage: Usage {
-                        prompt_tokens: result.prompt_tokens,
-                        completion_tokens: result.completion_tokens,
-                        total_tokens: result.prompt_tokens + result.completion_tokens,
-                        total_duration_ms: elapsed.as_millis() as u64,
-                        prompt_eval_duration_ms: result.prompt_eval_duration_ms,
-                        load_duration_ms,
-                        tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
-                            result.completion_tokens as f64 / elapsed.as_secs_f64()
-                        } else {
-                            0.0
-                        },
-                    },
-                    done_reason: Some(done_reason),
-                };
-                record_generation_metrics(
-                    result.prompt_tokens,
-                    result.completion_tokens,
-                    result.prompt_eval_duration_ms,
-                    elapsed,
-                );
-                apply_keep_alive(&state, &model_name, &request.keep_alive).await;
-                state.release(estimated_tokens);
-                (StatusCode::OK, Json(response)).into_response()
-            }
-            Err(e) => {
-                state.release(estimated_tokens);
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &e.to_string(),
-                    "server_error",
-                )
+                        finish_reason: result.finish_reason.as_str().to_string(),
+                    });
+                }
+                Err(e) => {
+                    state.release(estimated_tokens);
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &e.to_string(),
+                        "server_error",
+                    );
+                }
             }
         }
+
+        let elapsed = start.elapsed();
+        let done_reason = choices
+            .last()
+            .map(|c| c.finish_reason.clone())
+            .unwrap_or_default();
+        let response = ChatResponse {
+            id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+            object: "chat.completion".to_string(),
+            created: chrono::Utc::now().timestamp(),
+            model: request.model,
+            choices,
+            thinking,
+            usage: Usage {
+                prompt_tokens: total_prompt_tokens,
+                completion_tokens: total_completion_tokens,
+                total_tokens: total_prompt_tokens + total_completion_tokens,
+                total_duration_ms: elapsed.as_millis() as u64,
+                prompt_eval_duration_ms: first_prompt_eval_ms,
+                load_duration_ms,
+                tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
+                    total_completion_tokens as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                },
+            },
+            done_reason: Some(done_reason),
+        };
+        record_generation_metrics(
+            &model_name,
+            &request.user,
+            total_prompt_tokens,
+            total_completion_tokens,
+            first_prompt_eval_ms,
+            elapsed,
+        );
+        apply_keep_alive(&state, &model_name, &request.keep_alive).await;
+        state.release(estimated_tokens);
+        (StatusCode::OK, Json(response)).into_response()
     }
 }
 
@@ -691,6 +763,8 @@ pub async fn chat_completions(
 /// Returns an empty string if no context tokens are provided.
 /// Record generation metrics (tokens, TTFT, throughput) after a non-streaming request.
 fn record_generation_metrics(
+    model: &str,
+    user: &Option<String>,
     prompt_tokens: usize,
     completion_tokens: usize,
     prompt_eval_ms: u64,
@@ -698,11 +772,21 @@ fn record_generation_metrics(
 ) {
     metrics::record_tokens(prompt_tokens, completion_tokens);
     metrics::record_ttft(prompt_eval_ms as f64 / 1000.0);
-    metrics::record_tokens_per_second(if elapsed.as_secs_f64() > 0.0 {
+    let tps = if elapsed.as_secs_f64() > 0.0 {
         completion_tokens as f64 / elapsed.as_secs_f64()
     } else {
         0.0
-    });
+    };
+    metrics::record_tokens_per_second(tps);
+    tracing::info!(
+        model = model,
+        user = user.as_deref().unwrap_or("-"),
+        prompt_tokens = prompt_tokens,
+        completion_tokens = completion_tokens,
+        tokens_per_second = format!("{:.1}", tps).as_str(),
+        duration_ms = elapsed.as_millis() as u64,
+        "generation complete"
+    );
 }
 
 fn decode_context_prefix(
@@ -811,17 +895,22 @@ pub struct CompletionRequest {
     pub seed: Option<u64>,
     #[serde(default)]
     pub echo: Option<bool>,
+    /// Number of completions to generate (default 1)
+    #[serde(default)]
+    pub n: Option<usize>,
+    /// FIM suffix: text to insert after the generated completion (fill-in-the-middle)
+    #[serde(default)]
+    pub suffix: Option<String>,
     /// Conversational context: token IDs from a previous response to prepend (Ollama-compatible)
     #[serde(default)]
     pub context: Option<Vec<i64>>,
     /// Model keep-alive duration (e.g., "5m", "1h", "0" to unload immediately, "-1" for forever)
     #[serde(default)]
     pub keep_alive: Option<String>,
+    /// Per-token logit bias: map of token_id (as string) → bias value to add to logit
     #[serde(default)]
-    #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub user: Option<String>,
 }
 
@@ -886,15 +975,17 @@ pub struct ChatRequest {
     /// Enable think mode: extract `<think>` blocks from reasoning models (DeepSeek-R1, QwQ)
     #[serde(default)]
     pub think: Option<bool>,
+    /// Number of completions to generate (default 1)
+    #[serde(default)]
+    pub n: Option<usize>,
     /// Model keep-alive duration (e.g., "5m", "1h", "0" to unload immediately, "-1" for forever).
     /// Overrides the server default for this request.
     #[serde(default)]
     pub keep_alive: Option<String>,
+    /// Per-token logit bias: map of token_id (as string) → bias value to add to logit
     #[serde(default)]
-    #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub user: Option<String>,
 }
 

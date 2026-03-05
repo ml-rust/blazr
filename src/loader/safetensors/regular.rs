@@ -72,11 +72,11 @@ where
     };
 
     // Load all tensors into a VarMap
-    let var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
+    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
 
-    // Leak the VarMap to get a 'static reference
-    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
-    let mut vb = VarBuilder::new(var_map_ref, device);
+    // VarMap only needs to live through model loading — LoadedModel::load takes
+    // tensors out via take_tensor, so VarMap is empty after load and can be dropped.
+    let mut vb = VarBuilder::new(&mut var_map, device);
 
     // Load model using boostr's LoadedModel
     let model = LoadedModel::load(&config.model, &mut vb)
@@ -138,9 +138,8 @@ where
         );
     }
 
-    let var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
-    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
-    let mut vb = VarBuilder::new(var_map_ref, device);
+    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
+    let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model =
         LoadedModel::load(config, &mut vb).map_err(|e| anyhow!("Failed to load model: {}", e))?;

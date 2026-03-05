@@ -30,13 +30,12 @@ where
     let config = config_from_gguf_metadata(&gguf)?;
 
     // Load all tensors (names auto-mapped from GGUF to HF convention)
-    let var_map = VarMap::<R>::from_gguf(path, device)
+    let mut var_map = VarMap::<R>::from_gguf(path, device)
         .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
 
     tracing::info!("Loaded {} tensors from GGUF", var_map.len());
 
-    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
-    let mut vb = VarBuilder::new(var_map_ref, device);
+    let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {}", e))?;
@@ -55,11 +54,10 @@ where
 {
     let path = path.as_ref();
 
-    let var_map = VarMap::<R>::from_gguf(path, device)
+    let mut var_map = VarMap::<R>::from_gguf(path, device)
         .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
 
-    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
-    let mut vb = VarBuilder::new(var_map_ref, device);
+    let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model =
         LoadedModel::load(config, &mut vb).map_err(|e| anyhow!("Failed to load model: {}", e))?;
@@ -86,13 +84,12 @@ where
     let config = config_from_gguf_metadata(&gguf)?;
     let tokenizer = crate::tokenizer::GgufTokenizer::from_gguf(&gguf)?;
 
-    let var_map = VarMap::<R>::from_gguf(path, device)
+    let mut var_map = VarMap::<R>::from_gguf(path, device)
         .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
 
     tracing::info!("Loaded {} tensors from GGUF", var_map.len());
 
-    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
-    let mut vb = VarBuilder::new(var_map_ref, device);
+    let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {}", e))?;

@@ -293,8 +293,7 @@ where
         staged_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
     );
 
-    let var_map_ref: &'static mut VarMap<R> = Box::leak(Box::new(var_map));
-    let mut vb = VarBuilder::new(var_map_ref, gpu_device);
+    let mut vb = VarBuilder::new(&mut var_map, gpu_device);
 
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {}", e))?;

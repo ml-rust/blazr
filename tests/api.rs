@@ -141,6 +141,78 @@ fn test_logit_bias_in_config() {
     assert_eq!(config.logit_bias[&200], -10.0);
 }
 
+#[test]
+fn test_mirostat_config() {
+    let config = blazr::GenerationConfig {
+        mirostat_mode: 2,
+        mirostat_tau: 5.0,
+        mirostat_eta: 0.1,
+        ..Default::default()
+    };
+    assert_eq!(config.mirostat_mode, 2);
+    assert_eq!(config.mirostat_tau, 5.0);
+    assert_eq!(config.mirostat_eta, 0.1);
+}
+
+#[test]
+fn test_dynatemp_config() {
+    let config = blazr::GenerationConfig {
+        temperature: 0.8,
+        dynatemp_range: 0.3,
+        dynatemp_exponent: 1.5,
+        ..Default::default()
+    };
+    assert_eq!(config.dynatemp_range, 0.3);
+    assert_eq!(config.dynatemp_exponent, 1.5);
+    assert!(!config.is_greedy());
+}
+
+#[test]
+fn test_logprobs_config() {
+    let config = blazr::GenerationConfig {
+        logprobs: true,
+        top_logprobs: 10,
+        ..Default::default()
+    };
+    assert!(config.logprobs);
+    assert_eq!(config.top_logprobs, 10);
+}
+
+#[test]
+fn test_json_mode_config() {
+    let config = blazr::GenerationConfig {
+        json_mode: true,
+        ..Default::default()
+    };
+    assert!(config.json_mode);
+}
+
+#[test]
+fn test_dry_sampling_config() {
+    let config = blazr::GenerationConfig {
+        dry_multiplier: 1.0,
+        dry_base: 3,
+        dry_allowed_length: 128,
+        ..Default::default()
+    };
+    assert_eq!(config.dry_multiplier, 1.0);
+    assert_eq!(config.dry_base, 3);
+    assert_eq!(config.dry_allowed_length, 128);
+    assert!(config.dry_sequence_breakers.is_empty());
+}
+
+#[test]
+fn test_typical_sampling_config() {
+    let config = blazr::GenerationConfig {
+        typical_p: 0.95,
+        ..Default::default()
+    };
+    assert_eq!(config.typical_p, 0.95);
+    // typical_p = 0 by default (disabled)
+    let default_config = blazr::GenerationConfig::default();
+    assert_eq!(default_config.typical_p, 0.0);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Live server tests — require BLAZR_TEST_SERVER env var
 // ═══════════════════════════════════════════════════════════

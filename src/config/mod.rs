@@ -6,10 +6,12 @@
 mod generation;
 mod inference;
 mod server;
+mod user;
 
 pub use generation::GenerationConfig;
 pub use inference::{DeviceConfig, InferenceConfig};
 pub use server::ServerConfig;
+pub use user::UserConfig;
 
 use std::path::Path;
 
@@ -66,7 +68,7 @@ impl BlazrConfig {
     /// Load configuration from a YAML file
     pub fn from_yaml<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
-        let config: Self = serde_yaml::from_str(&content)?;
+        let config: Self = serde_saphyr::from_str(&content)?;
         Ok(config)
     }
 
@@ -193,7 +195,7 @@ generation:
   max_tokens: 2048
   temperature: 0.7
 "#;
-        let config: BlazrConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: BlazrConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.model_type(), "mistral");
         assert_eq!(config.vocab_size(), 32000);
         assert_eq!(config.max_seq_len(), 4096); // Uses inference override

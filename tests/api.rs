@@ -313,3 +313,136 @@ async fn test_concurrent_requests() {
         assert_eq!(resp.status(), 200);
     }
 }
+
+#[tokio::test]
+#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
+async fn test_chat_completions_streaming() {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", TEST_SERVER))
+        .json(&serde_json::json!({
+            "model": "llama-3.2-1b",
+            "messages": [
+                {"role": "user", "content": "Say hi."}
+            ],
+            "max_tokens": 5,
+            "temperature": 0.0,
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("chat streaming request failed");
+    assert_eq!(resp.status(), 200);
+
+    let text = resp.text().await.unwrap();
+    // Verify SSE format: should have role chunk, content chunks, and [DONE]
+    assert!(
+        text.contains("chat.completion.chunk"),
+        "Should contain chunk objects"
+    );
+    assert!(
+        text.contains("\"role\":\"assistant\""),
+        "First chunk should set role"
+    );
+    assert!(text.contains("[DONE]"), "Stream must end with [DONE]");
+}
+
+#[tokio::test]
+#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
+async fn test_stop_sequence() {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/completions", TEST_SERVER))
+        .json(&serde_json::json!({
+            "model": "llama-3.2-1b",
+            "prompt": "Count from 1 to 10: 1, 2, 3, 4, 5,",
+            "max_tokens": 50,
+            "temperature": 0.0,
+            "stop": [" 8"]
+        }))
+        .send()
+        .await
+        .expect("stop sequence request failed");
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let text = body["choices"][0]["text"].as_str().unwrap();
+    assert!(
+        !text.contains(" 8"),
+        "Output should not contain the stop sequence ' 8'"
+    );
+    assert_eq!(body["choices"][0]["finish_reason"], "stop");
+}
+
+#[tokio::test]
+#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
+async fn test_streaming_disconnect_no_crash() {
+    // Start a streaming request and immediately drop the connection.
+    // The server should not crash or leak resources.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/completions", TEST_SERVER))
+        .json(&serde_json::json!({
+            "model": "llama-3.2-1b",
+            "prompt": "Tell me a very long story about dragons",
+            "max_tokens": 100,
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("streaming request failed");
+    assert_eq!(resp.status(), 200);
+
+    // Read just one byte and drop — simulates client disconnect
+    drop(resp);
+
+    // Give server a moment to handle the disconnect
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Verify server is still healthy
+    let health = client
+        .get(format!("{}/health", TEST_SERVER))
+        .send()
+        .await
+        .expect("health check after disconnect failed");
+    assert_eq!(health.status(), 200);
+}
+
+#[tokio::test]
+#[ignore = "requires running blazr server at localhost:8090"]
+async fn test_metrics_endpoint() {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/metrics", TEST_SERVER))
+        .send()
+        .await
+        .expect("metrics request failed");
+    assert_eq!(resp.status(), 200);
+
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("blazr_requests_total"),
+        "Should contain request counter"
+    );
+    assert!(
+        text.contains("blazr_models_loaded"),
+        "Should contain models gauge"
+    );
+}
+
+// ── Unit tests (no server needed) ──
+
+#[test]
+fn test_chat_template_from_name() {
+    use blazr::ChatTemplate;
+    assert_eq!(ChatTemplate::from_name("llama3"), ChatTemplate::Llama3);
+    assert_eq!(ChatTemplate::from_name("chatml"), ChatTemplate::ChatML);
+    assert_eq!(
+        ChatTemplate::from_name("MISTRAL"),
+        ChatTemplate::MistralInstruct
+    );
+    assert_eq!(ChatTemplate::from_name("phi3"), ChatTemplate::Phi3);
+    assert_eq!(ChatTemplate::from_name("gemma"), ChatTemplate::Gemma);
+    assert_eq!(ChatTemplate::from_name("deepseek"), ChatTemplate::DeepSeek);
+    assert_eq!(ChatTemplate::from_name("unknown"), ChatTemplate::Generic);
+}

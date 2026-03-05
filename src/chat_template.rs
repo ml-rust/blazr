@@ -94,6 +94,21 @@ impl ChatTemplate {
         }
     }
 
+    /// Parse a template name string into a ChatTemplate variant.
+    /// Used for per-request template overrides.
+    pub fn from_name(name: &str) -> Self {
+        match name.to_lowercase().as_str() {
+            "llama3" | "llama" => ChatTemplate::Llama3,
+            "mistral" | "llama2" => ChatTemplate::MistralInstruct,
+            "chatml" | "qwen" | "yi" => ChatTemplate::ChatML,
+            "phi3" | "phi" => ChatTemplate::Phi3,
+            "gemma" | "gemma2" => ChatTemplate::Gemma,
+            "deepseek" => ChatTemplate::DeepSeek,
+            "generic" | "raw" => ChatTemplate::Generic,
+            _ => ChatTemplate::Generic,
+        }
+    }
+
     /// Format a list of chat messages into a prompt string
     pub fn apply(&self, messages: &[ChatMessage]) -> String {
         match self {

@@ -454,7 +454,12 @@ pub async fn chat_completions(
                     content: m.content.clone(),
                 }),
         );
-        executor.chat_template().apply(&msgs)
+        // Use per-request template override if provided, otherwise model's template
+        if let Some(ref tpl_name) = request.template {
+            crate::chat_template::ChatTemplate::from_name(tpl_name).apply(&msgs)
+        } else {
+            executor.chat_template().apply(&msgs)
+        }
     };
 
     let gen_config = SamplingParams {
@@ -647,6 +652,9 @@ pub struct ChatRequest {
     /// Override system prompt (Ollama-compatible, prepended as system message)
     #[serde(default)]
     pub system: Option<String>,
+    /// Override chat template (e.g., "llama3", "chatml", "mistral", "phi3", "gemma", "deepseek")
+    #[serde(default)]
+    pub template: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,

@@ -69,7 +69,7 @@ impl Default for ServerConfig {
             host: default_host(),
             max_concurrent_requests: default_max_concurrent(),
             request_timeout_secs: default_timeout(),
-            cors_enabled: true,
+            cors_enabled: default_true(),
             cors_origins: Vec::new(),
             request_logging: true,
             max_body_size: default_max_body_size(),

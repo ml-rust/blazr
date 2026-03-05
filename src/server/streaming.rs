@@ -15,6 +15,19 @@ pub struct StreamToken {
     pub error: Option<String>,
 }
 
+/// Build an SSE error event from an error message
+fn error_event(err: &str) -> Option<Event> {
+    let payload = serde_json::json!({
+        "error": {
+            "message": err,
+            "type": "server_error"
+        }
+    });
+    serde_json::to_string(&payload)
+        .ok()
+        .map(|data| Event::default().data(data))
+}
+
 /// SSE delta for streaming completions
 #[derive(Serialize)]
 pub struct StreamDelta {
@@ -48,16 +61,9 @@ pub fn create_completion_stream(
         let mut tokens = tokens;
 
         while let Some(token) = tokens.next().await {
-            // Send error event if generation failed
             if let Some(ref err) = token.error {
-                let error_event = serde_json::json!({
-                    "error": {
-                        "message": err,
-                        "type": "server_error"
-                    }
-                });
-                if let Ok(data) = serde_json::to_string(&error_event) {
-                    yield Ok(Event::default().data(data));
+                if let Some(evt) = error_event(err) {
+                    yield Ok(evt);
                 }
                 break;
             }
@@ -151,16 +157,9 @@ pub fn create_chat_stream(
 
         // Content chunks
         while let Some(token) = tokens.next().await {
-            // Send error event if generation failed
             if let Some(ref err) = token.error {
-                let error_event = serde_json::json!({
-                    "error": {
-                        "message": err,
-                        "type": "server_error"
-                    }
-                });
-                if let Ok(data) = serde_json::to_string(&error_event) {
-                    yield Ok(Event::default().data(data));
+                if let Some(evt) = error_event(err) {
+                    yield Ok(evt);
                 }
                 break;
             }

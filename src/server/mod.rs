@@ -39,16 +39,30 @@ type ServerRuntime = boostr::CpuRuntime;
 #[allow(dead_code)]
 struct RequestId(String);
 
+/// Wrapper to store request_logging config flag in request extensions
+#[derive(Clone)]
+struct RequestLogging(bool);
+
 /// Request logging middleware — logs method, path, status, latency, and request_id
+/// Respects ServerConfig.request_logging flag; if disabled, only injects request_id.
 async fn request_logging(request: Request, next: Next) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
-    let start = std::time::Instant::now();
+    let logging_enabled = request
+        .extensions()
+        .get::<RequestLogging>()
+        .is_none_or(|rl| rl.0);
 
     // Inject request_id into extensions for handlers to use
     let mut request = request;
     request.extensions_mut().insert(RequestId(id.clone()));
+
+    if !logging_enabled {
+        return next.run(request).await;
+    }
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let start = std::time::Instant::now();
 
     let response = next.run(request).await;
     let status = response.status().as_u16();
@@ -128,6 +142,16 @@ async fn inject_api_keys(
     next.run(request).await
 }
 
+/// Middleware layer that injects request logging config into request extensions
+async fn inject_request_logging(
+    axum::extract::State(rl): axum::extract::State<RequestLogging>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    request.extensions_mut().insert(rl);
+    next.run(request).await
+}
+
 /// Start the HTTP inference server with graceful shutdown
 pub async fn start(
     scheduler: Arc<Scheduler<ServerRuntime>>,
@@ -186,6 +210,10 @@ pub async fn start(
         .layer(middleware::from_fn_with_state(
             api_keys.clone(),
             inject_api_keys,
+        ))
+        .layer(middleware::from_fn_with_state(
+            RequestLogging(config.request_logging),
+            inject_request_logging,
         ))
         .with_state(state);
 

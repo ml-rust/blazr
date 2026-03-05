@@ -315,12 +315,27 @@ pub async fn completions(
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 
+    let load_start = Instant::now();
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
         Err(e) => {
             return error_response(
                 StatusCode::NOT_FOUND,
                 &format!("Model not found: {}", e),
+                "invalid_request_error",
+            );
+        }
+    };
+    let load_duration_ms = load_start.elapsed().as_millis() as u64;
+
+    // Prepend context tokens (from previous turn) to the prompt if provided
+    let prompt = match decode_context_prefix(&executor, &request.context) {
+        Ok(prefix) if prefix.is_empty() => request.prompt.clone(),
+        Ok(prefix) => format!("{}{}", prefix, request.prompt),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to decode context tokens: {}", e),
                 "invalid_request_error",
             );
         }
@@ -342,8 +357,7 @@ pub async fn completions(
 
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
-        let model_name = request.model;
-        let prompt = request.prompt;
+        let model_name = request.model.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
 
         tokio::spawn(stream_with_stop_sequences(executor, prompt, gen_config, tx));
@@ -353,14 +367,15 @@ pub async fn completions(
     } else {
         let echo = request.echo.unwrap_or(false);
         let start = Instant::now();
-        match executor.generate_text(&request.prompt, &gen_config).await {
+        match executor.generate_text(&prompt, &gen_config).await {
             Ok(result) => {
                 let elapsed = start.elapsed();
                 let text = if echo {
-                    format!("{}{}", request.prompt, result.text)
+                    format!("{}{}", prompt, result.text)
                 } else {
                     result.text
                 };
+                let done_reason = result.finish_reason.as_str().to_string();
                 let response = CompletionResponse {
                     id: format!("cmpl-{}", uuid::Uuid::new_v4()),
                     object: "text_completion".to_string(),
@@ -369,19 +384,22 @@ pub async fn completions(
                     choices: vec![CompletionChoice {
                         text,
                         index: 0,
-                        finish_reason: result.finish_reason.as_str().to_string(),
+                        finish_reason: done_reason.clone(),
                     }],
                     usage: Usage {
                         prompt_tokens: result.prompt_tokens,
                         completion_tokens: result.completion_tokens,
                         total_tokens: result.prompt_tokens + result.completion_tokens,
                         total_duration_ms: elapsed.as_millis() as u64,
+                        prompt_eval_duration_ms: result.prompt_eval_duration_ms,
+                        load_duration_ms,
                         tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
                             result.completion_tokens as f64 / elapsed.as_secs_f64()
                         } else {
                             0.0
                         },
                     },
+                    done_reason: Some(done_reason),
                 };
                 metrics::record_tokens(result.prompt_tokens, result.completion_tokens);
                 (StatusCode::OK, Json(response)).into_response()
@@ -414,12 +432,26 @@ pub async fn chat_completions(
         );
     }
 
+    let load_start = Instant::now();
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
         Err(e) => {
             return error_response(
                 StatusCode::NOT_FOUND,
                 &format!("Model not found: {}", e),
+                "invalid_request_error",
+            );
+        }
+    };
+    let load_duration_ms = load_start.elapsed().as_millis() as u64;
+
+    // Prepend context tokens (from previous turn) if provided
+    let context_prefix = match decode_context_prefix(&executor, &request.context) {
+        Ok(prefix) => prefix,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to decode context tokens: {}", e),
                 "invalid_request_error",
             );
         }
@@ -461,6 +493,11 @@ pub async fn chat_completions(
             executor.chat_template().apply(&msgs)
         }
     };
+    let prompt = if context_prefix.is_empty() {
+        prompt
+    } else {
+        format!("{}{}", context_prefix, prompt)
+    };
 
     let gen_config = SamplingParams {
         max_tokens: request.max_tokens,
@@ -490,6 +527,7 @@ pub async fn chat_completions(
         match executor.generate_text(&prompt, &gen_config).await {
             Ok(result) => {
                 let elapsed = start.elapsed();
+                let done_reason = result.finish_reason.as_str().to_string();
                 let response = ChatResponse {
                     id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
                     object: "chat.completion".to_string(),
@@ -501,19 +539,22 @@ pub async fn chat_completions(
                             role: "assistant".to_string(),
                             content: result.text,
                         },
-                        finish_reason: result.finish_reason.as_str().to_string(),
+                        finish_reason: done_reason.clone(),
                     }],
                     usage: Usage {
                         prompt_tokens: result.prompt_tokens,
                         completion_tokens: result.completion_tokens,
                         total_tokens: result.prompt_tokens + result.completion_tokens,
                         total_duration_ms: elapsed.as_millis() as u64,
+                        prompt_eval_duration_ms: result.prompt_eval_duration_ms,
+                        load_duration_ms,
                         tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
                             result.completion_tokens as f64 / elapsed.as_secs_f64()
                         } else {
                             0.0
                         },
                     },
+                    done_reason: Some(done_reason),
                 };
                 metrics::record_tokens(result.prompt_tokens, result.completion_tokens);
                 (StatusCode::OK, Json(response)).into_response()
@@ -524,6 +565,23 @@ pub async fn chat_completions(
                 "server_error",
             ),
         }
+    }
+}
+
+/// Decode context tokens (from a previous turn) into a string prefix.
+/// Returns an empty string if no context tokens are provided.
+fn decode_context_prefix(
+    executor: &std::sync::Arc<crate::engine::Executor<ServerRuntime>>,
+    context: &Option<Vec<i64>>,
+) -> Result<String, String> {
+    if let Some(ref ctx_tokens) = context {
+        let token_ids: Vec<u32> = ctx_tokens.iter().map(|&t| t as u32).collect();
+        executor
+            .tokenizer()
+            .decode(&token_ids)
+            .map_err(|e| e.to_string())
+    } else {
+        Ok(String::new())
     }
 }
 
@@ -595,6 +653,9 @@ pub struct CompletionRequest {
     pub seed: Option<u64>,
     #[serde(default)]
     pub echo: Option<bool>,
+    /// Conversational context: token IDs from a previous response to prepend (Ollama-compatible)
+    #[serde(default)]
+    pub context: Option<Vec<i64>>,
     #[serde(default)]
     #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
@@ -611,6 +672,9 @@ pub struct CompletionResponse {
     pub model: String,
     pub choices: Vec<CompletionChoice>,
     pub usage: Usage,
+    /// Ollama-compatible done_reason field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -655,6 +719,9 @@ pub struct ChatRequest {
     /// Override chat template (e.g., "llama3", "chatml", "mistral", "phi3", "gemma", "deepseek")
     #[serde(default)]
     pub template: Option<String>,
+    /// Conversational context: token IDs from a previous response to prepend (Ollama-compatible)
+    #[serde(default)]
+    pub context: Option<Vec<i64>>,
     #[serde(default)]
     #[allow(dead_code)]
     pub logit_bias: Option<HashMap<String, f32>>,
@@ -673,6 +740,9 @@ pub struct ChatResponse {
     pub model: String,
     pub choices: Vec<ChatChoice>,
     pub usage: Usage,
+    /// Ollama-compatible done_reason field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -687,10 +757,16 @@ pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
-    /// Total request duration in milliseconds (blazr extension)
+    /// Total request duration in milliseconds
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub total_duration_ms: u64,
-    /// Decode tokens per second (blazr extension)
+    /// Prefill duration in milliseconds (time to first token)
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub prompt_eval_duration_ms: u64,
+    /// Model load duration in milliseconds (0 if already loaded)
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub load_duration_ms: u64,
+    /// Decode tokens per second
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub tokens_per_second: f64,
 }

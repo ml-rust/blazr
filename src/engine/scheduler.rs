@@ -170,6 +170,8 @@ where
                 .with_chat_template(chat_template),
         );
 
+        metrics::counter!("blazr_scheduler_loads_total").increment(1);
+
         // Store in cache
         {
             let mut models = self.models.write().await;
@@ -232,6 +234,7 @@ where
             if let Some(name) = lru_name {
                 tracing::info!("Evicting model: {}", name);
                 models.remove(&name);
+                metrics::counter!("blazr_scheduler_evictions_total").increment(1);
             } else {
                 break;
             }

@@ -7,9 +7,9 @@ use axum::{
     Router,
 };
 
-use super::handlers::{
-    chat_completions, completions, detokenize, get_model, list_models, tokenize, AppState,
-};
+use super::chat::chat_completions;
+use super::completions::completions;
+use super::handlers::{detokenize, get_model, list_models, tokenize, AppState};
 use super::management::{
     copy_model, delete_model, list_running, list_tags, pull_model, show_model,
 };

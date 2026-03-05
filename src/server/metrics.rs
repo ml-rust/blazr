@@ -22,6 +22,9 @@ pub mod names {
     pub const TIME_TO_FIRST_TOKEN: &str = "blazr_time_to_first_token_seconds";
     pub const TOKENS_PER_SECOND: &str = "blazr_tokens_per_second";
     pub const INFLIGHT_TOKENS: &str = "blazr_inflight_tokens";
+    pub const SCHEDULER_MODELS_AVAILABLE: &str = "blazr_scheduler_models_available";
+    pub const SCHEDULER_EVICTIONS_TOTAL: &str = "blazr_scheduler_evictions_total";
+    pub const SCHEDULER_LOADS_TOTAL: &str = "blazr_scheduler_loads_total";
 }
 
 /// Install the global Prometheus recorder and return its handle for rendering.
@@ -45,6 +48,18 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
     metrics::describe_gauge!(
         names::INFLIGHT_TOKENS,
         "Estimated in-flight tokens (prompt + decode)"
+    );
+    metrics::describe_gauge!(
+        names::SCHEDULER_MODELS_AVAILABLE,
+        "Number of models available in model directory"
+    );
+    metrics::describe_counter!(
+        names::SCHEDULER_EVICTIONS_TOTAL,
+        "Total model evictions from scheduler"
+    );
+    metrics::describe_counter!(
+        names::SCHEDULER_LOADS_TOTAL,
+        "Total model loads by scheduler"
     );
 
     Ok(handle)
@@ -103,6 +118,14 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
     // Update loaded models gauge
     let loaded_count = state.scheduler.list_loaded().await.len() as f64;
     metrics::gauge!(names::MODELS_LOADED).set(loaded_count);
+
+    // Update available models gauge
+    let available_count = state
+        .scheduler
+        .list_available()
+        .map(|v| v.len())
+        .unwrap_or(0) as f64;
+    metrics::gauge!(names::SCHEDULER_MODELS_AVAILABLE).set(available_count);
 
     let output = state.metrics_handle.render();
     (

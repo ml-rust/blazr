@@ -2,7 +2,10 @@
 //!
 //! Provides OpenAI-compatible REST API.
 
+mod chat;
+mod completions;
 mod config_watch;
+mod generation;
 mod handlers;
 mod management;
 pub mod metrics;

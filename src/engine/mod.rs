@@ -10,8 +10,10 @@ mod cuda_graphs;
 pub(crate) mod executor;
 pub(crate) mod sampling;
 mod scheduler;
+pub mod slots;
 mod types;
 
 pub use executor::Executor;
 pub use scheduler::{parse_keep_alive, Scheduler};
+pub use slots::SlotManager;
 pub use types::{FinishReason, GeneratedToken, GenerationResult, TokenLogprob};

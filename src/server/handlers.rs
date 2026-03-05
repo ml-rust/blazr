@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use super::generation::error_response;
 use super::metrics;
 use crate::config::UserConfig;
-use crate::engine::Scheduler;
+use crate::engine::{Scheduler, SlotManager};
 
 #[cfg(feature = "cuda")]
 type ServerRuntime = boostr::CudaRuntime;
@@ -34,6 +34,8 @@ pub struct AppState {
     pub inflight_tokens: AtomicUsize,
     /// Maximum in-flight token budget (0 = unlimited)
     pub max_inflight_tokens: usize,
+    /// Inference slot manager
+    pub slot_manager: SlotManager,
 }
 
 impl AppState {
@@ -47,6 +49,7 @@ impl AppState {
             user_config: Arc::new(RwLock::new(UserConfig::load())),
             inflight_tokens: AtomicUsize::new(0),
             max_inflight_tokens: 0,
+            slot_manager: SlotManager::new(0), // unlimited by default
         }
     }
 
@@ -300,4 +303,79 @@ pub struct DetokenizeRequest {
 #[derive(Serialize)]
 pub struct DetokenizeResponse {
     pub content: String,
+}
+
+// ── Slot management ──
+
+/// Create a new inference slot
+pub async fn create_slot(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateSlotRequest>,
+) -> Response {
+    match state.slot_manager.allocate(&request.model).await {
+        Ok(id) => {
+            let response = SlotResponse {
+                id,
+                model: request.model,
+                status: "active".to_string(),
+            };
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(e) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &e,
+            "slot_allocation_failed",
+        ),
+    }
+}
+
+/// List all active inference slots
+pub async fn list_slots(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let slots = state.slot_manager.list().await;
+    let response: Vec<SlotListEntry> = slots
+        .into_iter()
+        .map(|s| SlotListEntry {
+            id: s.id,
+            model: s.model,
+            total_tokens: s.total_tokens,
+            idle_seconds: s.last_accessed.elapsed().as_secs(),
+        })
+        .collect();
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Free an inference slot
+pub async fn delete_slot(
+    State(state): State<Arc<AppState>>,
+    Path(slot_id): Path<String>,
+) -> Response {
+    if state.slot_manager.free(&slot_id).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        error_response(
+            StatusCode::NOT_FOUND,
+            &format!("Slot '{}' not found", slot_id),
+            "slot_not_found",
+        )
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateSlotRequest {
+    pub model: String,
+}
+
+#[derive(Serialize)]
+pub struct SlotResponse {
+    pub id: String,
+    pub model: String,
+    pub status: String,
+}
+
+#[derive(Serialize)]
+pub struct SlotListEntry {
+    pub id: String,
+    pub model: String,
+    pub total_tokens: usize,
+    pub idle_seconds: u64,
 }

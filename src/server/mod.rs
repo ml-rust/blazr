@@ -297,6 +297,9 @@ pub async fn start(
     tracing::info!("  DEL  /api/delete - Delete local model");
     tracing::info!("  POST /api/copy - Copy/alias model");
     tracing::info!("  POST /api/pull - Pull model from HuggingFace");
+    tracing::info!("  GET  /api/slots - List inference slots");
+    tracing::info!("  POST /api/slots - Create inference slot");
+    tracing::info!("  DEL  /api/slots/{{id}} - Free inference slot");
     tracing::info!("  GET  /metrics - Prometheus metrics (no auth required)");
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async {

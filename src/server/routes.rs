@@ -9,7 +9,9 @@ use axum::{
 
 use super::chat::chat_completions;
 use super::completions::completions;
-use super::handlers::{detokenize, get_model, list_models, tokenize, AppState};
+use super::handlers::{
+    create_slot, delete_slot, detokenize, get_model, list_models, list_slots, tokenize, AppState,
+};
 use super::management::{
     copy_model, delete_model, list_running, list_tags, pull_model, show_model,
 };
@@ -25,6 +27,9 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         // Tokenization endpoints
         .route("/tokenize", post(tokenize))
         .route("/detokenize", post(detokenize))
+        // Slot management endpoints
+        .route("/api/slots", get(list_slots).post(create_slot))
+        .route("/api/slots/{slot_id}", delete(delete_slot))
         // Model management endpoints
         .route("/api/tags", get(list_tags))
         .route("/api/show", post(show_model))

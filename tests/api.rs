@@ -312,6 +312,51 @@ async fn test_empty_messages_returns_400() {
 
 #[tokio::test]
 #[ignore = "requires BLAZR_TEST_SERVER"]
+async fn test_slot_lifecycle() {
+    let server = test_server();
+    let client = reqwest::Client::new();
+
+    // Create slot
+    let resp = client
+        .post(format!("{}/api/slots", server))
+        .json(&serde_json::json!({ "model": "test-model" }))
+        .send()
+        .await
+        .expect("create slot failed");
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let slot_id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(body["status"], "active");
+
+    // List slots
+    let resp = client
+        .get(format!("{}/api/slots", server))
+        .send()
+        .await
+        .expect("list slots failed");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(!body.as_array().unwrap().is_empty());
+
+    // Delete slot
+    let resp = client
+        .delete(format!("{}/api/slots/{}", server, slot_id))
+        .send()
+        .await
+        .expect("delete slot failed");
+    assert_eq!(resp.status(), 204);
+
+    // Delete again → 404
+    let resp = client
+        .delete(format!("{}/api/slots/{}", server, slot_id))
+        .send()
+        .await
+        .expect("delete slot failed");
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+#[ignore = "requires BLAZR_TEST_SERVER"]
 async fn test_metrics_endpoint() {
     let server = test_server();
     let client = reqwest::Client::new();

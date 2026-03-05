@@ -25,6 +25,9 @@ pub mod names {
     pub const SCHEDULER_MODELS_AVAILABLE: &str = "blazr_scheduler_models_available";
     pub const SCHEDULER_EVICTIONS_TOTAL: &str = "blazr_scheduler_evictions_total";
     pub const SCHEDULER_LOADS_TOTAL: &str = "blazr_scheduler_loads_total";
+    pub const QUEUE_DEPTH: &str = "blazr_queue_depth";
+    pub const ACTIVE_DECODE_SLOTS: &str = "blazr_active_decode_slots";
+    pub const TOKEN_BUDGET_UTILIZATION: &str = "blazr_token_budget_utilization_ratio";
 }
 
 /// Install the global Prometheus recorder and return its handle for rendering.
@@ -60,6 +63,18 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
     metrics::describe_counter!(
         names::SCHEDULER_LOADS_TOTAL,
         "Total model loads by scheduler"
+    );
+    metrics::describe_gauge!(
+        names::QUEUE_DEPTH,
+        "Number of requests waiting for admission (HPA/KEDA signal)"
+    );
+    metrics::describe_gauge!(
+        names::ACTIVE_DECODE_SLOTS,
+        "Number of active decode slots (requests currently generating)"
+    );
+    metrics::describe_gauge!(
+        names::TOKEN_BUDGET_UTILIZATION,
+        "Ratio of in-flight tokens to max budget (0.0-1.0, HPA/KEDA signal)"
     );
 
     Ok(handle)
@@ -104,6 +119,15 @@ pub fn record_tokens_per_second(tps: f64) {
     }
 }
 
+/// Increment/decrement the active decode slot gauge
+pub fn adjust_decode_slots(delta: f64) {
+    if delta >= 0.0 {
+        metrics::gauge!(names::ACTIVE_DECODE_SLOTS).increment(delta);
+    } else {
+        metrics::gauge!(names::ACTIVE_DECODE_SLOTS).decrement(-delta);
+    }
+}
+
 /// Adjust the in-flight token gauge (positive = add, negative = subtract)
 pub fn adjust_inflight_tokens(delta: f64) {
     if delta >= 0.0 {
@@ -126,6 +150,15 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
         .map(|v| v.len())
         .unwrap_or(0) as f64;
     metrics::gauge!(names::SCHEDULER_MODELS_AVAILABLE).set(available_count);
+
+    // Update token budget utilization for autoscaling
+    if state.max_inflight_tokens > 0 {
+        let current = state
+            .inflight_tokens
+            .load(std::sync::atomic::Ordering::Relaxed) as f64;
+        let ratio = current / state.max_inflight_tokens as f64;
+        metrics::gauge!(names::TOKEN_BUDGET_UTILIZATION).set(ratio);
+    }
 
     let output = state.metrics_handle.render();
     (

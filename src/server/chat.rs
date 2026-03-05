@@ -17,6 +17,7 @@ use super::generation::{
     HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage,
 };
 use super::handlers::AppState;
+use super::metrics;
 use super::streaming::{create_chat_stream, StreamToken};
 
 pub use crate::model::chat_template::ChatMessage;
@@ -121,14 +122,17 @@ pub async fn chat_completions(
         let state_clone = Arc::clone(&state);
         let budget = estimated_tokens;
 
+        metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
             stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
             state_clone.release(budget);
+            metrics::adjust_decode_slots(-1.0);
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_chat_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
+        metrics::adjust_decode_slots(1.0);
         let start = Instant::now();
         let think_enabled = request.think.unwrap_or(false);
         let n = request.n.unwrap_or(1).max(1);
@@ -185,6 +189,7 @@ pub async fn chat_completions(
                 }
                 Err(e) => {
                     state.release(estimated_tokens);
+                    metrics::adjust_decode_slots(-1.0);
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         &e.to_string(),
@@ -231,6 +236,7 @@ pub async fn chat_completions(
         );
         apply_keep_alive(&state, &model_name, &request.keep_alive).await;
         state.release(estimated_tokens);
+        metrics::adjust_decode_slots(-1.0);
         (StatusCode::OK, Json(response)).into_response()
     }
 }

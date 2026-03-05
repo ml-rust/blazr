@@ -3,14 +3,16 @@
 use std::sync::Arc;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 
 use super::handlers::{
     chat_completions, completions, detokenize, get_model, list_models, tokenize, AppState,
 };
-use super::management::{list_running, list_tags, show_model};
+use super::management::{
+    copy_model, delete_model, list_running, list_tags, pull_model, show_model,
+};
 
 /// Create the API router with OpenAI-compatible endpoints (auth-protected)
 pub fn api_routes() -> Router<Arc<AppState>> {
@@ -27,4 +29,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/tags", get(list_tags))
         .route("/api/show", post(show_model))
         .route("/api/ps", get(list_running))
+        .route("/api/delete", delete(delete_model))
+        .route("/api/copy", post(copy_model))
+        .route("/api/pull", post(pull_model))
 }

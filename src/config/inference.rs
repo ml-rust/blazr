@@ -102,6 +102,18 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub num_blocks: usize,
 
+    /// Enable prefix caching for paged attention.
+    ///
+    /// When enabled, reuses KV cache blocks for repeated prompt prefixes across requests.
+    /// Requires `paged_attention = true`. Uses boostr's PrefixCache with FNV block hashing.
+    #[serde(default)]
+    pub prefix_cache: bool,
+
+    /// Maximum number of cached prefix blocks to retain.
+    /// Only used when `prefix_cache = true`.
+    #[serde(default = "default_max_cached_blocks")]
+    pub max_cached_blocks: usize,
+
     /// Enable graph capture for greedy decode (backend-agnostic).
     ///
     /// After prompt prefill, captures the single-token decode forward pass as a
@@ -129,6 +141,10 @@ fn default_block_size() -> usize {
     16
 }
 
+fn default_max_cached_blocks() -> usize {
+    10000
+}
+
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
@@ -142,6 +158,8 @@ impl Default for InferenceConfig {
             paged_attention: false,
             block_size: default_block_size(),
             num_blocks: 0,
+            prefix_cache: false,
+            max_cached_blocks: default_max_cached_blocks(),
             graphs: false,
         }
     }

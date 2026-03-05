@@ -21,38 +21,18 @@ async fn main() -> Result<()> {
         Commands::Run {
             model,
             prompt,
-            max_tokens,
-            temperature,
-            top_p,
-            top_k,
-            min_p,
-            repeat_penalty,
-            repeat_last_n,
-            gpu_layers,
-            cpu,
-            num_ctx,
-            paged_attention,
-            graphs,
+            sampling,
+            runtime,
         } => {
-            let gen_config = blazr::config::GenerationConfig {
-                max_tokens,
-                temperature,
-                top_p,
-                top_k,
-                min_p,
-                repeat_penalty,
-                repeat_last_n,
-                ..Default::default()
-            };
             blazr::cli::run(
                 model,
                 prompt,
-                gen_config,
-                gpu_layers,
-                cpu,
-                num_ctx,
-                paged_attention,
-                graphs,
+                sampling.into_gen_config(),
+                runtime.gpu_layers,
+                runtime.cpu,
+                runtime.num_ctx,
+                runtime.paged_attention,
+                runtime.graphs,
             )
             .await?;
         }
@@ -61,8 +41,9 @@ async fn main() -> Result<()> {
             port,
             host,
             api_key,
+            api_key_file,
         } => {
-            blazr::cli::serve(model, port, host, api_key).await?;
+            blazr::cli::serve(model, port, host, api_key, api_key_file).await?;
         }
         Commands::List { verbose } => {
             blazr::cli::list(verbose).await?;
@@ -76,40 +57,21 @@ async fn main() -> Result<()> {
         Commands::Generate {
             model,
             prompt,
-            max_tokens,
-            temperature,
-            top_p,
-            top_k,
-            min_p,
-            repeat_penalty,
-            repeat_last_n,
-            gpu_layers,
-            cpu,
-            num_ctx,
-            paged_attention,
-            graphs,
+            sampling,
+            runtime,
             verbose_prompt,
         } => {
-            let gen_config = blazr::config::GenerationConfig {
-                max_tokens,
-                temperature,
-                top_p,
-                top_k,
-                min_p,
-                repeat_penalty,
-                repeat_last_n,
-                verbose_prompt,
-                ..Default::default()
-            };
+            let mut gen_config = sampling.into_gen_config();
+            gen_config.verbose_prompt = verbose_prompt;
             blazr::cli::run(
                 model,
                 Some(prompt),
                 gen_config,
-                gpu_layers,
-                cpu,
-                num_ctx,
-                paged_attention,
-                graphs,
+                runtime.gpu_layers,
+                runtime.cpu,
+                runtime.num_ctx,
+                runtime.paged_attention,
+                runtime.graphs,
             )
             .await?;
         }

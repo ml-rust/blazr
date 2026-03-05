@@ -63,6 +63,73 @@ pub struct GenerationConfig {
     /// Positive values increase likelihood, negative decrease.
     #[serde(default)]
     pub logit_bias: HashMap<u32, f32>,
+
+    /// Whether to return log probabilities for each generated token.
+    #[serde(default)]
+    pub logprobs: bool,
+
+    /// Number of top log probabilities to return per token position (1-20).
+    /// Only used when `logprobs` is true.
+    #[serde(default = "default_top_logprobs")]
+    pub top_logprobs: usize,
+
+    /// Mirostat sampling mode (0 = disabled, 1 = Mirostat v1, 2 = Mirostat v2).
+    /// Target-entropy sampling that adaptively adjusts the candidate set.
+    #[serde(default)]
+    pub mirostat_mode: u8,
+
+    /// Mirostat target entropy (tau). Higher values = more random output.
+    /// Default: 5.0 (typical for natural language).
+    #[serde(default = "default_mirostat_tau")]
+    pub mirostat_tau: f32,
+
+    /// Mirostat learning rate (eta). Controls how fast the algorithm adapts.
+    /// Default: 0.1
+    #[serde(default = "default_mirostat_eta")]
+    pub mirostat_eta: f32,
+
+    /// Dynamic temperature range. When > 0, temperature is adjusted per-token
+    /// based on logit entropy. Actual temp = base_temp ± dynatemp_range.
+    #[serde(default)]
+    pub dynatemp_range: f32,
+
+    /// Dynamic temperature exponent. Controls the entropy→temperature mapping curve.
+    /// Default: 1.0 (linear).
+    #[serde(default = "default_dynatemp_exponent")]
+    pub dynatemp_exponent: f32,
+
+    /// JSON mode: when true, retry generation up to 3 times if output is not valid JSON.
+    #[serde(default)]
+    pub json_mode: bool,
+
+    /// DRY (Don't Repeat Yourself) penalty multiplier.
+    /// Penalizes n-gram repetitions by subtracting `dry_multiplier * match_length`
+    /// from logits of tokens that would extend a repeated n-gram.
+    /// 0.0 = disabled. Typical values: 0.8-1.5.
+    #[serde(default)]
+    pub dry_multiplier: f32,
+
+    /// DRY penalty base: minimum n-gram length to penalize.
+    /// Default: 2 (penalizes repeated bigrams and longer).
+    #[serde(default = "default_dry_base")]
+    pub dry_base: usize,
+
+    /// DRY penalty allowed length: how many tokens back to scan for repeated n-grams.
+    /// Default: 0 (scan entire history). Set to limit computational cost.
+    #[serde(default)]
+    pub dry_allowed_length: usize,
+
+    /// DRY penalty sequence breakers: tokens that break n-gram matching.
+    /// E.g., newline, period. Default: empty (no breakers).
+    #[serde(default)]
+    pub dry_sequence_breakers: Vec<String>,
+
+    /// Typical sampling threshold (0.0 = disabled).
+    /// Filters tokens to those whose information content is close to the
+    /// expected information (entropy). Values like 0.95 keep tokens within
+    /// the 95th percentile of typicality. Typical range: 0.9-1.0.
+    #[serde(default)]
+    pub typical_p: f32,
 }
 
 fn default_max_tokens() -> usize {
@@ -89,6 +156,26 @@ fn default_repeat_last_n() -> usize {
     64
 }
 
+fn default_top_logprobs() -> usize {
+    5
+}
+
+fn default_mirostat_tau() -> f32 {
+    5.0
+}
+
+fn default_mirostat_eta() -> f32 {
+    0.1
+}
+
+fn default_dynatemp_exponent() -> f32 {
+    1.0
+}
+
+fn default_dry_base() -> usize {
+    2
+}
+
 impl Default for GenerationConfig {
     fn default() -> Self {
         Self {
@@ -105,6 +192,19 @@ impl Default for GenerationConfig {
             seed: None,
             verbose_prompt: false,
             logit_bias: HashMap::new(),
+            logprobs: false,
+            top_logprobs: default_top_logprobs(),
+            mirostat_mode: 0,
+            mirostat_tau: default_mirostat_tau(),
+            mirostat_eta: default_mirostat_eta(),
+            dynatemp_range: 0.0,
+            dynatemp_exponent: default_dynatemp_exponent(),
+            json_mode: false,
+            dry_multiplier: 0.0,
+            dry_base: default_dry_base(),
+            dry_allowed_length: 0,
+            dry_sequence_breakers: Vec::new(),
+            typical_p: 0.0,
         }
     }
 }

@@ -1,5 +1,7 @@
 //! Generation configuration settings
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Configuration for text generation
@@ -56,6 +58,11 @@ pub struct GenerationConfig {
     /// Print prompt tokens before generation (like llama-cli --verbose-prompt)
     #[serde(default)]
     pub verbose_prompt: bool,
+
+    /// Per-token logit bias: token_id → additive bias applied before sampling.
+    /// Positive values increase likelihood, negative decrease.
+    #[serde(default)]
+    pub logit_bias: HashMap<u32, f32>,
 }
 
 fn default_max_tokens() -> usize {
@@ -97,6 +104,7 @@ impl Default for GenerationConfig {
             stop_sequences: Vec::new(),
             seed: None,
             verbose_prompt: false,
+            logit_bias: HashMap::new(),
         }
     }
 }
@@ -132,7 +140,10 @@ impl GenerationConfig {
         }
     }
 
-    /// Check if greedy decoding should be used
+    /// Check if greedy decoding should be used.
+    ///
+    /// Returns true only when temperature is 0. When a seed is set with
+    /// temperature > 0, proper seeded stochastic sampling is used instead.
     pub fn is_greedy(&self) -> bool {
         self.temperature == 0.0
     }

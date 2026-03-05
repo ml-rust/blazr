@@ -638,6 +638,13 @@ where
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
     ) -> Result<Tensor<R>> {
+        // Apply logit_bias before sampling if any biases are specified
+        let logits = if !gen_config.logit_bias.is_empty() {
+            self.apply_logit_bias(logits, &gen_config.logit_bias)?
+        } else {
+            logits.clone()
+        };
+
         let (ids, cnts) = Self::penalty_window(recent_tokens, gen_config.repeat_last_n);
 
         let ids_tensor = Tensor::from_slice(&ids, &[ids.len()], &self.device);
@@ -652,7 +659,7 @@ where
 
         client
             .logits_to_token(
-                logits,
+                &logits,
                 &ids_tensor,
                 &cnts_tensor,
                 ids.len(),
@@ -663,8 +670,28 @@ where
                 gen_config.top_k,
                 gen_config.top_p,
                 gen_config.min_p,
+                gen_config.seed,
             )
             .map_err(|e| anyhow!("logits_to_token failed: {}", e))
+    }
+
+    /// Apply per-token logit biases by creating a sparse bias tensor and adding to logits.
+    fn apply_logit_bias(
+        &self,
+        logits: &Tensor<R>,
+        bias_map: &std::collections::HashMap<u32, f32>,
+    ) -> Result<Tensor<R>> {
+        let vocab_size = self.model.vocab_size();
+        let mut bias_vec = vec![0.0f32; vocab_size];
+        for (&token_id, &bias) in bias_map {
+            if (token_id as usize) < vocab_size {
+                bias_vec[token_id as usize] = bias;
+            }
+        }
+        let bias_tensor = Tensor::from_slice(&bias_vec, &[1, 1, vocab_size], &self.device);
+        logits
+            .add(&bias_tensor)
+            .map_err(|e| anyhow!("logit_bias add failed: {}", e))
     }
 }
 

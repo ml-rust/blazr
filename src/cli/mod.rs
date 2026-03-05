@@ -2,12 +2,14 @@
 //!
 //! Provides ollama-like CLI interface for blazr.
 
+mod chat;
 mod info;
 mod list;
 mod pull;
 mod run;
 mod serve;
 
+pub use chat::chat;
 pub use info::info;
 pub use list::list;
 pub use pull::pull;
@@ -198,6 +200,32 @@ pub enum Commands {
         /// Print prompt tokens before generation (like llama-cli --verbose-prompt)
         #[arg(long)]
         verbose_prompt: bool,
+    },
+
+    /// Interactive multi-turn chat with a model
+    Chat {
+        /// Model name or path
+        model: String,
+
+        /// System prompt
+        #[arg(long, short)]
+        system: Option<String>,
+
+        /// Maximum tokens to generate per turn
+        #[arg(long, default_value = "2048")]
+        max_tokens: usize,
+
+        /// Sampling temperature (0 = greedy)
+        #[arg(long, default_value = "0.7")]
+        temperature: f32,
+
+        /// Top-p nucleus sampling
+        #[arg(long, default_value = "0.9")]
+        top_p: f32,
+
+        /// Context window size
+        #[arg(long, default_value = "4096")]
+        num_ctx: usize,
     },
 
     /// Generate shell completions

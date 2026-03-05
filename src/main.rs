@@ -113,6 +113,16 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Chat {
+            model,
+            system,
+            max_tokens,
+            temperature,
+            top_p,
+            num_ctx,
+        } => {
+            blazr::cli::chat(model, system, max_tokens, temperature, top_p, num_ctx).await?;
+        }
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,

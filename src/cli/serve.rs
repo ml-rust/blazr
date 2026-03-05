@@ -20,6 +20,7 @@ pub async fn serve(
     port: u16,
     host: String,
     api_key: Option<String>,
+    api_key_file: Option<PathBuf>,
 ) -> Result<()> {
     // Get model directory
     let model_dir = std::env::var("BLAZR_MODEL_DIR")
@@ -52,14 +53,31 @@ pub async fn serve(
         ..Default::default()
     };
 
+    // Collect API keys from --api-key and --api-key-file
+    let mut api_keys: Vec<String> = Vec::new();
+    if let Some(key) = api_key {
+        api_keys.push(key);
+    }
+    if let Some(ref path) = api_key_file {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read API key file {:?}: {}", path, e))?;
+        for line in content.lines() {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') {
+                api_keys.push(line.to_string());
+            }
+        }
+        tracing::info!("Loaded {} API key(s) from {:?}", api_keys.len(), path);
+    }
+
     let addr = server_config.addr();
     tracing::info!("Starting server at http://{}", addr);
-    if api_key.is_some() {
-        tracing::info!("API key authentication enabled");
+    if !api_keys.is_empty() {
+        tracing::info!("API key authentication enabled ({} key(s))", api_keys.len());
     }
 
     // Start server
-    server::start(scheduler, server_config, api_key).await?;
+    server::start(scheduler, server_config, api_keys).await?;
 
     Ok(())
 }

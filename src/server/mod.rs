@@ -68,25 +68,37 @@ async fn request_logging(request: Request, next: Next) -> Response {
 
 /// API key auth middleware
 async fn auth_middleware(request: Request, next: Next) -> Response {
-    // Extract expected key from extensions
-    let expected_key = request.extensions().get::<ApiKey>().cloned();
+    let keys = request.extensions().get::<ApiKeys>().cloned();
 
-    if let Some(ApiKey(expected)) = expected_key {
-        // Check Authorization header
-        let auth_header = request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
+    if let Some(ApiKeys(valid_keys)) = keys {
+        if !valid_keys.is_empty() {
+            let auth_header = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok());
 
-        match auth_header {
-            Some(header) if header.starts_with("Bearer ") => {
-                let token = &header[7..];
-                if token != expected {
+            match auth_header {
+                Some(header) if header.starts_with("Bearer ") => {
+                    let token = &header[7..];
+                    if !valid_keys.iter().any(|k| k == token) {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({
+                                "error": {
+                                    "message": "Invalid API key",
+                                    "type": "invalid_api_key"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+                _ => {
                     return (
                         StatusCode::UNAUTHORIZED,
                         axum::Json(serde_json::json!({
                             "error": {
-                                "message": "Invalid API key",
+                                "message": "Missing Authorization header. Use: Authorization: Bearer <api-key>",
                                 "type": "invalid_api_key"
                             }
                         })),
@@ -94,36 +106,24 @@ async fn auth_middleware(request: Request, next: Next) -> Response {
                         .into_response();
                 }
             }
-            _ => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({
-                        "error": {
-                            "message": "Missing Authorization header. Use: Authorization: Bearer <api-key>",
-                            "type": "invalid_api_key"
-                        }
-                    })),
-                )
-                    .into_response();
-            }
         }
     }
 
     next.run(request).await
 }
 
-/// Wrapper to store API key in request extensions
+/// Wrapper to store valid API keys in request extensions
 #[derive(Clone)]
-struct ApiKey(String);
+struct ApiKeys(Vec<String>);
 
-/// Middleware layer that injects the API key into request extensions
-async fn inject_api_key(
-    axum::extract::State(key): axum::extract::State<Option<String>>,
+/// Middleware layer that injects API keys into request extensions
+async fn inject_api_keys(
+    axum::extract::State(keys): axum::extract::State<Vec<String>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    if let Some(ref k) = key {
-        request.extensions_mut().insert(ApiKey(k.clone()));
+    if !keys.is_empty() {
+        request.extensions_mut().insert(ApiKeys(keys));
     }
     next.run(request).await
 }
@@ -132,7 +132,7 @@ async fn inject_api_key(
 pub async fn start(
     scheduler: Arc<Scheduler<ServerRuntime>>,
     config: ServerConfig,
-    api_key: Option<String>,
+    api_keys: Vec<String>,
 ) -> Result<()> {
     // Install Prometheus metrics recorder
     let metrics_handle = metrics::install_recorder()
@@ -169,7 +169,6 @@ pub async fn start(
         .route("/health", axum::routing::get(handlers::health))
         .route("/metrics", axum::routing::get(metrics::metrics_handler));
 
-    let api_key_for_layer = api_key.clone();
     let app = Router::new()
         .merge(health_route)
         .merge(protected)
@@ -185,8 +184,8 @@ pub async fn start(
             config.max_concurrent_requests,
         ))
         .layer(middleware::from_fn_with_state(
-            api_key_for_layer,
-            inject_api_key,
+            api_keys.clone(),
+            inject_api_keys,
         ))
         .with_state(state);
 
@@ -200,8 +199,8 @@ pub async fn start(
         config.max_body_size,
         config.max_concurrent_requests
     );
-    if api_key.is_some() {
-        tracing::info!("  Authentication: enabled (Bearer token)");
+    if !api_keys.is_empty() {
+        tracing::info!("  Authentication: enabled ({} key(s))", api_keys.len());
     }
     tracing::info!("API endpoints:");
     tracing::info!("  GET  /health - Health check (no auth required)");

@@ -12,6 +12,7 @@ use axum::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use super::metrics;
 use super::streaming::{create_chat_stream, create_completion_stream, StreamToken};
 use crate::config::GenerationConfig;
 use crate::engine::{FinishReason, Scheduler};
@@ -24,11 +25,18 @@ type ServerRuntime = boostr::CpuRuntime;
 /// Shared application state
 pub struct AppState {
     pub scheduler: Arc<Scheduler<ServerRuntime>>,
+    pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
 }
 
 impl AppState {
-    pub fn new(scheduler: Arc<Scheduler<ServerRuntime>>) -> Self {
-        Self { scheduler }
+    pub fn new(
+        scheduler: Arc<Scheduler<ServerRuntime>>,
+        metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+    ) -> Self {
+        Self {
+            scheduler,
+            metrics_handle,
+        }
     }
 }
 
@@ -242,6 +250,7 @@ async fn stream_with_stop_sequences(
                                 .send(StreamToken {
                                     text: safe_text.to_string(),
                                     finish_reason: Some(FinishReason::Stop),
+                                    error: None,
                                 })
                                 .await;
                         } else {
@@ -250,6 +259,7 @@ async fn stream_with_stop_sequences(
                                 .send(StreamToken {
                                     text: String::new(),
                                     finish_reason: Some(FinishReason::Stop),
+                                    error: None,
                                 })
                                 .await;
                         }
@@ -268,6 +278,7 @@ async fn stream_with_stop_sequences(
                     .send(StreamToken {
                         text: token.text,
                         finish_reason: token.finish_reason,
+                        error: None,
                     })
                     .await
                     .is_err()
@@ -280,6 +291,13 @@ async fn stream_with_stop_sequences(
             }
             Err(e) => {
                 tracing::error!("Generation error during streaming: {}", e);
+                let _ = tx
+                    .send(StreamToken {
+                        text: String::new(),
+                        finish_reason: None,
+                        error: Some(e.to_string()),
+                    })
+                    .await;
                 break;
             }
         }
@@ -322,9 +340,6 @@ pub async fn completions(
     }
     .into_gen_config();
 
-    let echo = request.stream.is_none() && request.echo.unwrap_or(false);
-    let prompt_text = request.prompt.clone();
-
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model;
@@ -336,12 +351,13 @@ pub async fn completions(
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_completion_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
+        let echo = request.echo.unwrap_or(false);
         let start = Instant::now();
         match executor.generate_text(&request.prompt, &gen_config).await {
             Ok(result) => {
                 let elapsed = start.elapsed();
                 let text = if echo {
-                    format!("{}{}", prompt_text, result.text)
+                    format!("{}{}", request.prompt, result.text)
                 } else {
                     result.text
                 };
@@ -367,6 +383,7 @@ pub async fn completions(
                         },
                     },
                 };
+                metrics::record_tokens(result.prompt_tokens, result.completion_tokens);
                 (StatusCode::OK, Json(response)).into_response()
             }
             Err(e) => error_response(
@@ -493,6 +510,7 @@ pub async fn chat_completions(
                         },
                     },
                 };
+                metrics::record_tokens(result.prompt_tokens, result.completion_tokens);
                 (StatusCode::OK, Json(response)).into_response()
             }
             Err(e) => error_response(

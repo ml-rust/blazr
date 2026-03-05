@@ -125,7 +125,13 @@ fn dir_size(path: &std::path::Path) -> u64 {
     }
     match std::fs::read_dir(path) {
         Ok(entries) => entries
-            .filter_map(|e| e.ok())
+            .filter_map(|e| match e {
+                Ok(entry) => Some(entry),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read directory entry");
+                    None
+                }
+            })
             .map(|e| std::fs::metadata(e.path()).map(|m| m.len()).unwrap_or(0))
             .sum(),
         Err(e) => {

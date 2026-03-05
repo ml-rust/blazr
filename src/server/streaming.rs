@@ -11,6 +11,8 @@ use crate::engine::FinishReason;
 pub struct StreamToken {
     pub text: String,
     pub finish_reason: Option<FinishReason>,
+    /// If set, indicates an error occurred during generation
+    pub error: Option<String>,
 }
 
 /// SSE delta for streaming completions
@@ -46,6 +48,20 @@ pub fn create_completion_stream(
         let mut tokens = tokens;
 
         while let Some(token) = tokens.next().await {
+            // Send error event if generation failed
+            if let Some(ref err) = token.error {
+                let error_event = serde_json::json!({
+                    "error": {
+                        "message": err,
+                        "type": "server_error"
+                    }
+                });
+                if let Ok(data) = serde_json::to_string(&error_event) {
+                    yield Ok(Event::default().data(data));
+                }
+                break;
+            }
+
             let is_final = token.finish_reason.is_some();
             let finish_str = token.finish_reason.map(|r| r.as_str().to_string());
 
@@ -135,6 +151,20 @@ pub fn create_chat_stream(
 
         // Content chunks
         while let Some(token) = tokens.next().await {
+            // Send error event if generation failed
+            if let Some(ref err) = token.error {
+                let error_event = serde_json::json!({
+                    "error": {
+                        "message": err,
+                        "type": "server_error"
+                    }
+                });
+                if let Ok(data) = serde_json::to_string(&error_event) {
+                    yield Ok(Event::default().data(data));
+                }
+                break;
+            }
+
             let is_final = token.finish_reason.is_some();
             let finish_str = token.finish_reason.map(|r| r.as_str().to_string());
 

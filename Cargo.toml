@@ -61,6 +61,10 @@ tokio-stream = "0.1"
 # Random number generation
 rand = "0.8"
 
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
+
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 tokio-test = "0.4"

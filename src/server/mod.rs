@@ -4,6 +4,7 @@
 
 mod handlers;
 mod management;
+pub mod metrics;
 mod routes;
 mod streaming;
 
@@ -133,7 +134,10 @@ pub async fn start(
     config: ServerConfig,
     api_key: Option<String>,
 ) -> Result<()> {
-    let state = Arc::new(AppState::new(scheduler));
+    // Install Prometheus metrics recorder
+    let metrics_handle = metrics::install_recorder()
+        .map_err(|e| anyhow::anyhow!("Failed to install Prometheus metrics recorder: {}", e))?;
+    let state = Arc::new(AppState::new(scheduler, metrics_handle));
 
     // CORS: respect cors_enabled and cors_origins config
     let cors = if config.cors_enabled {
@@ -160,8 +164,10 @@ pub async fn start(
     // Protected routes (require auth if api_key is set)
     let protected = api_routes().route_layer(middleware::from_fn(auth_middleware));
 
-    // Health is exempt from auth but needs state for model info
-    let health_route = Router::new().route("/health", axum::routing::get(handlers::health));
+    // Health and metrics are exempt from auth
+    let health_route = Router::new()
+        .route("/health", axum::routing::get(handlers::health))
+        .route("/metrics", axum::routing::get(metrics::metrics_handler));
 
     let api_key_for_layer = api_key.clone();
     let app = Router::new()
@@ -169,6 +175,7 @@ pub async fn start(
         .merge(protected)
         .layer(cors)
         .layer(middleware::from_fn(request_logging))
+        .layer(middleware::from_fn(metrics::metrics_middleware))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(config.request_timeout_secs),
@@ -207,6 +214,7 @@ pub async fn start(
     tracing::info!("  GET  /api/tags - List local models with metadata");
     tracing::info!("  POST /api/show - Model details");
     tracing::info!("  GET  /api/ps - Currently loaded models");
+    tracing::info!("  GET  /metrics - Prometheus metrics (no auth required)");
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async {
         let ctrl_c = tokio::signal::ctrl_c();

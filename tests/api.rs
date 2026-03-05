@@ -1,12 +1,33 @@
 //! API integration tests for blazr server endpoints.
 //!
-//! Tests that don't require a GPU or loaded model test config, types, and structure.
+//! ## Test tiers
 //!
-//! Tests marked `#[ignore]` require a running blazr server with test models.
-//! Start server: `cargo run --features cuda -- serve --model llama-3.2-1b --port 8090`
-//! Run them with: `cargo test -- --ignored`
+//! **Unit tests** — always run, no server or model needed.
+//! Test config defaults, type invariants, chat templates, parameter validation.
+//!
+//! **Live server tests** — require env vars, test real API endpoints.
+//! Set these environment variables to enable:
+//!   - `BLAZR_TEST_SERVER` — server URL (e.g. `http://localhost:8080`)
+//!   - `BLAZR_TEST_MODEL`  — model path as loaded on that server (e.g. `/home/user/models/llama-3.2-1b`)
+//!
+//! Run: `BLAZR_TEST_SERVER=http://localhost:8080 BLAZR_TEST_MODEL=/path/to/model cargo test -- --ignored`
 
-/// Verify GenerationConfig defaults match OpenAI-compatible expectations
+// ── Helpers ──
+
+/// Get the test server URL from env, or skip the test.
+fn test_server() -> String {
+    std::env::var("BLAZR_TEST_SERVER").expect("BLAZR_TEST_SERVER env var required for live tests")
+}
+
+/// Get the test model identifier from env, or skip the test.
+fn test_model() -> String {
+    std::env::var("BLAZR_TEST_MODEL").expect("BLAZR_TEST_MODEL env var required for model tests")
+}
+
+// ═══════════════════════════════════════════════════════════
+// Unit tests — always run, no server needed
+// ═══════════════════════════════════════════════════════════
+
 #[test]
 fn test_generation_config_defaults() {
     let config = blazr::GenerationConfig::default();
@@ -62,18 +83,32 @@ fn test_server_config_defaults() {
     assert_eq!(config.addr(), "0.0.0.0:8080");
 }
 
-// ── Live server integration tests ──
-// These require a running blazr server at localhost:8090.
-// Start: cargo run --features cuda -- serve --model llama-3.2-1b --port 8090
+#[test]
+fn test_chat_template_from_name() {
+    use blazr::ChatTemplate;
+    assert_eq!(ChatTemplate::from_name("llama3"), ChatTemplate::Llama3);
+    assert_eq!(ChatTemplate::from_name("chatml"), ChatTemplate::ChatML);
+    assert_eq!(
+        ChatTemplate::from_name("MISTRAL"),
+        ChatTemplate::MistralInstruct
+    );
+    assert_eq!(ChatTemplate::from_name("phi3"), ChatTemplate::Phi3);
+    assert_eq!(ChatTemplate::from_name("gemma"), ChatTemplate::Gemma);
+    assert_eq!(ChatTemplate::from_name("deepseek"), ChatTemplate::DeepSeek);
+    assert_eq!(ChatTemplate::from_name("unknown"), ChatTemplate::Generic);
+}
 
-const TEST_SERVER: &str = "http://localhost:8090";
+// ═══════════════════════════════════════════════════════════
+// Live server tests — require BLAZR_TEST_SERVER env var
+// ═══════════════════════════════════════════════════════════
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090"]
+#[ignore = "requires BLAZR_TEST_SERVER"]
 async fn test_health_endpoint() {
+    let server = test_server();
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/health", TEST_SERVER))
+        .get(format!("{}/health", server))
         .send()
         .await
         .expect("health request failed");
@@ -85,11 +120,12 @@ async fn test_health_endpoint() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090"]
+#[ignore = "requires BLAZR_TEST_SERVER"]
 async fn test_list_models() {
+    let server = test_server();
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/v1/models", TEST_SERVER))
+        .get(format!("{}/v1/models", server))
         .send()
         .await
         .expect("list models request failed");
@@ -100,13 +136,14 @@ async fn test_list_models() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090"]
+#[ignore = "requires BLAZR_TEST_SERVER"]
 async fn test_invalid_model_returns_404() {
+    let server = test_server();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/completions", TEST_SERVER))
+        .post(format!("{}/v1/completions", server))
         .json(&serde_json::json!({
-            "model": "nonexistent-model-xyz",
+            "model": "nonexistent-model-xyz-99999",
             "prompt": "Hello",
             "max_tokens": 5
         }))
@@ -122,13 +159,15 @@ async fn test_invalid_model_returns_404() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090"]
+#[ignore = "requires BLAZR_TEST_SERVER"]
 async fn test_invalid_temperature_returns_400() {
+    let server = test_server();
+    let model = test_model();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/completions", TEST_SERVER))
+        .post(format!("{}/v1/completions", server))
         .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
+            "model": model,
             "prompt": "Hello",
             "temperature": 5.0
         }))
@@ -139,13 +178,60 @@ async fn test_invalid_temperature_returns_400() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
-async fn test_completions_non_streaming() {
+#[ignore = "requires BLAZR_TEST_SERVER"]
+async fn test_empty_messages_returns_400() {
+    let server = test_server();
+    let model = test_model();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/completions", TEST_SERVER))
+        .post(format!("{}/v1/chat/completions", server))
         .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
+            "model": model,
+            "messages": []
+        }))
+        .send()
+        .await
+        .expect("chat completions request failed");
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+#[ignore = "requires BLAZR_TEST_SERVER"]
+async fn test_metrics_endpoint() {
+    let server = test_server();
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/metrics", server))
+        .send()
+        .await
+        .expect("metrics request failed");
+    assert_eq!(resp.status(), 200);
+
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("blazr_requests_total"),
+        "Should contain request counter"
+    );
+    assert!(
+        text.contains("blazr_models_loaded"),
+        "Should contain models gauge"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Model-specific tests — require BLAZR_TEST_SERVER + BLAZR_TEST_MODEL
+// ═══════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
+async fn test_completions_non_streaming() {
+    let server = test_server();
+    let model = test_model();
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/completions", server))
+        .json(&serde_json::json!({
+            "model": model,
             "prompt": "The capital of France is",
             "max_tokens": 10,
             "temperature": 0.0
@@ -166,13 +252,15 @@ async fn test_completions_non_streaming() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
 async fn test_completions_streaming_done_marker() {
+    let server = test_server();
+    let model = test_model();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/completions", TEST_SERVER))
+        .post(format!("{}/v1/completions", server))
         .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
+            "model": model,
             "prompt": "Hello",
             "max_tokens": 5,
             "temperature": 0.0,
@@ -191,13 +279,15 @@ async fn test_completions_streaming_done_marker() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
 async fn test_chat_completions_non_streaming() {
+    let server = test_server();
+    let model = test_model();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/chat/completions", TEST_SERVER))
+        .post(format!("{}/v1/chat/completions", server))
         .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
+            "model": model,
             "messages": [
                 {"role": "user", "content": "Say hello in one word."}
             ],
@@ -220,108 +310,15 @@ async fn test_chat_completions_non_streaming() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090"]
-async fn test_empty_messages_returns_400() {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/v1/chat/completions", TEST_SERVER))
-        .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
-            "messages": []
-        }))
-        .send()
-        .await
-        .expect("chat completions request failed");
-    assert_eq!(resp.status(), 400);
-}
-
-#[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
-async fn test_tokenize_endpoint() {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/tokenize", TEST_SERVER))
-        .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
-            "content": "Hello world"
-        }))
-        .send()
-        .await
-        .expect("tokenize request failed");
-    assert_eq!(resp.status(), 200);
-
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["tokens"].as_array().unwrap().len() >= 2);
-}
-
-#[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
-async fn test_detokenize_endpoint() {
-    let client = reqwest::Client::new();
-    // First tokenize
-    let tok_resp = client
-        .post(format!("{}/tokenize", TEST_SERVER))
-        .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
-            "content": "Hello world"
-        }))
-        .send()
-        .await
-        .unwrap();
-    let tok_body: serde_json::Value = tok_resp.json().await.unwrap();
-    let tokens = tok_body["tokens"].clone();
-
-    // Then detokenize
-    let resp = client
-        .post(format!("{}/detokenize", TEST_SERVER))
-        .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
-            "tokens": tokens
-        }))
-        .send()
-        .await
-        .expect("detokenize request failed");
-    assert_eq!(resp.status(), 200);
-
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["content"], "Hello world");
-}
-
-#[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
-async fn test_concurrent_requests() {
-    let client = reqwest::Client::new();
-    let mut handles = Vec::new();
-
-    for _ in 0..3 {
-        let c = client.clone();
-        handles.push(tokio::spawn(async move {
-            c.post(format!("{}/v1/completions", TEST_SERVER))
-                .json(&serde_json::json!({
-                    "model": "llama-3.2-1b",
-                    "prompt": "Count: 1, 2, 3,",
-                    "max_tokens": 3,
-                    "temperature": 0.0
-                }))
-                .send()
-                .await
-        }));
-    }
-
-    for handle in handles {
-        let resp = handle.await.unwrap().unwrap();
-        assert_eq!(resp.status(), 200);
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
 async fn test_chat_completions_streaming() {
+    let server = test_server();
+    let model = test_model();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/chat/completions", TEST_SERVER))
+        .post(format!("{}/v1/chat/completions", server))
         .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
+            "model": model,
             "messages": [
                 {"role": "user", "content": "Say hi."}
             ],
@@ -335,7 +332,6 @@ async fn test_chat_completions_streaming() {
     assert_eq!(resp.status(), 200);
 
     let text = resp.text().await.unwrap();
-    // Verify SSE format: should have role chunk, content chunks, and [DONE]
     assert!(
         text.contains("chat.completion.chunk"),
         "Should contain chunk objects"
@@ -348,13 +344,71 @@ async fn test_chat_completions_streaming() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
-async fn test_stop_sequence() {
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
+async fn test_tokenize_endpoint() {
+    let server = test_server();
+    let model = test_model();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/completions", TEST_SERVER))
+        .post(format!("{}/tokenize", server))
         .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
+            "model": model,
+            "content": "Hello world"
+        }))
+        .send()
+        .await
+        .expect("tokenize request failed");
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["tokens"].as_array().unwrap().len() >= 2);
+}
+
+#[tokio::test]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
+async fn test_detokenize_endpoint() {
+    let server = test_server();
+    let model = test_model();
+    let client = reqwest::Client::new();
+    // First tokenize
+    let tok_resp = client
+        .post(format!("{}/tokenize", server))
+        .json(&serde_json::json!({
+            "model": model,
+            "content": "Hello world"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let tok_body: serde_json::Value = tok_resp.json().await.unwrap();
+    let tokens = tok_body["tokens"].clone();
+
+    // Then detokenize
+    let resp = client
+        .post(format!("{}/detokenize", server))
+        .json(&serde_json::json!({
+            "model": model,
+            "tokens": tokens
+        }))
+        .send()
+        .await
+        .expect("detokenize request failed");
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["content"], "Hello world");
+}
+
+#[tokio::test]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
+async fn test_stop_sequence() {
+    let server = test_server();
+    let model = test_model();
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/completions", server))
+        .json(&serde_json::json!({
+            "model": model,
             "prompt": "Count from 1 to 10: 1, 2, 3, 4, 5,",
             "max_tokens": 50,
             "temperature": 0.0,
@@ -375,15 +429,46 @@ async fn test_stop_sequence() {
 }
 
 #[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090 with llama-3.2-1b"]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
+async fn test_concurrent_requests() {
+    let server = test_server();
+    let model = test_model();
+    let client = reqwest::Client::new();
+    let mut handles = Vec::new();
+
+    for _ in 0..3 {
+        let c = client.clone();
+        let s = server.clone();
+        let m = model.clone();
+        handles.push(tokio::spawn(async move {
+            c.post(format!("{}/v1/completions", s))
+                .json(&serde_json::json!({
+                    "model": m,
+                    "prompt": "Count: 1, 2, 3,",
+                    "max_tokens": 3,
+                    "temperature": 0.0
+                }))
+                .send()
+                .await
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await.unwrap().unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires BLAZR_TEST_SERVER and BLAZR_TEST_MODEL"]
 async fn test_streaming_disconnect_no_crash() {
-    // Start a streaming request and immediately drop the connection.
-    // The server should not crash or leak resources.
+    let server = test_server();
+    let model = test_model();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/completions", TEST_SERVER))
+        .post(format!("{}/v1/completions", server))
         .json(&serde_json::json!({
-            "model": "llama-3.2-1b",
+            "model": model,
             "prompt": "Tell me a very long story about dragons",
             "max_tokens": 100,
             "stream": true
@@ -401,48 +486,9 @@ async fn test_streaming_disconnect_no_crash() {
 
     // Verify server is still healthy
     let health = client
-        .get(format!("{}/health", TEST_SERVER))
+        .get(format!("{}/health", server))
         .send()
         .await
         .expect("health check after disconnect failed");
     assert_eq!(health.status(), 200);
-}
-
-#[tokio::test]
-#[ignore = "requires running blazr server at localhost:8090"]
-async fn test_metrics_endpoint() {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{}/metrics", TEST_SERVER))
-        .send()
-        .await
-        .expect("metrics request failed");
-    assert_eq!(resp.status(), 200);
-
-    let text = resp.text().await.unwrap();
-    assert!(
-        text.contains("blazr_requests_total"),
-        "Should contain request counter"
-    );
-    assert!(
-        text.contains("blazr_models_loaded"),
-        "Should contain models gauge"
-    );
-}
-
-// ── Unit tests (no server needed) ──
-
-#[test]
-fn test_chat_template_from_name() {
-    use blazr::ChatTemplate;
-    assert_eq!(ChatTemplate::from_name("llama3"), ChatTemplate::Llama3);
-    assert_eq!(ChatTemplate::from_name("chatml"), ChatTemplate::ChatML);
-    assert_eq!(
-        ChatTemplate::from_name("MISTRAL"),
-        ChatTemplate::MistralInstruct
-    );
-    assert_eq!(ChatTemplate::from_name("phi3"), ChatTemplate::Phi3);
-    assert_eq!(ChatTemplate::from_name("gemma"), ChatTemplate::Gemma);
-    assert_eq!(ChatTemplate::from_name("deepseek"), ChatTemplate::DeepSeek);
-    assert_eq!(ChatTemplate::from_name("unknown"), ChatTemplate::Generic);
 }

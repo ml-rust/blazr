@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
@@ -22,6 +22,45 @@ use crate::engine::Executor;
 use crate::loader;
 use crate::tokenizer::Tokenizer;
 
+/// Parse an Ollama-style keep_alive string into a Duration.
+///
+/// Supported formats:
+/// - `"0"` → `Some(Duration::ZERO)` (unload immediately)
+/// - `"-1"` → `None` (keep forever)
+/// - `"5m"` → 5 minutes
+/// - `"1h"` → 1 hour
+/// - `"30s"` → 30 seconds
+/// - `"300"` → 300 seconds (bare number = seconds)
+pub fn parse_keep_alive(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    if s == "-1" {
+        return None; // forever
+    }
+    if s == "0" {
+        return Some(Duration::ZERO);
+    }
+    if let Some(mins) = s.strip_suffix('m') {
+        if let Ok(n) = mins.parse::<u64>() {
+            return Some(Duration::from_secs(n * 60));
+        }
+    }
+    if let Some(hours) = s.strip_suffix('h') {
+        if let Ok(n) = hours.parse::<u64>() {
+            return Some(Duration::from_secs(n * 3600));
+        }
+    }
+    if let Some(secs) = s.strip_suffix('s') {
+        if let Ok(n) = secs.parse::<u64>() {
+            return Some(Duration::from_secs(n));
+        }
+    }
+    // Bare number = seconds
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(Duration::from_secs(n));
+    }
+    None // unparseable → default (forever)
+}
+
 /// Model entry in the scheduler
 struct ModelEntry<R: Runtime<DType = DType>> {
     /// The executor wrapping the model
@@ -30,6 +69,8 @@ struct ModelEntry<R: Runtime<DType = DType>> {
     last_accessed: Instant,
     /// Model path for reloading
     path: PathBuf,
+    /// Per-model keep-alive duration. None = forever (no auto-unload).
+    keep_alive: Option<Duration>,
 }
 
 /// Default context size for scheduler-managed models
@@ -138,6 +179,7 @@ where
                     executor: Arc::clone(&executor),
                     last_accessed: Instant::now(),
                     path: model_path,
+                    keep_alive: None,
                 },
             );
         }
@@ -196,6 +238,38 @@ where
         }
 
         Ok(())
+    }
+
+    /// Set the keep-alive duration for a model.
+    /// `None` means forever. `Some(Duration::ZERO)` means unload immediately.
+    pub async fn set_keep_alive(&self, model_name: &str, keep_alive: Option<Duration>) {
+        let mut models = self.models.write().await;
+        if let Some(entry) = models.get_mut(model_name) {
+            entry.keep_alive = keep_alive;
+        }
+        // Immediate unload if Duration::ZERO
+        if keep_alive == Some(Duration::ZERO) {
+            models.remove(model_name);
+            tracing::info!("Unloaded model '{}' (keep_alive=0)", model_name);
+        }
+    }
+
+    /// Evict models that have exceeded their keep-alive duration.
+    /// Called periodically by the reaper task.
+    pub async fn evict_expired(&self) {
+        let mut models = self.models.write().await;
+        let mut to_remove = Vec::new();
+        for (name, entry) in models.iter() {
+            if let Some(ttl) = entry.keep_alive {
+                if entry.last_accessed.elapsed() > ttl {
+                    to_remove.push(name.clone());
+                }
+            }
+        }
+        for name in to_remove {
+            models.remove(&name);
+            tracing::info!("Auto-unloaded model '{}' (keep_alive expired)", name);
+        }
     }
 
     /// Unload a specific model

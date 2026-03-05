@@ -162,10 +162,25 @@ pub async fn start(
     // Install Prometheus metrics recorder
     let metrics_handle = metrics::install_recorder()
         .map_err(|e| anyhow::anyhow!("Failed to install Prometheus metrics recorder: {}", e))?;
-    let state = Arc::new(AppState::new(scheduler, metrics_handle));
+    let state = Arc::new(
+        AppState::new(scheduler, metrics_handle)
+            .with_max_inflight_tokens(config.max_inflight_tokens),
+    );
 
     // Start config file watcher for hot-reload
     config_watch::spawn_config_watcher(state.user_config.clone());
+
+    // Start keep-alive reaper: evicts models that exceed their per-request keep_alive TTL
+    {
+        let scheduler = Arc::clone(&state.scheduler);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                scheduler.evict_expired().await;
+            }
+        });
+    }
 
     // CORS: respect cors_enabled and cors_origins config
     let cors = if config.cors_enabled {

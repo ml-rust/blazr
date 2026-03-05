@@ -9,4 +9,4 @@ mod executor;
 mod scheduler;
 
 pub use executor::{Executor, FinishReason, GeneratedToken, GenerationResult};
-pub use scheduler::Scheduler;
+pub use scheduler::{parse_keep_alive, Scheduler};

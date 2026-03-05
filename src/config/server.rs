@@ -46,6 +46,11 @@ pub struct ServerConfig {
     /// Path to TLS private key file (PEM format)
     #[serde(default)]
     pub tls_key: Option<PathBuf>,
+
+    /// Maximum in-flight token budget (prompt + decode tokens across all active requests).
+    /// 0 = unlimited. When exceeded, new requests get 503 with Retry-After.
+    #[serde(default)]
+    pub max_inflight_tokens: usize,
 }
 
 fn default_port() -> u16 {
@@ -85,6 +90,7 @@ impl Default for ServerConfig {
             max_body_size: default_max_body_size(),
             tls_cert: None,
             tls_key: None,
+            max_inflight_tokens: 0,
         }
     }
 }

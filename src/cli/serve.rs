@@ -39,17 +39,25 @@ pub async fn serve(
     // Pre-load and warm up model if specified
     if let Some(ref model_name) = model {
         tracing::info!("Pre-loading model: {}", model_name);
+        let load_start = std::time::Instant::now();
         let executor = scheduler.get_executor(model_name).await?;
+        let load_time = load_start.elapsed();
         if let Err(e) = executor.warmup() {
             tracing::warn!("Model warmup failed (first request may be slower): {}", e);
         }
-        tracing::info!("Model loaded and warmed up successfully");
+        tracing::info!(
+            "Model '{}' loaded in {:.1}s (vocab={}, ctx={})",
+            model_name,
+            load_time.as_secs_f64(),
+            executor.vocab_size(),
+            executor.config().max_seq_len(),
+        );
     }
 
     // Server config
     let server_config = ServerConfig {
         port,
-        host: host.clone(),
+        host,
         ..Default::default()
     };
 
@@ -71,10 +79,23 @@ pub async fn serve(
     }
 
     let addr = server_config.addr();
-    tracing::info!("Starting server at http://{}", addr);
-    if !api_keys.is_empty() {
-        tracing::info!("API key authentication enabled ({} key(s))", api_keys.len());
+    eprintln!();
+    eprintln!("  blazr v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("  Listening on http://{}", addr);
+    if let Some(ref m) = model {
+        eprintln!("  Model: {}", m);
     }
+    #[cfg(feature = "cuda")]
+    eprintln!("  Backend: CUDA");
+    #[cfg(not(feature = "cuda"))]
+    eprintln!("  Backend: CPU");
+    if !api_keys.is_empty() {
+        eprintln!("  Auth: {} API key(s)", api_keys.len());
+    }
+    if server_config.cors_enabled {
+        eprintln!("  CORS: enabled");
+    }
+    eprintln!();
 
     // Start server
     server::start(scheduler, server_config, api_keys).await?;

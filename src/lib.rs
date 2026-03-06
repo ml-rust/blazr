@@ -29,6 +29,8 @@
 
 pub mod cli;
 pub mod config;
+#[cfg(feature = "distributed")]
+pub mod distributed;
 pub mod engine;
 pub mod loader;
 pub mod model;
@@ -37,6 +39,6 @@ pub mod tokenizer;
 
 // Re-export key types
 pub use config::{BlazrConfig, GenerationConfig, ServerConfig, UserConfig};
-pub use engine::{Executor, Scheduler};
+pub use engine::{BatchEngine, Executor, RequestScheduler, Scheduler};
 pub use loader::{load_model, ModelFormat, ModelSource};
 pub use model::{ChatMessage, ChatTemplate};

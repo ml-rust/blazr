@@ -105,8 +105,10 @@ async fn main() -> Result<()> {
             num_ctx,
             decode_tokens,
             runs,
+            json,
+            concurrency,
         } => {
-            blazr::cli::bench(model, num_ctx, decode_tokens, runs).await?;
+            blazr::cli::bench(model, num_ctx, decode_tokens, runs, json, concurrency).await?;
         }
         Commands::Ps { server } => {
             blazr::cli::ps(server).await?;
@@ -120,6 +122,58 @@ async fn main() -> Result<()> {
         } => {
             blazr::cli::convert(input, output, format, quantization, verbose)?;
         }
+        #[cfg(feature = "distributed")]
+        Commands::Swarm {
+            role,
+            token,
+            model,
+            leader,
+            swarm_port,
+            port,
+            mdns,
+        } => {
+            blazr::cli::swarm(role, token, model, leader, swarm_port, port, mdns).await?;
+        }
+        #[cfg(feature = "distributed")]
+        Commands::Disagg {
+            role,
+            model,
+            listen_addr,
+            router_addr,
+            prefill,
+            decode,
+            port,
+        } => match role.as_str() {
+            "router" => {
+                let prefill_addrs = prefill.unwrap_or_default();
+                let decode_addrs = decode.unwrap_or_default();
+                blazr::cli::run_disagg_router(listen_addr, prefill_addrs, decode_addrs, port)
+                    .await?;
+            }
+            "prefill" => {
+                let model_name = model.ok_or_else(|| {
+                    anyhow::anyhow!("--model is required for disagg prefill role")
+                })?;
+                let raddr = router_addr.ok_or_else(|| {
+                    anyhow::anyhow!("--router-addr is required for disagg prefill role")
+                })?;
+                blazr::cli::run_disagg_prefill_worker(model_name, raddr, listen_addr).await?;
+            }
+            "decode" => {
+                let model_name = model
+                    .ok_or_else(|| anyhow::anyhow!("--model is required for disagg decode role"))?;
+                let raddr = router_addr.ok_or_else(|| {
+                    anyhow::anyhow!("--router-addr is required for disagg decode role")
+                })?;
+                blazr::cli::run_disagg_decode_worker(model_name, raddr, listen_addr).await?;
+            }
+            _ => {
+                anyhow::bail!(
+                    "Invalid disagg role '{}'. Must be 'router', 'prefill', or 'decode'",
+                    role
+                );
+            }
+        },
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,

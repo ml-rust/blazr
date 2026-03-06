@@ -141,11 +141,19 @@ async fn run_cuda(
     // If prompt provided, generate once
     if let Some(prompt) = prompt {
         if graphs && gen_config.is_greedy() {
-            print_generation_stream(
-                executor.generate_with_graphs(&prompt, &gen_config),
-                "CUDA graph mode",
-            )
-            .await?;
+            if paged_attention {
+                print_generation_stream(
+                    executor.generate_with_graphs_paged(&prompt, &gen_config),
+                    "CUDA graph mode (paged)",
+                )
+                .await?;
+            } else {
+                print_generation_stream(
+                    executor.generate_with_graphs(&prompt, &gen_config),
+                    "CUDA graph mode",
+                )
+                .await?;
+            }
         } else {
             print_generation_stream(executor.generate(&prompt, &gen_config), "").await?;
         }
@@ -220,6 +228,7 @@ where
         + boostr::BinaryOps<R>
         + boostr::TypeConversionOps<R>
         + boostr::SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
         + boostr::model::ModelClient<R>,
 {
     eprintln!("{} - Interactive generation", "blazr run".bold().cyan());

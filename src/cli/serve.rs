@@ -7,7 +7,7 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::config::ServerConfig;
-use crate::engine::Scheduler;
+use crate::engine::{BatchEngine, RequestScheduler, Scheduler};
 use crate::server;
 
 #[cfg(feature = "cuda")]
@@ -140,8 +140,76 @@ pub async fn serve(
     }
     eprintln!();
 
+    // Create RequestScheduler + BatchEngine if continuous batching is configured
+    let request_scheduler = if let Some(ref model_name) = model {
+        let executor = scheduler.get_executor(model_name).await?;
+        let paged = executor.config().inference.paged_attention;
+        let max_batch = executor.config().inference.max_batch_size;
+        let block_size = executor.config().inference.block_size;
+        let kv_pool = executor.config().inference.kv_pool_blocks;
+        let max_ctx = executor.config().inference.max_context_len.unwrap_or(4096);
+
+        if paged && max_batch > 1 {
+            let total_blocks = if kv_pool > 0 {
+                kv_pool
+            } else {
+                (max_ctx * max_batch / block_size).max(256)
+            };
+
+            let allocator =
+                boostr::inference::memory::CpuBlockAllocator::new(total_blocks, block_size);
+            let sched_config = boostr::inference::scheduler::SchedulerConfig {
+                max_batch_size: max_batch,
+                max_batch_tokens: max_ctx,
+                block_size,
+                ..Default::default()
+            };
+
+            // Create prefix cache if enabled
+            let prefix_cache_enabled = executor.config().inference.prefix_cache;
+            let rs = if prefix_cache_enabled {
+                let cache_config = boostr::inference::prefix_cache::PrefixCacheConfig {
+                    enabled: true,
+                    block_size,
+                    max_cached_blocks: executor
+                        .config()
+                        .inference
+                        .max_cached_blocks
+                        .max(total_blocks / 4),
+                    ..Default::default()
+                };
+                let cache = boostr::inference::prefix_cache::PrefixCache::new(
+                    allocator.clone(),
+                    cache_config,
+                );
+                RequestScheduler::with_prefix_cache(allocator, sched_config, cache)
+            } else {
+                RequestScheduler::new(allocator, sched_config)
+            };
+
+            // Spawn BatchEngine in background
+            let batch_engine = BatchEngine::new(executor, Arc::clone(&rs))?;
+            tokio::spawn(async move {
+                batch_engine.run().await;
+            });
+
+            eprintln!(
+                "  Batching: {} (max_batch={}, blocks={})",
+                "continuous".green(),
+                max_batch,
+                total_blocks,
+            );
+
+            Some(rs)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Start server
-    server::start(scheduler, server_config, api_keys).await?;
+    server::start_with_batch(scheduler, server_config, api_keys, request_scheduler).await?;
 
     Ok(())
 }

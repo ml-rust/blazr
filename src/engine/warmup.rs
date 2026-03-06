@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Result};
 
 use boostr::inference::kv_cache::LayeredPagedKvCache;
-use boostr::inference::memory::CpuBlockAllocator;
+use boostr::inference::memory::{BlockAllocator, CpuBlockAllocator};
 use boostr::inference::{LayeredKvCache, LayeredSsmState};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
@@ -27,6 +27,7 @@ where
         + BinaryOps<R>
         + TypeConversionOps<R>
         + SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
         + ModelClient<R>,
 {
     /// Warm up the model by running a dummy forward pass
@@ -88,7 +89,15 @@ where
         let kv_dtype = parse_dtype(self.config().dtype())?;
 
         let num_blocks = 4;
-        let allocator = CpuBlockAllocator::new(num_blocks, block_size);
+        // Use shared allocator if available, otherwise create a small one for warmup
+        let allocator = if let Some(shared) = self.shared_allocator() {
+            shared
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Block allocator lock poisoned: {e}"))?
+                .clone()
+        } else {
+            CpuBlockAllocator::new(num_blocks, block_size)
+        };
 
         let mut paged_cache = LayeredPagedKvCache::new(
             num_layers,
@@ -147,6 +156,12 @@ where
                 1,
             )
             .map_err(|e| anyhow!("Warmup paged decode failed: {}", e))?;
+
+        // Free warmup blocks back to shared pool
+        let blocks_to_free: Vec<_> = paged_cache.block_table(0).blocks.clone();
+        if !blocks_to_free.is_empty() {
+            let _ = allocator.free(&blocks_to_free);
+        }
         Ok(())
     }
 

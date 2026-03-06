@@ -5,6 +5,7 @@ use futures::StreamExt;
 
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
+use boostr::quant::{DequantOps, QuantMatmulOps};
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
     TypeConversionOps, UnaryOps,
@@ -26,7 +27,10 @@ where
         + BinaryOps<R>
         + TypeConversionOps<R>
         + SamplingOps<R>
-        + ModelClient<R>,
+        + boostr::GrammarDfaOps<R>
+        + ModelClient<R>
+        + DequantOps<R>
+        + QuantMatmulOps<R>,
 {
     /// Generate text and return the complete result with metadata
     pub async fn generate_text(
@@ -34,6 +38,11 @@ where
         prompt: &str,
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
+        // Use speculative decoding if configured
+        if self.config().inference.speculative.is_some() {
+            return self.generate_text_speculative(prompt, gen_config).await;
+        }
+
         let max_attempts = if gen_config.json_mode { 3 } else { 1 };
         for attempt in 0..max_attempts {
             let result = self.generate_text_once(prompt, gen_config).await?;
@@ -47,6 +56,93 @@ where
             );
         }
         self.generate_text_once(prompt, gen_config).await
+    }
+
+    /// Speculative decoding path: uses draft model for fast speculation, target for verification.
+    async fn generate_text_speculative(
+        &self,
+        prompt: &str,
+        gen_config: &GenerationConfig,
+    ) -> Result<GenerationResult> {
+        let spec_config = self
+            .config()
+            .inference
+            .speculative
+            .as_ref()
+            .ok_or_else(|| anyhow!("speculative config missing"))?;
+
+        let prompt_tokens = self
+            .tokenizer()
+            .encode(prompt)
+            .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+        let prompt_len = prompt_tokens.len();
+        let prefill_start = std::time::Instant::now();
+
+        // Load separate draft model (smaller, faster model for speculation)
+        let draft_model_arc = self.get_or_load_draft_model()?;
+        let draft = super::speculative::BlazrSpeculativeModel::new(
+            draft_model_arc,
+            self.device().clone(),
+            self.config().dtype(),
+            &spec_config.draft_model,
+        )?;
+
+        // Target model is the main (larger) model
+        let target = super::speculative::BlazrSpeculativeModel::new(
+            std::sync::Arc::clone(self.model_arc()),
+            self.device().clone(),
+            self.config().dtype(),
+            "target",
+        )?;
+
+        let boostr_config = boostr::inference::speculative::SpeculativeConfig {
+            num_speculative_tokens: spec_config.num_speculative_tokens,
+            adaptive_depth: spec_config.adaptive_depth,
+            seed: gen_config.seed,
+            ..Default::default()
+        };
+
+        let mut executor =
+            boostr::inference::speculative::SpeculativeExecutor::new(draft, target, boostr_config);
+
+        let generated_ids = executor
+            .generate(&prompt_tokens, gen_config.max_tokens)
+            .map_err(|e| anyhow!("speculative generation failed: {}", e))?;
+
+        let prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
+
+        let text = self.tokenizer().decode(&generated_ids).unwrap_or_default();
+
+        // Check for EOS in generated tokens
+        let eos_pos = generated_ids
+            .iter()
+            .position(|&t| self.tokenizer().is_eos(t));
+        let (final_text, finish_reason) = if let Some(pos) = eos_pos {
+            let text = self
+                .tokenizer()
+                .decode(&generated_ids[..pos])
+                .unwrap_or_default();
+            (text, FinishReason::Eos)
+        } else {
+            (text, FinishReason::Length)
+        };
+
+        let stats = executor.stats;
+        tracing::info!(
+            speculative_iterations = stats.iterations,
+            speculative_accepted = stats.accepted_tokens,
+            speculative_rejected = stats.rejected_tokens,
+            "speculative decoding complete"
+        );
+
+        Ok(GenerationResult {
+            text: final_text,
+            prompt_tokens: prompt_len,
+            completion_tokens: generated_ids.len(),
+            finish_reason,
+            prompt_eval_duration_ms,
+            token_logprobs: None,
+        })
     }
 
     /// Single generation attempt (used by generate_text for JSON retry)

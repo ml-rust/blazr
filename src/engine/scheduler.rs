@@ -105,6 +105,7 @@ where
         + ActivationOps<R>
         + BinaryOps<R>
         + boostr::SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
         + ModelClient<R>
         + boostr::quant::DequantOps<R>
         + boostr::quant::QuantMatmulOps<R>,
@@ -155,20 +156,73 @@ where
         // Find model path
         let model_path = self.find_model_path(model_name)?;
 
-        // Load model
-        let (model, config) = loader::load_model::<R, _>(&model_path, &self.device)?;
+        // Load model — check for tensor parallelism from env or config
+        let tp_size = std::env::var("BLAZR_TP_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
 
-        // Create tokenizer
-        let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
-
-        // Detect chat template from model directory
-        let chat_template = ChatTemplate::detect(&model_path, config.model_type());
-
-        // Create executor with num_ctx for KV cache initial capacity
-        let executor = Arc::new(
-            Executor::new(model, config, tokenizer, self.device.clone(), self.num_ctx)?
-                .with_chat_template(chat_template),
-        );
+        let executor = if tp_size > 1 {
+            #[cfg(feature = "cuda")]
+            {
+                let rank = std::env::var("BLAZR_TP_RANK")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let (tp_state, comm) = super::tensor_parallel::init_tp(tp_size, rank)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let (model, config) =
+                    loader::load_model_tp::<R, _>(&model_path, &self.device, comm)?;
+                let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
+                let chat_template = ChatTemplate::detect(&model_path, config.model_type());
+                if let Some(ref moe_config) =
+                    super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)
+                {
+                    tracing::info!(
+                        strategy = ?moe_config.strategy,
+                        gpu_experts = moe_config.gpu_experts,
+                        "MoE expert offloading configured"
+                    );
+                }
+                Arc::new(
+                    Executor::new_tensor_parallel(
+                        model,
+                        config,
+                        tokenizer,
+                        self.device.clone(),
+                        self.num_ctx,
+                        tp_state,
+                    )?
+                    .with_chat_template(chat_template)
+                    .with_model_dir(self.model_dir.clone()),
+                )
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                return Err(anyhow::anyhow!(
+                    "Tensor parallelism requires the 'cuda' feature (BLAZR_TP_SIZE={})",
+                    tp_size
+                ));
+            }
+        } else {
+            let (model, config) = loader::load_model::<R, _>(&model_path, &self.device)?;
+            let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
+            let chat_template = ChatTemplate::detect(&model_path, config.model_type());
+            if let Some(ref moe_config) =
+                super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)
+            {
+                tracing::info!(
+                    strategy = ?moe_config.strategy,
+                    gpu_experts = moe_config.gpu_experts,
+                    "MoE expert offloading configured"
+                );
+            }
+            Arc::new(
+                Executor::new(model, config, tokenizer, self.device.clone(), self.num_ctx)?
+                    .with_chat_template(chat_template)
+                    .with_model_dir(self.model_dir.clone()),
+            )
+        };
 
         metrics::counter!("blazr_scheduler_loads_total").increment(1);
 

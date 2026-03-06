@@ -30,7 +30,7 @@ impl Executor<boostr::CudaRuntime> {
     /// # Preconditions
     /// - Model must be Llama (Mamba2/Hybrid graph mode not yet implemented)
     /// - `gen_config.is_greedy()` must be true (graph replay is deterministic)
-    /// - `config.inference.paged_attention` must be false
+    /// - `config.inference.paged_attention` must be false (use `generate_with_graphs_paged` for paged mode)
     pub fn generate_with_graphs<'a>(
         &'a self,
         prompt: &'a str,
@@ -176,6 +176,215 @@ impl Executor<boostr::CudaRuntime> {
                 let t2 = std::time::Instant::now();
                 let next_token = Self::read_token_id(&decode_graph.next_token_buf, event)?;
                 tracing::info!("Graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
+
+                if self.tokenizer().is_eos(next_token) {
+                    yield Ok(GeneratedToken { token_id: next_token, text: String::new(), logprob: None, top_logprobs: None, finish_reason: Some(FinishReason::Eos) });
+                    break;
+                }
+
+                let graph_max = max_tokens.saturating_sub(1);
+                let is_last = i + 1 == graph_max;
+                let text = self.tokenizer().decode(&[next_token]).unwrap_or_default();
+                yield Ok(GeneratedToken { token_id: next_token, text, logprob: None, top_logprobs: None, finish_reason: if is_last { Some(FinishReason::Length) } else { None } });
+            }
+        }
+    }
+
+    /// Run greedy decode using CUDA graph capture+replay with **paged KV cache**.
+    ///
+    /// Same idea as `generate_with_graphs` but uses `forward_graph_paged` and
+    /// `PagedDecodeGraph`, which read `seq_len_k` and write `slot_mapping`
+    /// from device memory so these values can change between graph replays.
+    ///
+    /// # Preconditions
+    /// - Model must be Llama
+    /// - `gen_config.is_greedy()` must be true
+    /// - `config.inference.paged_attention` must be true
+    pub fn generate_with_graphs_paged<'a>(
+        &'a self,
+        prompt: &'a str,
+        gen_config: &'a crate::config::GenerationConfig,
+    ) -> impl futures::Stream<Item = Result<GeneratedToken>> + 'a {
+        use boostr::autograd::Var;
+        use boostr::inference::decode_graph::{DeviceScalars, PagedDecodeGraph};
+        use boostr::inference::kv_cache::LayeredPagedKvCache;
+        use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
+        use boostr::runtime::cuda::CudaRuntime as CudaRt;
+        use boostr::tensor::Tensor;
+        use boostr::CudaRuntime;
+        use boostr::Runtime;
+
+        stream! {
+            let prompt_tokens = self.tokenizer().encode(prompt)
+                .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+
+            if prompt_tokens.is_empty() {
+                return;
+            }
+
+            let max_seq_len = self.config().max_seq_len();
+            let graph_capacity = self.num_ctx().min(max_seq_len);
+            let max_tokens = gen_config.max_tokens.min(
+                graph_capacity.saturating_sub(prompt_tokens.len())
+            );
+
+            let input = self.create_input_tensor(&prompt_tokens)?;
+
+            // ── Paged KV cache setup ──
+            let num_layers = self.model().num_layers();
+            let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
+            let head_dim = self.model().head_dim().unwrap_or(64);
+            let half_dim = head_dim / 2;
+            let kv_dtype = parse_dtype(self.config().dtype())?;
+            let block_size = self.config().inference.block_size;
+
+            // Pre-allocate enough blocks for full capacity
+            let total_tokens = prompt_tokens.len() + max_tokens;
+            let num_blocks = BlockTable::blocks_needed(total_tokens, block_size) + 4;
+            let allocator = CpuBlockAllocator::new(num_blocks, block_size);
+
+            let mut paged_cache = LayeredPagedKvCache::new(
+                num_layers, num_blocks, block_size, num_kv_heads, head_dim, kv_dtype, self.device(),
+            );
+
+            // Allocate all blocks upfront for stable addresses during graph capture
+            paged_cache.allocate_blocks(total_tokens, &allocator)
+                .map_err(|e| anyhow!("Failed to pre-allocate paged blocks: {}", e))?;
+
+            // ── Prefill via normal paged path ──
+            let slot_mapping_vec = paged_cache.compute_slot_mapping(0, prompt_tokens.len())
+                .map_err(|e| anyhow!("Failed to compute prefill slot mapping: {}", e))?;
+            let prefill_slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prompt_tokens.len()], self.device());
+
+            let bt_vec = paged_cache.block_table_device_format(0);
+            let max_num_blocks_bt = bt_vec.len();
+            let block_table = Tensor::from_slice(&bt_vec, &[1, max_num_blocks_bt], self.device());
+
+            let seq_len_k = prompt_tokens.len();
+            paged_cache.set_seq_len(seq_len_k);
+
+            let t0 = std::time::Instant::now();
+            let prefill_logits = self.model().forward_with_paged_kv_cache(
+                &input, &paged_cache, &prefill_slot_mapping, &block_table,
+                seq_len_k, 0,
+            ).map_err(|e| anyhow!("Paged graph prefill failed: {}", e))?;
+            tracing::info!("Paged graph prefill: {:?} (seq_len={})", t0.elapsed(), prompt_tokens.len());
+
+            // ── Extract RoPE tables ──
+            let (rope_cos_var, rope_sin_var) = self.model()
+                .rope_caches()
+                .ok_or_else(|| anyhow!("Model has no RoPE cache — cannot use CUDA graph mode"))?;
+            let rope_cos_cache = rope_cos_var.tensor().clone();
+            let rope_sin_cache = rope_sin_var.tensor().clone();
+
+            let client = CudaRt::default_client(self.device());
+
+            // ── Stable-address tensors (ALL allocated BEFORE graph capture) ──
+            let token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device());
+            let cos_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device());
+            let sin_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device());
+            let cos_slice = Var::new(cos_slice_t, false);
+            let sin_slice = Var::new(sin_slice_t, false);
+
+            // Slot mapping for single-token decode — stable address, value updated per step
+            let slot_mapping = boostr::Tensor::<CudaRuntime>::from_slice(
+                &[seq_len_k as i32], &[1], self.device(),
+            );
+
+            let device_scalars = DeviceScalars::new(seq_len_k, self.device());
+            let next_token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device());
+
+            // ── Warmup pass (JIT kernels) ──
+            device_scalars.update(&client, seq_len_k)
+                .map_err(|e| anyhow!("DeviceScalars warmup update failed: {}", e))?;
+            let warmup_logits = self.model().forward_graph_paged(
+                &client, &token_buf, &paged_cache, &slot_mapping, &block_table,
+                &device_scalars, &cos_slice, &sin_slice,
+            ).map_err(|e| anyhow!("Paged graph warmup forward failed: {}", e))?;
+            boostr::inference::decode_graph::argmax_to_buf(&client, &warmup_logits, &next_token_buf)
+                .map_err(|e| anyhow!("Warmup argmax_to_buf failed: {}", e))?;
+
+            // Re-prefill with fresh paged cache for capture
+            let mut paged_cache = LayeredPagedKvCache::new(
+                num_layers, num_blocks, block_size, num_kv_heads, head_dim, kv_dtype, self.device(),
+            );
+            paged_cache.allocate_blocks(total_tokens, &allocator)
+                .map_err(|e| anyhow!("Failed to re-allocate paged blocks for capture: {}", e))?;
+
+            let slot_mapping_vec = paged_cache.compute_slot_mapping(0, prompt_tokens.len())
+                .map_err(|e| anyhow!("Failed to re-compute prefill slot mapping: {}", e))?;
+            let prefill_slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prompt_tokens.len()], self.device());
+            let bt_vec = paged_cache.block_table_device_format(0);
+            let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], self.device());
+            paged_cache.set_seq_len(seq_len_k);
+
+            let _ = self.model().forward_with_paged_kv_cache(
+                &input, &paged_cache, &prefill_slot_mapping, &block_table,
+                seq_len_k, 0,
+            ).map_err(|e| anyhow!("Re-prefill for capture failed: {}", e))?;
+
+            let capture_seq_len = paged_cache.seq_len();
+            device_scalars.update(&client, capture_seq_len)
+                .map_err(|e| anyhow!("DeviceScalars pre-capture update failed: {}", e))?;
+            device_scalars.update_rope_slices(&client, &rope_cos_cache, &rope_sin_cache, &cos_slice, &sin_slice, capture_seq_len, half_dim)
+                .map_err(|e| anyhow!("RoPE pre-capture update failed: {}", e))?;
+
+            // ── CUDA graph capture ──
+            let (graph, ()) = CudaRt::capture_graph(&client, |c| {
+                let logits = self.model().forward_graph_paged(
+                    c, &token_buf, &paged_cache, &slot_mapping, &block_table,
+                    &device_scalars, &cos_slice, &sin_slice,
+                ).map_err(|e| boostr::NumrError::Backend(format!("Capture paged forward failed: {e}")))?;
+                boostr::inference::decode_graph::argmax_to_buf(c, &logits, &next_token_buf)
+                    .map_err(|e| boostr::NumrError::Backend(format!("Capture argmax_to_buf failed: {e}")))
+            }).map_err(|e| anyhow!("CUDA paged graph capture failed: {}", e))?;
+
+            tracing::info!("Paged CUDA graph captured (seq_len={})", paged_cache.seq_len());
+
+            let mut decode_graph = PagedDecodeGraph {
+                graph,
+                device_scalars,
+                token_buf,
+                cos_slice: cos_slice.tensor().clone(),
+                sin_slice: sin_slice.tensor().clone(),
+                rope_cos_cache,
+                rope_sin_cache,
+                next_token_buf,
+                slot_mapping,
+                head_dim: half_dim,
+                seq_len: paged_cache.seq_len(),
+            };
+
+            // ── First token from prefill logits ──
+            let first_token_gpu = self.argmax_on_gpu(&prefill_logits)?;
+            let first_event = first_token_gpu.record_event()
+                .map_err(|e| anyhow!("Record event failed: {}", e))?;
+            let first_token = Self::read_token_id(&first_token_gpu, first_event)?;
+
+            if self.tokenizer().is_eos(first_token) {
+                yield Ok(GeneratedToken { token_id: first_token, text: String::new(), logprob: None, top_logprobs: None, finish_reason: Some(FinishReason::Eos) });
+                return;
+            }
+            let text = self.tokenizer().decode(&[first_token]).unwrap_or_default();
+            yield Ok(GeneratedToken { token_id: first_token, text, logprob: None, top_logprobs: None, finish_reason: None });
+
+            decode_graph.seed_next_token(&client, first_token as i64)
+                .map_err(|e| anyhow!("Failed to seed next_token_buf: {}", e))?;
+
+            // ── Graph decode loop ──
+            for i in 0..max_tokens.saturating_sub(1) {
+                let t1 = std::time::Instant::now();
+
+                decode_graph.pre_replay_and_launch(&client)
+                    .map_err(|e| anyhow!("Paged graph pre-replay+launch failed: {}", e))?;
+                let fwd_time = t1.elapsed();
+
+                let event = decode_graph.next_token_buf.record_event()
+                    .map_err(|e| anyhow!("Record event failed: {}", e))?;
+
+                let t2 = std::time::Instant::now();
+                let next_token = Self::read_token_id(&decode_graph.next_token_buf, event)?;
+                tracing::info!("Paged graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
 
                 if self.tokenizer().is_eos(next_token) {
                     yield Ok(GeneratedToken { token_id: next_token, text: String::new(), logprob: None, top_logprobs: None, finish_reason: Some(FinishReason::Eos) });

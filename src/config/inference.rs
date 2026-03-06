@@ -114,6 +114,55 @@ pub struct InferenceConfig {
     #[serde(default = "default_max_cached_blocks")]
     pub max_cached_blocks: usize,
 
+    /// Use GPU-accelerated prefix cache lookup (requires CUDA).
+    ///
+    /// When enabled, mirrors the prefix cache hash table to GPU memory and uses a
+    /// CUDA kernel for batch lookups, eliminating the CPU scheduling bottleneck.
+    /// Falls back to CPU lookup when CUDA is unavailable.
+    /// Includes a two-tier cache: VRAM (hot) → RAM (warm) with automatic demotion.
+    #[serde(default)]
+    pub gpu_prefix_cache: bool,
+
+    /// Maximum entries in the RAM (warm) tier of the GPU prefix cache.
+    /// Evicted GPU entries are demoted here before permanent eviction.
+    /// Only used when `gpu_prefix_cache = true`. Default: 5000.
+    #[serde(default = "default_ram_tier_capacity")]
+    pub gpu_prefix_cache_ram_tier: usize,
+
+    /// Chunk size for prefill (0 = no chunking, process entire prompt at once).
+    /// When set, long prompts are split into chunks of this size, interleaving
+    /// with decode steps between chunks to reduce TTFT for concurrent requests.
+    #[serde(default)]
+    pub prefill_chunk_size: usize,
+
+    /// Number of KV cache blocks in the shared pool.
+    /// Used by paged attention for all concurrent requests.
+    /// If 0, auto-computed from max_context_len and max_batch_size.
+    #[serde(default)]
+    pub kv_pool_blocks: usize,
+
+    /// Speculative decoding configuration.
+    /// When set, uses a draft model to speculate tokens and verifies with the main model.
+    #[serde(default)]
+    pub speculative: Option<SpeculativeDecodingConfig>,
+
+    /// Tensor parallelism degree (default: 1 = single GPU).
+    /// When > 1, shards model across multiple GPUs using NCCL all-reduce.
+    /// Requires CUDA and NCCL support.
+    #[serde(default = "default_tensor_parallel")]
+    pub tensor_parallel_size: usize,
+
+    /// MoE expert offloading strategy.
+    /// Only used for Mixture-of-Experts models (DeepSeek-V2/V3, Mixtral).
+    /// Values: "auto" (default), "gpu", "cpu", "hybrid"
+    #[serde(default)]
+    pub moe_offload: Option<String>,
+
+    /// Number of MoE experts to keep on GPU in hybrid offloading mode.
+    /// If 0, auto-computed from available VRAM.
+    #[serde(default)]
+    pub moe_gpu_experts: usize,
+
     /// Enable graph capture for greedy decode (backend-agnostic).
     ///
     /// After prompt prefill, captures the single-token decode forward pass as a
@@ -145,6 +194,31 @@ fn default_max_cached_blocks() -> usize {
     10000
 }
 
+/// Speculative decoding configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeculativeDecodingConfig {
+    /// Path to the draft model (smaller, faster model for speculation)
+    pub draft_model: String,
+    /// Number of tokens to speculate per iteration (default: 5)
+    #[serde(default = "default_spec_tokens")]
+    pub num_speculative_tokens: usize,
+    /// Enable adaptive depth (adjust speculation depth based on acceptance rate)
+    #[serde(default)]
+    pub adaptive_depth: bool,
+}
+
+fn default_ram_tier_capacity() -> usize {
+    5000
+}
+
+fn default_tensor_parallel() -> usize {
+    1
+}
+
+fn default_spec_tokens() -> usize {
+    5
+}
+
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
@@ -160,6 +234,14 @@ impl Default for InferenceConfig {
             num_blocks: 0,
             prefix_cache: false,
             max_cached_blocks: default_max_cached_blocks(),
+            gpu_prefix_cache: false,
+            gpu_prefix_cache_ram_tier: default_ram_tier_capacity(),
+            prefill_chunk_size: 0,
+            kv_pool_blocks: 0,
+            speculative: None,
+            tensor_parallel_size: 1,
+            moe_offload: None,
+            moe_gpu_experts: 0,
             graphs: false,
         }
     }

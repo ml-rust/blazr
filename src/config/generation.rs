@@ -130,6 +130,19 @@ pub struct GenerationConfig {
     /// the 95th percentile of typicality. Typical range: 0.9-1.0.
     #[serde(default)]
     pub typical_p: f32,
+
+    /// GBNF grammar string for constrained generation.
+    /// When set, only tokens valid according to the grammar DFA are allowed.
+    #[serde(default)]
+    pub grammar: Option<String>,
+
+    /// Name of a LoRA adapter to apply for this generation request.
+    ///
+    /// The adapter must have been loaded into the executor's `LoraAdapterRegistry`
+    /// beforehand via `POST /v1/lora/load` (or `Executor::load_lora`).
+    /// If `None`, the base model weights are used unchanged.
+    #[serde(default)]
+    pub lora_adapter: Option<String>,
 }
 
 fn default_max_tokens() -> usize {
@@ -205,6 +218,8 @@ impl Default for GenerationConfig {
             dry_allowed_length: 0,
             dry_sequence_breakers: Vec::new(),
             typical_p: 0.0,
+            grammar: None,
+            lora_adapter: None,
         }
     }
 }

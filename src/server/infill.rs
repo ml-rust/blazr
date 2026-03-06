@@ -254,6 +254,8 @@ impl HasSamplingFields for InfillRequest {
             dry_allowed_length: None,
             dry_sequence_breakers: None,
             typical_p: None,
+            grammar: None,
+            lora_adapter: None,
         }
     }
 }

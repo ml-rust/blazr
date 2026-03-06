@@ -28,6 +28,11 @@ pub mod names {
     pub const QUEUE_DEPTH: &str = "blazr_queue_depth";
     pub const ACTIVE_DECODE_SLOTS: &str = "blazr_active_decode_slots";
     pub const TOKEN_BUDGET_UTILIZATION: &str = "blazr_token_budget_utilization_ratio";
+    pub const INTER_TOKEN_LATENCY: &str = "blazr_inter_token_latency_seconds";
+    pub const VRAM_USED_BYTES: &str = "blazr_vram_used_bytes";
+    pub const KV_CACHE_UTILIZATION: &str = "blazr_kv_cache_utilization_ratio";
+    pub const PREFIX_CACHE_HITS: &str = "blazr_prefix_cache_hits_total";
+    pub const PREFIX_CACHE_MISSES: &str = "blazr_prefix_cache_misses_total";
 }
 
 /// Install the global Prometheus recorder and return its handle for rendering.
@@ -75,6 +80,23 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
     metrics::describe_gauge!(
         names::TOKEN_BUDGET_UTILIZATION,
         "Ratio of in-flight tokens to max budget (0.0-1.0, HPA/KEDA signal)"
+    );
+    metrics::describe_histogram!(
+        names::INTER_TOKEN_LATENCY,
+        "Inter-token latency (time between consecutive tokens) in seconds"
+    );
+    metrics::describe_gauge!(names::VRAM_USED_BYTES, "GPU VRAM currently in use (bytes)");
+    metrics::describe_gauge!(
+        names::KV_CACHE_UTILIZATION,
+        "Ratio of allocated KV cache blocks to total pool (0.0-1.0)"
+    );
+    metrics::describe_counter!(
+        names::PREFIX_CACHE_HITS,
+        "Total prefix cache hits (shared KV blocks reused)"
+    );
+    metrics::describe_counter!(
+        names::PREFIX_CACHE_MISSES,
+        "Total prefix cache misses (new KV blocks allocated)"
     );
 
     Ok(handle)
@@ -128,6 +150,40 @@ pub fn adjust_decode_slots(delta: f64) {
     }
 }
 
+/// Record inter-token latency (ITL) in seconds
+pub fn record_itl(itl_secs: f64) {
+    if itl_secs > 0.0 {
+        metrics::histogram!(names::INTER_TOKEN_LATENCY).record(itl_secs);
+    }
+}
+
+/// Update VRAM usage gauge (bytes)
+#[cfg(feature = "cuda")]
+pub fn update_vram_used(device: &boostr::CudaDevice) {
+    if let Ok((free, total)) = device.memory_info() {
+        let used = total.saturating_sub(free);
+        metrics::gauge!(names::VRAM_USED_BYTES).set(used as f64);
+    }
+}
+
+/// Update KV cache block utilization ratio
+pub fn update_kv_cache_utilization(allocated_blocks: usize, total_blocks: usize) {
+    if total_blocks > 0 {
+        let ratio = allocated_blocks as f64 / total_blocks as f64;
+        metrics::gauge!(names::KV_CACHE_UTILIZATION).set(ratio);
+    }
+}
+
+/// Record a prefix cache hit
+pub fn record_prefix_cache_hit() {
+    metrics::counter!(names::PREFIX_CACHE_HITS).increment(1);
+}
+
+/// Record a prefix cache miss
+pub fn record_prefix_cache_miss() {
+    metrics::counter!(names::PREFIX_CACHE_MISSES).increment(1);
+}
+
 /// Adjust the in-flight token gauge (positive = add, negative = subtract)
 pub fn adjust_inflight_tokens(delta: f64) {
     if delta >= 0.0 {
@@ -158,6 +214,24 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
             .load(std::sync::atomic::Ordering::Relaxed) as f64;
         let ratio = current / state.max_inflight_tokens as f64;
         metrics::gauge!(names::TOKEN_BUDGET_UTILIZATION).set(ratio);
+    }
+
+    // Update KV cache utilization from request scheduler
+    if let Some(ref rs) = state.request_scheduler {
+        if let Some(block_stats) = rs.block_stats() {
+            update_kv_cache_utilization(block_stats.allocated_blocks, block_stats.total_blocks);
+        }
+    }
+
+    // Update VRAM usage (CUDA only)
+    #[cfg(feature = "cuda")]
+    {
+        // Get device from first loaded model if available
+        let loaded = state.scheduler.list_loaded().await;
+        if !loaded.is_empty() {
+            let device = boostr::CudaDevice::new(0);
+            update_vram_used(&device);
+        }
     }
 
     let output = state.metrics_handle.render();

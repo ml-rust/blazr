@@ -12,9 +12,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::generation::{
-    apply_keep_alive, convert_logprobs, decode_context_prefix, error_response, overloaded_response,
-    record_generation_metrics, stream_with_stop_sequences, validate_generation_params,
-    HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage,
+    apply_keep_alive, convert_logprobs, decode_context_prefix, error_response,
+    generate_via_scheduler, overloaded_response, record_generation_metrics,
+    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, LogprobResult,
+    ResponseFormat, SamplingParams, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
@@ -103,7 +104,25 @@ pub async fn completions(
             if let Some(s) = iter_config.seed {
                 iter_config.seed = Some(s.wrapping_add(i as u64));
             }
-            match executor.generate_text(&prompt, &iter_config).await {
+
+            // Use RequestScheduler if available (continuous batching), else direct generation
+            let gen_result = if let Some(ref rs) = state.request_scheduler {
+                match generate_via_scheduler(rs, &executor, &prompt, &iter_config).await {
+                    Ok(r) => Ok(crate::engine::GenerationResult {
+                        text: r.text,
+                        prompt_tokens: r.prompt_tokens,
+                        completion_tokens: r.completion_tokens,
+                        finish_reason: r.finish_reason,
+                        prompt_eval_duration_ms: r.prompt_eval_duration_ms,
+                        token_logprobs: None,
+                    }),
+                    Err(e) => Err(anyhow::anyhow!(e)),
+                }
+            } else {
+                executor.generate_text(&prompt, &iter_config).await
+            };
+
+            match gen_result {
                 Ok(result) => {
                     if i == 0 {
                         total_prompt_tokens = result.prompt_tokens;
@@ -252,7 +271,13 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub typical_p: Option<f32>,
     #[serde(default)]
+    pub grammar: Option<String>,
+    #[serde(default)]
     pub user: Option<String>,
+    /// LoRA adapter name to activate for this request.
+    /// The adapter must be loaded beforehand via `POST /v1/lora/load`.
+    #[serde(default)]
+    pub lora_adapter: Option<String>,
 }
 
 impl HasSamplingFields for CompletionRequest {
@@ -285,7 +310,25 @@ impl HasSamplingFields for CompletionRequest {
             dry_allowed_length: self.dry_allowed_length,
             dry_sequence_breakers: self.dry_sequence_breakers.clone(),
             typical_p: self.typical_p,
+            grammar: self.effective_grammar(),
+            lora_adapter: self.lora_adapter.clone(),
         }
+    }
+}
+
+impl CompletionRequest {
+    fn effective_grammar(&self) -> Option<String> {
+        if self.grammar.is_some() {
+            return self.grammar.clone();
+        }
+        if let Some(ref rf) = self.response_format {
+            if rf.r#type == "json_schema" {
+                if let Some(ref schema) = rf.json_schema {
+                    return crate::engine::grammar::json_schema_to_gbnf(schema).ok();
+                }
+            }
+        }
+        None
     }
 }
 

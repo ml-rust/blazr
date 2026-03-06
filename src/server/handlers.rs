@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use super::generation::error_response;
 use super::metrics;
 use crate::config::UserConfig;
-use crate::engine::{Scheduler, SlotManager};
+use crate::engine::{RequestScheduler, Scheduler, SlotManager};
 
 #[cfg(feature = "cuda")]
 type ServerRuntime = boostr::CudaRuntime;
@@ -36,6 +36,8 @@ pub struct AppState {
     pub max_inflight_tokens: usize,
     /// Inference slot manager
     pub slot_manager: SlotManager,
+    /// Request scheduler for continuous batching (None = legacy single-request mode)
+    pub request_scheduler: Option<Arc<RequestScheduler>>,
 }
 
 impl AppState {
@@ -50,11 +52,17 @@ impl AppState {
             inflight_tokens: AtomicUsize::new(0),
             max_inflight_tokens: 0,
             slot_manager: SlotManager::new(0), // unlimited by default
+            request_scheduler: None,
         }
     }
 
     pub fn with_max_inflight_tokens(mut self, max: usize) -> Self {
         self.max_inflight_tokens = max;
+        self
+    }
+
+    pub fn with_request_scheduler(mut self, rs: Arc<RequestScheduler>) -> Self {
+        self.request_scheduler = Some(rs);
         self
     }
 

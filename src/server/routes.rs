@@ -13,6 +13,7 @@ use super::handlers::{
     create_slot, delete_slot, detokenize, get_model, list_models, list_slots, tokenize, AppState,
 };
 use super::infill::infill;
+use super::lora::{list_loras, load_lora, unload_lora};
 use super::management::{
     copy_model, delete_model, list_running, list_tags, pull_model, show_model,
 };
@@ -39,4 +40,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/delete", delete(delete_model))
         .route("/api/copy", post(copy_model))
         .route("/api/pull", post(pull_model))
+        // LoRA adapter management endpoints
+        .route("/v1/lora", get(list_loras).post(load_lora))
+        .route("/v1/lora/{name}", delete(unload_lora))
 }

@@ -15,7 +15,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::ServerConfig;
-use crate::engine::Scheduler;
+use crate::engine::{RequestScheduler, Scheduler};
 
 use super::config_watch;
 use super::handlers::{self, AppState};
@@ -151,13 +151,29 @@ pub async fn start(
     config: ServerConfig,
     api_keys: Vec<String>,
 ) -> Result<()> {
+    start_with_batch(scheduler, config, api_keys, None).await
+}
+
+/// Start the HTTP server with optional continuous batching via RequestScheduler.
+///
+/// When `request_scheduler` is Some, HTTP handlers submit requests through it
+/// instead of calling executor.generate() directly. A BatchEngine task must be
+/// spawned separately by the caller (see cli/serve.rs).
+pub async fn start_with_batch(
+    scheduler: Arc<Scheduler<ServerRuntime>>,
+    config: ServerConfig,
+    api_keys: Vec<String>,
+    request_scheduler: Option<Arc<RequestScheduler>>,
+) -> Result<()> {
     // Install Prometheus metrics recorder
     let metrics_handle = metrics::install_recorder()
         .map_err(|e| anyhow::anyhow!("Failed to install Prometheus metrics recorder: {}", e))?;
-    let state = Arc::new(
-        AppState::new(scheduler, metrics_handle)
-            .with_max_inflight_tokens(config.max_inflight_tokens),
-    );
+    let mut app_state = AppState::new(scheduler, metrics_handle)
+        .with_max_inflight_tokens(config.max_inflight_tokens);
+    if let Some(rs) = request_scheduler {
+        app_state = app_state.with_request_scheduler(rs);
+    }
+    let state = Arc::new(app_state);
 
     // Start config file watcher for hot-reload
     config_watch::spawn_config_watcher(state.user_config.clone());

@@ -196,14 +196,19 @@ where
                 block_size,
                 ram_tier,
             );
-            Some(std::sync::Mutex::new(
-                boostr::inference::prefix_cache::GpuPrefixCache::new(
-                    capacity,
-                    block_size,
-                    device.clone(),
-                    ram_tier,
-                ),
-            ))
+            {
+                // Construct CudaDevice matching the executor's actual GPU via Device::id()
+                use boostr::runtime::Device;
+                let cuda_device = boostr::CudaDevice::new(device.id());
+                Some(std::sync::Mutex::new(
+                    boostr::inference::prefix_cache::GpuPrefixCache::new(
+                        capacity,
+                        block_size,
+                        cuda_device,
+                        ram_tier,
+                    ),
+                ))
+            }
         } else {
             None
         };

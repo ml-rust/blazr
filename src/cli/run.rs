@@ -65,6 +65,7 @@ async fn run_cuda(
     paged_attention: bool,
     graphs: bool,
 ) -> Result<()> {
+    use crate::tokenizer::BoxedTokenizer;
     // Initialize device
     let device = boostr::CudaDevice::new(0);
 

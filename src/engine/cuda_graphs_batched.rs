@@ -8,6 +8,9 @@
 use anyhow::{anyhow, Result};
 
 #[cfg(feature = "cuda")]
+use boostr::runtime::Graph;
+
+#[cfg(feature = "cuda")]
 use super::executor::Executor;
 
 #[cfg(feature = "cuda")]

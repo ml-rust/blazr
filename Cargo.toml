@@ -14,10 +14,11 @@ categories = ["science", "web-programming"]
 default = ["f16"]
 f16 = ["boostr/f16"]
 cuda = ["boostr/cuda"]
+distributed = ["boostr/distributed", "dep:nexar"]
 
 [dependencies]
 # ML framework (model architectures, quant kernels, tensors via numr)
-boostr = { path = "../boostr" }
+boostr = { version = "0.1" }
 
 # Tokenization
 splintr = { path = "../splintr" }
@@ -57,6 +58,9 @@ glob = "0.3"
 # HuggingFace Hub for model downloading
 hf-hub = "0.5"
 dotenvy = "0.15"
+
+# Distributed runtime (swarm mode)
+nexar = { version = "0.1.0", optional = true }
 
 # Async streaming
 futures = "0.3"

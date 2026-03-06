@@ -36,8 +36,21 @@ pub async fn serve(
     #[cfg(not(feature = "cuda"))]
     let device = boostr::CpuDevice::new();
 
+    // Validate tensor parallelism requirements eagerly
+    if let Ok(tp) = std::env::var("BLAZR_TP_SIZE") {
+        if tp.parse::<usize>().unwrap_or(1) > 1 {
+            #[cfg(not(all(feature = "cuda", feature = "nccl")))]
+            {
+                anyhow::bail!(
+                    "Tensor parallelism requires rebuilding with: cargo build --release --features cuda,nccl (BLAZR_TP_SIZE={})",
+                    tp
+                );
+            }
+        }
+    }
+
     // Create scheduler
-    let scheduler = Arc::new(Scheduler::<ServerRuntime>::new(model_dir, device));
+    let scheduler = Arc::new(Scheduler::<ServerRuntime>::new(model_dir, device.clone()));
 
     // Pre-load and warm up model if specified
     if let Some(ref model_name) = model {

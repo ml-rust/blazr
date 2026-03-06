@@ -163,7 +163,7 @@ where
             .unwrap_or(1);
 
         let executor = if tp_size > 1 {
-            #[cfg(feature = "cuda")]
+            #[cfg(all(feature = "cuda", feature = "nccl"))]
             {
                 let rank = std::env::var("BLAZR_TP_RANK")
                     .ok()
@@ -197,10 +197,10 @@ where
                     .with_model_dir(self.model_dir.clone()),
                 )
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(all(feature = "cuda", feature = "nccl")))]
             {
                 return Err(anyhow::anyhow!(
-                    "Tensor parallelism requires the 'cuda' feature (BLAZR_TP_SIZE={})",
+                    "Tensor parallelism requires the 'cuda' and 'nccl' features (BLAZR_TP_SIZE={})",
                     tp_size
                 ));
             }

@@ -121,7 +121,7 @@ pub fn log_tp_config(tp_size: usize) {
 /// Creates a NCCL communicator, logs configuration, and returns a
 /// `TensorParallelState` that keeps the communicator alive for the
 /// duration of the executor. Call this before loading model weights.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "nccl"))]
 pub fn init_tp(
     tp_size: usize,
     rank: usize,
@@ -145,7 +145,7 @@ pub fn init_tp(
 ///
 /// Returns a communicator that can be passed to `LoadedModel::load_tp()`.
 /// For single-process multi-GPU, rank is the GPU index.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "nccl"))]
 pub fn create_nccl_communicator(
     rank: usize,
     world_size: usize,

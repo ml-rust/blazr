@@ -14,6 +14,7 @@ categories = ["science", "web-programming"]
 default = ["f16"]
 f16 = ["boostr/f16"]
 cuda = ["boostr/cuda"]
+nccl = ["boostr/nccl"]
 distributed = ["boostr/distributed", "dep:nexar"]
 
 [dependencies]

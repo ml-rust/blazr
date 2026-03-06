@@ -116,6 +116,48 @@ where
     Ok(var_map)
 }
 
+/// Load a tensor-parallel model from SafeTensors.
+/// Loads all tensors then uses `LoadedModel::load_tp` to shard weights per-rank.
+pub fn load_safetensors_tp<R: Runtime<DType = DType>, P: AsRef<Path>>(
+    path: P,
+    device: &R::Device,
+    comm: std::sync::Arc<dyn boostr::runtime::Communicator>,
+) -> Result<(LoadedModel<R>, BlazrConfig)>
+where
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
+{
+    let path = path.as_ref();
+    let config_dir = if path.is_file() {
+        path.parent()
+    } else {
+        Some(path)
+    };
+
+    let mut loader =
+        SafeTensorsLoader::open(path).map_err(|e| anyhow!("Failed to open SafeTensors: {}", e))?;
+
+    let detected = detect_architecture_from_loader(&loader)?;
+    let config = if let Some(dir) = config_dir {
+        load_or_create_config(dir, &detected)?
+    } else {
+        config_from_detected(&detected)
+    };
+
+    tracing::info!(
+        "Loading tensor-parallel model (rank={}, world_size={})",
+        comm.rank(),
+        comm.world_size()
+    );
+
+    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
+    let mut vb = VarBuilder::new(&mut var_map, device);
+
+    let model = LoadedModel::load_tp(&config.model, &mut vb, comm)
+        .map_err(|e| anyhow!("Failed to load TP model: {}", e))?;
+
+    Ok((model, config))
+}
+
 /// Load a model from SafeTensors with explicit configuration
 pub fn load_safetensors_with_config<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,

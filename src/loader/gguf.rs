@@ -98,7 +98,7 @@ where
 }
 
 /// Create BlazrConfig from GGUF metadata
-fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
+pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
     use boostr::model::{AttentionConfig, MoeConfig, SsmConfig};
 
     let metadata = gguf.metadata();

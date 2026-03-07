@@ -8,10 +8,14 @@
 
 pub mod batch_decode;
 pub mod batch_engine;
+pub mod bench_config;
+pub mod cache_router;
 mod cuda_graphs;
 mod cuda_graphs_batched;
+pub mod data_parallel;
 pub(crate) mod executor;
 mod executor_cache;
+mod executor_embed;
 mod executor_generate;
 mod generate_text;
 pub mod grammar;
@@ -31,6 +35,7 @@ mod types;
 mod warmup;
 
 pub use batch_engine::BatchEngine;
+pub use data_parallel::DataParallelGroup;
 pub use executor::Executor;
 pub use lora::{load_lora_adapter, LoraAdapter, LoraAdapterRegistry};
 pub use request_scheduler::RequestScheduler;

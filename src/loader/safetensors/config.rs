@@ -105,6 +105,7 @@ fn detected_to_universal(
             q_latent_dim: detected.q_latent_dim,
             d_rope: detected.d_rope,
             sliding_window: None,
+            use_alibi: false,
         })
     } else {
         None

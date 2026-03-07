@@ -99,7 +99,7 @@ where
 
 /// Create BlazrConfig from GGUF metadata
 fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
-    use boostr::model::{AttentionConfig, SsmConfig};
+    use boostr::model::{AttentionConfig, MoeConfig, SsmConfig};
 
     let metadata = gguf.metadata();
 
@@ -119,12 +119,12 @@ fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         }
     };
 
-    let hidden_size = metadata
+    let hidden_size: usize = metadata
         .embedding_length()
         .ok_or_else(|| anyhow!("GGUF missing {}.embedding_length", arch))?
         .try_into()?;
 
-    let num_layers = metadata
+    let num_layers: usize = metadata
         .block_count()
         .ok_or_else(|| anyhow!("GGUF missing {}.block_count", arch))?
         .try_into()?;
@@ -137,50 +137,129 @@ fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
     let model_type = match arch {
         "llama" | "llama2" | "llama3" => "llama",
         "mistral" => "mistral",
+        "deepseek" | "deepseek2" => "deepseek",
         "mamba" | "mamba2" => "mamba2",
         "mamba3" => "mamba3",
+        "falcon" => "falcon",
+        "qwen2" => "qwen2",
+        "phi3" => "phi3",
+        "gemma" | "gemma2" => arch,
+        "starcoder2" => "starcoder2",
         _ => "llama",
     };
 
-    let num_heads = metadata
-        .get_u32(&format!("{}.attention.head_count", arch))
-        .map(|v| v as usize)
-        .unwrap_or(32);
-    let num_kv_heads = metadata
-        .get_u32(&format!("{}.attention.head_count_kv", arch))
+    let is_ssm = model_type == "mamba2" || model_type == "mamba3";
+
+    let intermediate_size = metadata
+        .get_u32(&format!("{arch}.feed_forward_length"))
         .map(|v| v as usize);
-    let head_dim = if num_heads > 0 {
-        Some(hidden_size / num_heads)
-    } else {
+
+    let rms_norm_eps = metadata
+        .get_f32(&format!("{arch}.attention.layer_norm_rms_epsilon"))
+        .map(|v| v as f64)
+        .unwrap_or(1e-5);
+
+    // --- Attention config (not present for pure SSM models) ---
+    let attention = if is_ssm {
         None
-    };
-    let rope_theta = metadata
-        .get_f32(&format!("{}.rope.freq_base", arch))
-        .unwrap_or(10000.0);
+    } else {
+        let num_heads = metadata
+            .get_u32(&format!("{arch}.attention.head_count"))
+            .map(|v| v as usize)
+            .unwrap_or(32);
+        let num_kv_heads = metadata
+            .get_u32(&format!("{arch}.attention.head_count_kv"))
+            .map(|v| v as usize);
+        let head_dim = metadata
+            .get_u32(&format!("{arch}.attention.key_length"))
+            .map(|v| v as usize)
+            .or_else(|| {
+                if num_heads > 0 {
+                    Some(hidden_size / num_heads)
+                } else {
+                    None
+                }
+            });
+        let rope_theta = metadata
+            .get_f32(&format!("{arch}.rope.freq_base"))
+            .unwrap_or(10000.0);
 
-    let attention = AttentionConfig {
-        num_heads,
-        num_kv_heads,
-        head_dim,
-        rope_theta: rope_theta as f32,
-        rope_scaling: None,
-        kv_latent_dim: None,
-        q_latent_dim: None,
-        d_rope: None,
-        sliding_window: None,
+        // DeepSeek MLA detection: kv_lora_rank indicates compressed KV
+        let kv_latent_dim = metadata
+            .get_u32(&format!("{arch}.attention.kv_lora_rank"))
+            .map(|v| v as usize);
+        let q_latent_dim = metadata
+            .get_u32(&format!("{arch}.attention.q_lora_rank"))
+            .map(|v| v as usize);
+        let d_rope = metadata
+            .get_u32(&format!("{arch}.attention.rope_dimension_count"))
+            .map(|v| v as usize);
+
+        // ALiBi detection (Falcon v1)
+        let use_alibi = model_type == "falcon"
+            && metadata
+                .get_u32(&format!("{arch}.attention.use_alibi"))
+                .map_or(false, |v| v != 0);
+
+        Some(AttentionConfig {
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            rope_theta,
+            rope_scaling: None,
+            kv_latent_dim,
+            q_latent_dim,
+            d_rope,
+            sliding_window: None,
+            use_alibi,
+        })
     };
 
-    let ssm = if model_type == "mamba2" || model_type == "mamba3" {
+    // --- SSM config (Mamba2/3) ---
+    let ssm = if is_ssm {
+        let state_size = metadata
+            .get_u32(&format!("{arch}.ssm.state_size"))
+            .map(|v| v as usize)
+            .unwrap_or(64);
+        let conv_kernel = metadata
+            .get_u32(&format!("{arch}.ssm.conv_kernel"))
+            .map(|v| v as usize)
+            .unwrap_or(4);
+        let inner_size = metadata
+            .get_u32(&format!("{arch}.ssm.inner_size"))
+            .map(|v| v as usize)
+            .unwrap_or(hidden_size * 2);
+        // Derive num_heads and head_dim from inner_size
+        // Convention: head_dim = 64 (Mamba2 default), num_heads = inner_size / head_dim
+        let ssm_head_dim = metadata
+            .get_u32(&format!("{arch}.ssm.head_dim"))
+            .map(|v| v as usize)
+            .unwrap_or(64);
+        let ssm_num_heads = inner_size / ssm_head_dim;
+        let expand = if hidden_size > 0 {
+            inner_size / hidden_size
+        } else {
+            2
+        };
+        let n_groups = metadata
+            .get_u32(&format!("{arch}.ssm.group_count"))
+            .map(|v| v as usize)
+            .unwrap_or(1);
+
         Some(SsmConfig {
             variant: model_type.to_string(),
-            num_heads,
-            head_dim: 64,
-            state_size: 64,
+            num_heads: ssm_num_heads,
+            head_dim: ssm_head_dim,
+            state_size,
             chunk_size: 256,
-            n_groups: 1,
-            conv_kernel: 4,
-            expand: 2,
-            complex_rope: None,
+            n_groups,
+            conv_kernel,
+            expand,
+            complex_rope: if model_type == "mamba3" {
+                Some(true)
+            } else {
+                None
+            },
             mimo_rank: None,
             use_conv: None,
         })
@@ -188,14 +267,23 @@ fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         None
     };
 
-    let intermediate_size = metadata
-        .get_u32(&format!("{}.feed_forward_length", arch))
-        .map(|v| v as usize);
-
-    let rms_norm_eps = metadata
-        .get_f32(&format!("{}.attention.layer_norm_rms_epsilon", arch))
-        .map(|v| v as f64)
-        .unwrap_or(1e-5);
+    // --- MoE config (DeepSeek, Mixtral, etc.) ---
+    let moe = metadata
+        .get_u32(&format!("{arch}.expert_count"))
+        .map(|num_experts| {
+            let experts_per_tok = metadata
+                .get_u32(&format!("{arch}.expert_used_count"))
+                .map(|v| v as usize)
+                .unwrap_or(2);
+            MoeConfig {
+                num_experts: num_experts as usize,
+                experts_per_tok,
+                shared_expert: None,
+                intermediate_size: None,
+                load_balance_alpha: 0.01,
+                z_loss_alpha: 1e-3,
+            }
+        });
 
     let model_config = UniversalConfig {
         model_type: model_type.to_string(),
@@ -205,9 +293,9 @@ fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         max_seq_len,
         intermediate_size,
         rms_norm_eps,
-        attention: Some(attention),
+        attention,
         ssm,
-        moe: None,
+        moe,
         hybrid_layers: None,
         tie_word_embeddings: false,
     };
@@ -222,6 +310,7 @@ pub fn get_gguf_info<P: AsRef<Path>>(path: P) -> Result<GgufInfo> {
     let metadata = gguf.metadata();
 
     let arch = metadata.architecture().unwrap_or("llama");
+    let is_ssm = matches!(arch, "mamba" | "mamba2" | "mamba3");
 
     Ok(GgufInfo {
         architecture: arch.to_string(),
@@ -229,14 +318,26 @@ pub fn get_gguf_info<P: AsRef<Path>>(path: P) -> Result<GgufInfo> {
         hidden_size: metadata.embedding_length().map(|v| v as usize),
         num_layers: metadata.block_count().map(|v| v as usize),
         num_heads: metadata
-            .get_u32(&format!("{}.attention.head_count", arch))
+            .get_u32(&format!("{arch}.attention.head_count"))
             .map(|v| v as usize),
         num_kv_heads: metadata
-            .get_u32(&format!("{}.attention.head_count_kv", arch))
+            .get_u32(&format!("{arch}.attention.head_count_kv"))
             .map(|v| v as usize),
         context_length: metadata.context_length().map(|v| v as usize),
         quantization_type: detect_quantization_type(&gguf),
         file_size_bytes: std::fs::metadata(path.as_ref()).map(|m| m.len()).ok(),
+        is_mla: metadata
+            .get_u32(&format!("{arch}.attention.kv_lora_rank"))
+            .is_some(),
+        is_moe: metadata.get_u32(&format!("{arch}.expert_count")).is_some(),
+        is_ssm,
+        ssm_state_size: if is_ssm {
+            metadata
+                .get_u32(&format!("{arch}.ssm.state_size"))
+                .map(|v| v as usize)
+        } else {
+            None
+        },
     })
 }
 
@@ -252,6 +353,10 @@ pub struct GgufInfo {
     pub context_length: Option<usize>,
     pub quantization_type: String,
     pub file_size_bytes: Option<u64>,
+    pub is_mla: bool,
+    pub is_moe: bool,
+    pub is_ssm: bool,
+    pub ssm_state_size: Option<usize>,
 }
 
 /// Detect the primary quantization type from tensor types

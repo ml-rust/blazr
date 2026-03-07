@@ -51,6 +51,38 @@ pub struct ServerConfig {
     /// 0 = unlimited. When exceeded, new requests get 503 with Retry-After.
     #[serde(default)]
     pub max_inflight_tokens: usize,
+
+    /// Latency SLO thresholds. When set, the server logs warnings on violations
+    /// and exposes `blazr_slo_violations_total` counter in Prometheus metrics.
+    #[serde(default)]
+    pub slo: Option<LatencySlo>,
+}
+
+/// Latency SLO (Service Level Objective) thresholds in milliseconds.
+/// All values are optional — only configured thresholds are enforced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencySlo {
+    /// P50 TTFT threshold (ms). Warn if median TTFT exceeds this.
+    #[serde(default)]
+    pub ttft_p50_ms: Option<u64>,
+    /// P95 TTFT threshold (ms). Warn if P95 TTFT exceeds this.
+    #[serde(default)]
+    pub ttft_p95_ms: Option<u64>,
+    /// P99 TTFT threshold (ms). Warn if P99 TTFT exceeds this.
+    #[serde(default)]
+    pub ttft_p99_ms: Option<u64>,
+    /// P50 ITL/TPOT threshold (ms). Warn if median inter-token latency exceeds this.
+    #[serde(default)]
+    pub itl_p50_ms: Option<u64>,
+    /// P95 ITL/TPOT threshold (ms).
+    #[serde(default)]
+    pub itl_p95_ms: Option<u64>,
+    /// P99 ITL/TPOT threshold (ms).
+    #[serde(default)]
+    pub itl_p99_ms: Option<u64>,
+    /// P99 end-to-end request latency threshold (ms).
+    #[serde(default)]
+    pub e2e_p99_ms: Option<u64>,
 }
 
 fn default_port() -> u16 {
@@ -91,6 +123,7 @@ impl Default for ServerConfig {
             tls_cert: None,
             tls_key: None,
             max_inflight_tokens: 0,
+            slo: None,
         }
     }
 }

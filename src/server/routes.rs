@@ -7,16 +7,21 @@ use axum::{
     Router,
 };
 
+use super::anthropic::{count_tokens, messages};
 use super::chat::chat_completions;
 use super::completions::completions;
+use super::embeddings::embeddings;
 use super::handlers::{
-    create_slot, delete_slot, detokenize, get_model, list_models, list_slots, tokenize, AppState,
+    apply_template, create_slot, delete_slot, detokenize, get_model, list_models, list_slots,
+    tokenize, AppState,
 };
 use super::infill::infill;
 use super::lora::{list_loras, load_lora, unload_lora};
 use super::management::{
     copy_model, delete_model, list_running, list_tags, pull_model, show_model,
 };
+use super::rerank::rerank;
+use super::responses::responses;
 
 /// Create the API router with OpenAI-compatible endpoints (auth-protected)
 pub fn api_routes() -> Router<Arc<AppState>> {
@@ -26,10 +31,17 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/v1/models/{model_id}", get(get_model))
         .route("/v1/completions", post(completions))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/embeddings", post(embeddings))
+        .route("/v1/responses", post(responses))
+        .route("/v1/messages", post(messages))
+        .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/v1/infill", post(infill))
+        .route("/rerank", post(rerank))
+        .route("/v1/rerank", post(rerank))
         // Tokenization endpoints
         .route("/tokenize", post(tokenize))
         .route("/detokenize", post(detokenize))
+        .route("/apply-template", post(apply_template))
         // Slot management endpoints
         .route("/api/slots", get(list_slots).post(create_slot))
         .route("/api/slots/{slot_id}", delete(delete_slot))

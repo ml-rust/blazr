@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::chat_template::ChatMessage;
 
+use super::multimodal::MessageContent;
+
 /// Tool definition in the request
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {
@@ -36,12 +38,16 @@ pub struct ToolCallFunction {
     pub arguments: String,
 }
 
-/// Extended chat message for API request/response (supports tool_calls, tool_call_id)
+/// Extended chat message for API request/response (supports tool_calls, tool_call_id, multimodal content)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatRequestMessage {
     pub role: String,
+    /// Content can be a simple string or an array of content parts (text + images + audio).
+    /// Supports OpenAI multimodal format:
+    /// - `"content": "Hello"` (string)
+    /// - `"content": [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {...}}]` (array)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     /// Tool calls made by the assistant
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -200,20 +206,33 @@ fn parse_tool_call_json(json_str: &str) -> Option<ToolCall> {
     })
 }
 
-/// Convert ChatRequestMessage to ChatMessage for template formatting
+/// Extract text from a MessageContent (for chat template formatting).
+fn content_text(content: &Option<MessageContent>) -> String {
+    match content {
+        Some(mc) => mc.text(),
+        None => String::new(),
+    }
+}
+
+/// Convert ChatRequestMessage to ChatMessage for template formatting.
+///
+/// Multimodal content (images, audio) is currently represented as placeholder
+/// text in the template. When vision models are supported, images will be
+/// processed separately and injected as image tokens.
 pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage) -> ChatMessage {
     let content = match msg.role.as_str() {
         "tool" => {
             // Format tool result: include the function name and result
             let name = msg.name.as_deref().unwrap_or("unknown");
-            let content = msg.content.as_deref().unwrap_or("");
-            format!("[Tool Result: {}]\n{}", name, content)
+            let text = content_text(&msg.content);
+            format!("[Tool Result: {}]\n{}", name, text)
         }
         "assistant" if msg.tool_calls.is_some() => {
             // Format assistant tool calls as text for template
             let mut parts = Vec::new();
-            if let Some(ref content) = msg.content {
-                parts.push(content.clone());
+            let text = content_text(&msg.content);
+            if !text.is_empty() {
+                parts.push(text);
             }
             if let Some(ref calls) = msg.tool_calls {
                 for call in calls {
@@ -225,7 +244,29 @@ pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage) -> ChatMessage {
             }
             parts.join("\n")
         }
-        _ => msg.content.clone().unwrap_or_default(),
+        _ => {
+            let text = content_text(&msg.content);
+            // If the message has images, add placeholder markers
+            if let Some(ref mc) = msg.content {
+                if mc.has_images() {
+                    let image_count = mc.image_urls().len();
+                    let marker = if image_count == 1 {
+                        "[image]".to_string()
+                    } else {
+                        format!("[{} images]", image_count)
+                    };
+                    if text.is_empty() {
+                        marker
+                    } else {
+                        format!("{}\n{}", marker, text)
+                    }
+                } else {
+                    text
+                }
+            } else {
+                text
+            }
+        }
     };
 
     ChatMessage {
@@ -296,7 +337,7 @@ mod tests {
     fn test_request_msg_to_chat_msg_tool_role() {
         let msg = ChatRequestMessage {
             role: "tool".to_string(),
-            content: Some("{\"temp\": 20}".to_string()),
+            content: Some(MessageContent::Text("{\"temp\": 20}".to_string())),
             tool_calls: None,
             tool_call_id: Some("call_abc".to_string()),
             name: Some("get_weather".to_string()),
@@ -311,7 +352,7 @@ mod tests {
     fn test_request_msg_to_chat_msg_user() {
         let msg = ChatRequestMessage {
             role: "user".to_string(),
-            content: Some("Hello".to_string()),
+            content: Some(MessageContent::Text("Hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -319,5 +360,30 @@ mod tests {
         let chat_msg = request_msg_to_chat_msg(&msg);
         assert_eq!(chat_msg.role, "user");
         assert_eq!(chat_msg.content, "Hello");
+    }
+
+    #[test]
+    fn test_request_msg_to_chat_msg_multimodal() {
+        let msg = ChatRequestMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Parts(vec![
+                super::super::multimodal::ContentPart::Text {
+                    text: "What is this?".to_string(),
+                },
+                super::super::multimodal::ContentPart::ImageUrl {
+                    image_url: super::super::multimodal::ImageUrl {
+                        url: "https://example.com/img.png".to_string(),
+                        detail: "auto".to_string(),
+                    },
+                },
+            ])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        };
+        let chat_msg = request_msg_to_chat_msg(&msg);
+        assert_eq!(chat_msg.role, "user");
+        assert!(chat_msg.content.contains("[image]"));
+        assert!(chat_msg.content.contains("What is this?"));
     }
 }

@@ -66,11 +66,21 @@ pub async fn chat_completions(
     let tools_system_prompt = request.tools.as_deref().and_then(build_tools_system_prompt);
     let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
 
+    // Check for multimodal content (images/audio) — currently unsupported at model level
+    let has_multimodal = request.messages.iter().any(|m| {
+        m.content
+            .as_ref()
+            .is_some_and(|c| c.has_images() || c.has_audio())
+    });
+    if has_multimodal {
+        tracing::warn!("Request contains multimodal content (images/audio). Text will be extracted but media content requires a vision/audio model.");
+    }
+
     let prompt = if request.raw.unwrap_or(false) {
         request
             .messages
             .iter()
-            .map(|m| m.content.as_deref().unwrap_or(""))
+            .map(|m| m.content.as_ref().map(|c| c.text()).unwrap_or_default())
             .collect::<Vec<_>>()
             .join("\n")
     } else {

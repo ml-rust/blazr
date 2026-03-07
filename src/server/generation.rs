@@ -190,6 +190,98 @@ pub async fn stream_with_stop_sequences(
     }
 }
 
+/// Stream multimodal generation tokens with stop sequence checking.
+///
+/// Same logic as `stream_with_stop_sequences` but uses `generate_multimodal`
+/// for the underlying token stream, passing decoded images and audio segments.
+pub async fn stream_multimodal_with_stop_sequences(
+    executor: Arc<crate::engine::Executor<ServerRuntime>>,
+    prompt: String,
+    images: Vec<Vec<u8>>,
+    audio_segments: Vec<Vec<f32>>,
+    gen_config: GenerationConfig,
+    tx: tokio::sync::mpsc::Sender<StreamToken>,
+) {
+    let stop_sequences = gen_config.stop_sequences.clone();
+    let stream = executor.generate_multimodal(&prompt, &images, &audio_segments, &gen_config);
+    let mut stream = std::pin::pin!(stream);
+    let mut accumulated = String::new();
+    let mut last_token_time = std::time::Instant::now();
+    let mut token_count = 0usize;
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(token) => {
+                token_count += 1;
+                if token_count > 1 {
+                    let itl = last_token_time.elapsed().as_secs_f64();
+                    super::metrics::record_itl(itl);
+                }
+                last_token_time = std::time::Instant::now();
+                accumulated.push_str(&token.text);
+
+                let mut stopped = false;
+                for stop in &stop_sequences {
+                    if let Some(pos) = accumulated.find(stop.as_str()) {
+                        let already_sent = accumulated.len() - token.text.len();
+                        if pos >= already_sent {
+                            let safe_text = &token.text[..pos - already_sent];
+                            let _ = tx
+                                .send(StreamToken {
+                                    text: safe_text.to_string(),
+                                    finish_reason: Some(FinishReason::Stop),
+                                    error: None,
+                                })
+                                .await;
+                        } else {
+                            let _ = tx
+                                .send(StreamToken {
+                                    text: String::new(),
+                                    finish_reason: Some(FinishReason::Stop),
+                                    error: None,
+                                })
+                                .await;
+                        }
+                        stopped = true;
+                        break;
+                    }
+                }
+
+                if stopped {
+                    break;
+                }
+
+                let is_final = token.finish_reason.is_some();
+                if tx
+                    .send(StreamToken {
+                        text: token.text,
+                        finish_reason: token.finish_reason,
+                        error: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if is_final {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::error!("Multimodal generation error during streaming: {}", e);
+                let _ = tx
+                    .send(StreamToken {
+                        text: String::new(),
+                        finish_reason: None,
+                        error: Some(e.to_string()),
+                    })
+                    .await;
+                break;
+            }
+        }
+    }
+}
+
 /// Result of a batched generation via RequestScheduler
 pub struct BatchedGenerationResult {
     pub text: String,

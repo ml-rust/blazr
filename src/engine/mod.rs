@@ -17,6 +17,7 @@ pub(crate) mod executor;
 mod executor_cache;
 mod executor_embed;
 mod executor_generate;
+mod executor_multimodal;
 mod generate_text;
 pub mod grammar;
 pub(crate) mod grammar_json;

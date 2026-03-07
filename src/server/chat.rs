@@ -13,7 +13,8 @@ use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
 use super::generation::{
     apply_keep_alive, convert_logprobs, decode_context_prefix, error_response,
     generate_via_scheduler, overloaded_response, record_generation_metrics,
-    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, Usage,
+    stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
+    HasSamplingFields, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
@@ -66,14 +67,54 @@ pub async fn chat_completions(
     let tools_system_prompt = request.tools.as_deref().and_then(build_tools_system_prompt);
     let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
 
-    // Check for multimodal content (images/audio) — currently unsupported at model level
+    // Check for multimodal content (images/audio) and extract media data
     let has_multimodal = request.messages.iter().any(|m| {
         m.content
             .as_ref()
             .is_some_and(|c| c.has_images() || c.has_audio())
     });
+
+    // Decode images from all messages
+    let mut decoded_images: Vec<Vec<u8>> = Vec::new();
+    let mut decoded_audio: Vec<Vec<f32>> = Vec::new();
     if has_multimodal {
-        tracing::warn!("Request contains multimodal content (images/audio). Text will be extracted but media content requires a vision/audio model.");
+        for msg in &request.messages {
+            if let Some(ref content) = msg.content {
+                // Decode images
+                for img_url in content.image_urls() {
+                    match super::multimodal::decode_image(&img_url.url).await {
+                        Ok(decoded) => decoded_images.push(decoded.data),
+                        Err(e) => {
+                            return error_response(
+                                StatusCode::BAD_REQUEST,
+                                &format!("Failed to decode image: {}", e),
+                                "invalid_request_error",
+                            );
+                        }
+                    }
+                }
+                // Decode audio
+                for audio_input in content.audio_inputs() {
+                    match super::multimodal::decode_audio(audio_input) {
+                        Ok(samples) => {
+                            decoded_audio.push(samples);
+                        }
+                        Err(e) => {
+                            return error_response(
+                                StatusCode::BAD_REQUEST,
+                                &format!("Failed to decode audio: {}", e),
+                                "invalid_request_error",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        tracing::info!(
+            images = decoded_images.len(),
+            audio_segments = decoded_audio.len(),
+            "Multimodal content extracted from request"
+        );
     }
 
     let prompt = if request.raw.unwrap_or(false) {
@@ -135,11 +176,27 @@ pub async fn chat_completions(
         let budget = estimated_tokens;
 
         metrics::adjust_decode_slots(1.0);
-        tokio::spawn(async move {
-            stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
-            state_clone.release(budget);
-            metrics::adjust_decode_slots(-1.0);
-        });
+        if has_multimodal {
+            tokio::spawn(async move {
+                stream_multimodal_with_stop_sequences(
+                    executor,
+                    prompt,
+                    decoded_images,
+                    decoded_audio,
+                    gen_config,
+                    tx,
+                )
+                .await;
+                state_clone.release(budget);
+                metrics::adjust_decode_slots(-1.0);
+            });
+        } else {
+            tokio::spawn(async move {
+                stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
+                state_clone.release(budget);
+                metrics::adjust_decode_slots(-1.0);
+            });
+        }
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_chat_stream(id, model_name, Box::pin(rx_stream)).into_response()
@@ -162,8 +219,17 @@ pub async fn chat_completions(
                 iter_config.seed = Some(s.wrapping_add(i as u64));
             }
 
-            // Use RequestScheduler if available (continuous batching), else direct generation
-            let gen_result = if let Some(ref rs) = state.request_scheduler {
+            // Use multimodal generation if images/audio present, else standard path
+            let gen_result = if has_multimodal {
+                executor
+                    .generate_multimodal_text(
+                        &prompt,
+                        &decoded_images,
+                        &decoded_audio,
+                        &iter_config,
+                    )
+                    .await
+            } else if let Some(ref rs) = state.request_scheduler {
                 match generate_via_scheduler(rs, &executor, &prompt, &iter_config).await {
                     Ok(r) => Ok(crate::engine::GenerationResult {
                         text: r.text,

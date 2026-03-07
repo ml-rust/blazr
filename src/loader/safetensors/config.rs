@@ -185,6 +185,8 @@ fn detected_to_universal(
         moe,
         hybrid_layers,
         tie_word_embeddings: false,
+        vision: None,
+        audio: None,
     }
 }
 

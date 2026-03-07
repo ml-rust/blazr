@@ -139,6 +139,8 @@ impl Default for BlazrConfig {
                 moe: None,
                 hybrid_layers: None,
                 tie_word_embeddings: false,
+                vision: None,
+                audio: None,
             },
             inference: InferenceConfig::default(),
             server: None,
@@ -390,6 +392,8 @@ generation:
             moe: None,
             hybrid_layers: None,
             tie_word_embeddings: false,
+            vision: None,
+            audio: None,
         };
         let config = BlazrConfig::from_universal(universal);
         assert_eq!(config.model_type(), "llama");
@@ -410,6 +414,8 @@ generation:
                 moe: None,
                 hybrid_layers: None,
                 tie_word_embeddings: false,
+                vision: None,
+                audio: None,
             },
             "f16",
         );

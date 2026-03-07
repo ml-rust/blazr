@@ -3,6 +3,7 @@
 //! Provides OpenAI-compatible REST API.
 
 mod anthropic;
+mod audio;
 mod chat;
 mod chat_types;
 mod completions;

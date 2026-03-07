@@ -48,11 +48,17 @@ fn default_pooling() -> String {
     "mean".to_string()
 }
 
-/// Input can be a single string or array of strings
+/// Input can be a single string, array of strings, or multimodal content parts.
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum EmbeddingInput {
+    /// Single text string
     Single(String),
+    /// Multimodal input: array of content parts (text + images)
+    /// Follows OpenAI format: [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "..."}}]
+    /// Note: must appear before Batch — with serde(untagged), variants are tried in order
+    Multimodal(Vec<super::multimodal::ContentPart>),
+    /// Batch of text strings
     Batch(Vec<String>),
 }
 
@@ -61,6 +67,28 @@ impl EmbeddingInput {
         match self {
             EmbeddingInput::Single(s) => vec![s.as_str()],
             EmbeddingInput::Batch(v) => v.iter().map(|s| s.as_str()).collect(),
+            EmbeddingInput::Multimodal(parts) => Self::texts_from_parts(parts),
+        }
+    }
+
+    /// Extract text strings from multimodal content parts.
+    fn texts_from_parts(parts: &[super::multimodal::ContentPart]) -> Vec<&str> {
+        parts
+            .iter()
+            .filter_map(|p| match p {
+                super::multimodal::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Check if any content parts contain images.
+    fn has_images(&self) -> bool {
+        match self {
+            EmbeddingInput::Multimodal(parts) => parts
+                .iter()
+                .any(|p| matches!(p, super::multimodal::ContentPart::ImageUrl { .. })),
+            _ => false,
         }
     }
 }
@@ -125,6 +153,17 @@ pub async fn embeddings(
             );
         }
     };
+
+    // Log warning if multimodal input contains images — full vision embedding
+    // support requires Executor::get_multimodal_embeddings() which would run
+    // images through the vision encoder, project, and concatenate with text
+    // embeddings before pooling. For now, we extract and embed the text parts only.
+    if request.input.has_images() {
+        tracing::warn!(
+            "Multimodal embedding request contains images; only text parts will be embedded. \
+             Full image embedding requires vision encoder integration (TODO)."
+        );
+    }
 
     let texts = request.input.texts();
     if texts.is_empty() {
@@ -228,6 +267,37 @@ mod tests {
         let json = r#"{"model": "test", "input": ["hello", "world"]}"#;
         let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.input.texts(), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_embedding_input_multimodal() {
+        let json = r#"{"model": "test", "input": [
+            {"type": "text", "text": "a photo of a cat"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+        ]}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
+        match &req.input {
+            EmbeddingInput::Multimodal(parts) => assert_eq!(parts.len(), 2),
+            _ => panic!("Expected Multimodal variant"),
+        }
+        // texts() should extract only text parts
+        assert_eq!(req.input.texts(), vec!["a photo of a cat"]);
+        assert!(req.input.has_images());
+    }
+
+    #[test]
+    fn test_embedding_input_multimodal_text_only() {
+        let json = r#"{"model": "test", "input": [
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "world"}
+        ]}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
+        match &req.input {
+            EmbeddingInput::Multimodal(parts) => assert_eq!(parts.len(), 2),
+            _ => panic!("Expected Multimodal variant"),
+        }
+        assert_eq!(req.input.texts(), vec!["hello", "world"]);
+        assert!(!req.input.has_images());
     }
 
     #[test]

@@ -135,6 +135,36 @@ pub enum Commands {
         /// TLS private key file (PEM format)
         #[arg(long)]
         tls_key: Option<std::path::PathBuf>,
+
+        /// Register a standalone vision embedder (SigLIP/CLIP) for `/v1/embeddings`
+        /// image inputs. Format: `name=/path/to/model_dir` where the directory
+        /// contains `config.json` and `model.safetensors`. May be repeated.
+        #[arg(long = "vision-model", value_name = "NAME=PATH")]
+        vision_models: Vec<String>,
+
+        /// Register a Whisper ASR model for `/v1/audio/transcriptions`.
+        /// Format: `name=/path/to/whisper_dir` where the directory contains
+        /// `config.json`, `tokenizer.json`, and `model.safetensors`. May be
+        /// repeated.
+        #[arg(long = "asr-model", value_name = "NAME=PATH")]
+        asr_models: Vec<String>,
+
+        /// Register a TTS model for `/v1/audio/speech`. Format:
+        /// `name=/path/to/tts_dir`. The neural synthesis path is under
+        /// construction; today this wires G2P + voice catalog and returns 503
+        /// on actual synthesis requests. May be repeated.
+        #[arg(long = "tts-model", value_name = "NAME=PATH")]
+        tts_models: Vec<String>,
+
+        /// Directory containing TTS voice files (`.safetensors`, `.pt`, or
+        /// `.pth`). Overrides the bundled `assets/kokoro_voices/` that ships
+        /// with blazr. Also overridable via `$BLAZR_VOICE_DIR`. The `--voice`
+        /// CLI flags on synthesis requests and the OpenAI-compatible `voice`
+        /// field in `/v1/audio/speech` resolve against this directory. Bare
+        /// voice IDs (e.g. `af_alloy`) are looked up here; absolute paths
+        /// bypass the resolver.
+        #[arg(long = "voice-dir", value_name = "DIR")]
+        voice_dir: Option<std::path::PathBuf>,
     },
 
     /// List available models

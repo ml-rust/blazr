@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::encoding::encode_f32_base64;
 use super::generation::error_response;
 use super::handlers::AppState;
+use super::multimodal::{decode_image, ContentPart};
 use super::pooling::{l2_normalize, pool_cls, pool_last, pool_mean};
 
 /// Embedding request (OpenAI-compatible)
@@ -62,24 +63,27 @@ pub enum EmbeddingInput {
     Batch(Vec<String>),
 }
 
-impl EmbeddingInput {
-    fn texts(&self) -> Vec<&str> {
-        match self {
-            EmbeddingInput::Single(s) => vec![s.as_str()],
-            EmbeddingInput::Batch(v) => v.iter().map(|s| s.as_str()).collect(),
-            EmbeddingInput::Multimodal(parts) => Self::texts_from_parts(parts),
-        }
-    }
+/// One unit of embedding work preserving the input order.
+enum EmbedItem<'a> {
+    Text(&'a str),
+    Image(&'a super::multimodal::ImageUrl),
+}
 
-    /// Extract text strings from multimodal content parts.
-    fn texts_from_parts(parts: &[super::multimodal::ContentPart]) -> Vec<&str> {
-        parts
-            .iter()
-            .filter_map(|p| match p {
-                super::multimodal::ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect()
+impl EmbeddingInput {
+    /// Flatten the input into ordered (text | image) items.
+    fn items(&self) -> Vec<EmbedItem<'_>> {
+        match self {
+            EmbeddingInput::Single(s) => vec![EmbedItem::Text(s.as_str())],
+            EmbeddingInput::Batch(v) => v.iter().map(|s| EmbedItem::Text(s.as_str())).collect(),
+            EmbeddingInput::Multimodal(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(EmbedItem::Text(text.as_str())),
+                    ContentPart::ImageUrl { image_url } => Some(EmbedItem::Image(image_url)),
+                    ContentPart::InputAudio { .. } => None,
+                })
+                .collect(),
+        }
     }
 
     /// Check if any content parts contain images.
@@ -154,19 +158,27 @@ pub async fn embeddings(
         }
     };
 
-    // Log warning if multimodal input contains images — full vision embedding
-    // support requires Executor::get_multimodal_embeddings() which would run
-    // images through the vision encoder, project, and concatenate with text
-    // embeddings before pooling. For now, we extract and embed the text parts only.
-    if request.input.has_images() {
-        tracing::warn!(
-            "Multimodal embedding request contains images; only text parts will be embedded. \
-             Full image embedding requires vision encoder integration (TODO)."
-        );
-    }
+    // Route images to the standalone vision embedder registered for this model.
+    let vision_embedder = if request.input.has_images() {
+        match state.vision_embedder(&request.model).await {
+            Some(v) => Some(v),
+            None => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "Model '{}' is not registered as a vision embedder; image inputs require a loaded SigLIP/CLIP encoder",
+                        request.model
+                    ),
+                    "invalid_request_error",
+                );
+            }
+        }
+    } else {
+        None
+    };
 
-    let texts = request.input.texts();
-    if texts.is_empty() {
+    let items = request.input.items();
+    if items.is_empty() {
         return error_response(
             StatusCode::BAD_REQUEST,
             "Input must not be empty",
@@ -174,44 +186,69 @@ pub async fn embeddings(
         );
     }
 
-    let mut embeddings_data = Vec::with_capacity(texts.len());
+    let mut embeddings_data = Vec::with_capacity(items.len());
     let mut total_prompt_tokens = 0;
 
-    for (i, text) in texts.iter().enumerate() {
-        // Tokenize
-        let token_ids = executor.tokenizer().encode(text);
-        let num_tokens = token_ids.len();
-        total_prompt_tokens += num_tokens;
+    for (i, item) in items.into_iter().enumerate() {
+        let mut embedding = match item {
+            EmbedItem::Text(text) => {
+                let token_ids = executor.tokenizer().encode(text);
+                let num_tokens = token_ids.len();
+                total_prompt_tokens += num_tokens;
 
-        // Get hidden states from model's embedding layer
-        let hidden = match executor.get_embeddings(&token_ids).await {
-            Ok(h) => h,
-            Err(e) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Embedding generation failed: {}", e),
-                    "server_error",
-                );
+                let hidden = match executor.get_embeddings(&token_ids).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Embedding generation failed: {}", e),
+                            "server_error",
+                        );
+                    }
+                };
+
+                let hidden_size = if hidden.is_empty() {
+                    0
+                } else {
+                    hidden.len() / num_tokens
+                };
+
+                match pooling {
+                    "mean" => pool_mean(&hidden, num_tokens, hidden_size),
+                    "cls" => pool_cls(&hidden, hidden_size),
+                    "last" => pool_last(&hidden, num_tokens, hidden_size),
+                    "none" => hidden,
+                    _ => unreachable!(),
+                }
+            }
+            EmbedItem::Image(image_url) => {
+                let embedder = vision_embedder
+                    .as_ref()
+                    .expect("vision_embedder present when items contain images");
+                let decoded = match decode_image(&image_url.url).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("Failed to decode image: {}", e),
+                            "invalid_request_error",
+                        );
+                    }
+                };
+                let device = <super::handlers::ServerRuntime as boostr::Runtime>::default_device();
+                match embedder.embed_bytes_default(&decoded.data, &device) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Image embedding failed: {}", e),
+                            "server_error",
+                        );
+                    }
+                }
             }
         };
 
-        // hidden shape: [num_tokens, hidden_size]
-        let hidden_size = if hidden.is_empty() {
-            0
-        } else {
-            hidden.len() / num_tokens
-        };
-
-        // Apply pooling
-        let mut embedding = match pooling {
-            "mean" => pool_mean(&hidden, num_tokens, hidden_size),
-            "cls" => pool_cls(&hidden, hidden_size),
-            "last" => pool_last(&hidden, num_tokens, hidden_size),
-            "none" => hidden,
-            _ => unreachable!(),
-        };
-
-        // Optionally L2-normalize
         if request.normalize {
             l2_normalize(&mut embedding);
         }
@@ -246,18 +283,29 @@ pub async fn embeddings(
 mod tests {
     use super::*;
 
+    fn item_texts(input: &EmbeddingInput) -> Vec<&str> {
+        input
+            .items()
+            .into_iter()
+            .filter_map(|i| match i {
+                EmbedItem::Text(t) => Some(t),
+                EmbedItem::Image(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn test_embedding_input_single() {
         let json = r#"{"model": "test", "input": "hello"}"#;
         let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.input.texts(), vec!["hello"]);
+        assert_eq!(item_texts(&req.input), vec!["hello"]);
     }
 
     #[test]
     fn test_embedding_input_batch() {
         let json = r#"{"model": "test", "input": ["hello", "world"]}"#;
         let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.input.texts(), vec!["hello", "world"]);
+        assert_eq!(item_texts(&req.input), vec!["hello", "world"]);
     }
 
     #[test]
@@ -271,8 +319,8 @@ mod tests {
             EmbeddingInput::Multimodal(parts) => assert_eq!(parts.len(), 2),
             _ => panic!("Expected Multimodal variant"),
         }
-        // texts() should extract only text parts
-        assert_eq!(req.input.texts(), vec!["a photo of a cat"]);
+        // items() should extract only text parts from mixed input
+        assert_eq!(item_texts(&req.input), vec!["a photo of a cat"]);
         assert!(req.input.has_images());
     }
 
@@ -287,7 +335,7 @@ mod tests {
             EmbeddingInput::Multimodal(parts) => assert_eq!(parts.len(), 2),
             _ => panic!("Expected Multimodal variant"),
         }
-        assert_eq!(req.input.texts(), vec!["hello", "world"]);
+        assert_eq!(item_texts(&req.input), vec!["hello", "world"]);
         assert!(!req.input.has_images());
     }
 

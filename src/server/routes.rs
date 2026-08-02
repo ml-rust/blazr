@@ -8,7 +8,7 @@ use axum::{
 };
 
 use super::anthropic::{count_tokens, messages};
-use super::audio::{speech, transcriptions};
+use super::audio::{speech, transcriptions, translations};
 use super::chat::chat_completions;
 use super::completions::completions;
 use super::embeddings::embeddings;
@@ -39,6 +39,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/v1/infill", post(infill))
         .route("/v1/audio/speech", post(speech))
         .route("/v1/audio/transcriptions", post(transcriptions))
+        .route("/v1/audio/translations", post(translations))
         .route("/rerank", post(rerank))
         .route("/v1/rerank", post(rerank))
         // Tokenization endpoints

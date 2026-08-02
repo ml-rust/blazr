@@ -183,6 +183,15 @@ fn print_safetensors_entry(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
+    let kind = detect_model_kind(config.as_ref(), path);
+    let kind_tag = match kind {
+        ModelKind::Llm => "LLM".blue(),
+        ModelKind::Vision => "VISION".magenta(),
+        ModelKind::Asr => "ASR".cyan(),
+        ModelKind::Tts => "TTS".yellow(),
+        ModelKind::Encoder => "ENCODER".bright_blue(),
+    };
+
     // Detect quantization
     let quant = config
         .as_ref()
@@ -195,18 +204,20 @@ fn print_safetensors_entry(
 
     if let Some(ref q) = quant {
         eprintln!(
-            "  {}  {}  {}  {}  {}",
+            "  {}  {}  {}  {}  {}  {}",
             name.bold(),
             format_str,
+            kind_tag,
             q.yellow(),
             family.dimmed(),
             size_str.dimmed(),
         );
     } else {
         eprintln!(
-            "  {}  {}  {}  {}",
+            "  {}  {}  {}  {}  {}",
             name.bold(),
             format_str,
+            kind_tag,
             family.dimmed(),
             size_str.dimmed(),
         );
@@ -236,6 +247,66 @@ fn print_safetensors_verbose(config: &serde_json::Value) {
     if !parts.is_empty() {
         eprintln!("         {}", parts.join("  "));
     }
+}
+
+/// Classify a safetensors checkpoint into a high-level model kind so
+/// `blazr list` can distinguish LLMs from vision embedders / ASR / TTS.
+#[derive(Debug, Clone, Copy)]
+enum ModelKind {
+    Llm,
+    Vision,
+    Asr,
+    Tts,
+    Encoder,
+}
+
+fn detect_model_kind(config: Option<&serde_json::Value>, path: &std::path::Path) -> ModelKind {
+    if let Some(cfg) = config {
+        let model_type = cfg.get("model_type").and_then(|v| v.as_str()).unwrap_or("");
+        let archs: Vec<&str> = cfg
+            .get("architectures")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        let mt = model_type.to_ascii_lowercase();
+        let archs_lower: Vec<String> = archs.iter().map(|s| s.to_ascii_lowercase()).collect();
+
+        if mt.contains("siglip") || mt.contains("clip_vision") || mt.contains("vit") {
+            return ModelKind::Vision;
+        }
+        if mt.contains("whisper") || archs_lower.iter().any(|a| a.contains("whisper")) {
+            return ModelKind::Asr;
+        }
+        // StyleTTS2 / Kokoro / Piper / VITS-style
+        if mt.contains("tts")
+            || archs_lower
+                .iter()
+                .any(|a| a.contains("styletts") || a.contains("tts"))
+        {
+            return ModelKind::Tts;
+        }
+        if mt == "bert" || archs_lower.iter().any(|a| a.contains("bertmodel")) {
+            return ModelKind::Encoder;
+        }
+    }
+    // Heuristic: if the directory name contains a known tag and no explicit
+    // config hints exist, fall back to that.
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.contains("siglip") || name.contains("clip-vit") {
+        return ModelKind::Vision;
+    }
+    if name.contains("whisper") {
+        return ModelKind::Asr;
+    }
+    if name.contains("kokoro") || name.contains("styletts") || name.contains("piper") {
+        return ModelKind::Tts;
+    }
+    ModelKind::Llm
 }
 
 fn detect_format(path: &std::path::Path) -> ModelFormat {
@@ -282,5 +353,59 @@ fn format_size(bytes: u64) -> String {
     } else {
         let mb = bytes as f64 / (1024.0 * 1024.0);
         format!("{:.0} MB", mb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(json: &str) -> Option<serde_json::Value> {
+        serde_json::from_str(json).ok()
+    }
+
+    #[test]
+    fn kind_detects_siglip() {
+        let c = cfg(r#"{"model_type": "siglip_vision_model"}"#);
+        let k = detect_model_kind(c.as_ref(), std::path::Path::new("x"));
+        assert!(matches!(k, ModelKind::Vision));
+    }
+
+    #[test]
+    fn kind_detects_clip_vit() {
+        let c = cfg(r#"{"model_type": "clip_vision_model"}"#);
+        let k = detect_model_kind(c.as_ref(), std::path::Path::new("x"));
+        assert!(matches!(k, ModelKind::Vision));
+    }
+
+    #[test]
+    fn kind_detects_whisper_from_arch() {
+        let c = cfg(r#"{"architectures": ["WhisperForConditionalGeneration"]}"#);
+        let k = detect_model_kind(c.as_ref(), std::path::Path::new("x"));
+        assert!(matches!(k, ModelKind::Asr));
+    }
+
+    #[test]
+    fn kind_detects_bert_encoder() {
+        let c = cfg(r#"{"model_type": "bert"}"#);
+        let k = detect_model_kind(c.as_ref(), std::path::Path::new("x"));
+        assert!(matches!(k, ModelKind::Encoder));
+    }
+
+    #[test]
+    fn kind_falls_back_to_dir_name() {
+        let k = detect_model_kind(None, std::path::Path::new("/models/siglip-base-patch16"));
+        assert!(matches!(k, ModelKind::Vision));
+        let k = detect_model_kind(None, std::path::Path::new("/models/whisper-base"));
+        assert!(matches!(k, ModelKind::Asr));
+        let k = detect_model_kind(None, std::path::Path::new("/models/kokoro-82m"));
+        assert!(matches!(k, ModelKind::Tts));
+    }
+
+    #[test]
+    fn kind_defaults_to_llm() {
+        let c = cfg(r#"{"model_type": "llama"}"#);
+        let k = detect_model_kind(c.as_ref(), std::path::Path::new("/models/llama-3"));
+        assert!(matches!(k, ModelKind::Llm));
     }
 }

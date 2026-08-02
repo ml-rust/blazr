@@ -16,6 +16,7 @@ type ServerRuntime = boostr::CudaRuntime;
 type ServerRuntime = boostr::CpuRuntime;
 
 /// Start the inference server
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     model: Option<String>,
     port: u16,
@@ -24,6 +25,10 @@ pub async fn serve(
     api_key_file: Option<PathBuf>,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
+    vision_models: Vec<String>,
+    asr_models: Vec<String>,
+    tts_models: Vec<String>,
+    voice_dir: Option<PathBuf>,
 ) -> Result<()> {
     // Get model directory
     let model_dir = std::env::var("BLAZR_MODEL_DIR")
@@ -221,8 +226,99 @@ pub async fn serve(
         None
     };
 
+    // Load any standalone vision embedders before serving
+    let mut loaded_vision: Vec<(String, Arc<crate::server::handlers::VisionEmbedder>)> =
+        Vec::with_capacity(vision_models.len());
+    for arg in &vision_models {
+        let (name, path) = crate::loader::parse_vision_model_arg(arg)?;
+        let spinner = super::util::spinner(format!(
+            "Loading vision embedder '{}' from {}...",
+            name,
+            path.display()
+        ));
+        let embedder =
+            crate::loader::load_vision_embedder_from_dir::<ServerRuntime, _>(&path, &device)?;
+        spinner.finish_and_clear();
+        eprintln!(
+            "  {} vision embedder {} (hidden={}, image={})",
+            "Loaded".green(),
+            name.bold(),
+            embedder.hidden_size(),
+            path.display(),
+        );
+        loaded_vision.push((name, Arc::new(embedder)));
+    }
+
+    // Load any standalone Whisper ASR bundles before serving.
+    let mut loaded_asr: Vec<(String, Arc<crate::server::handlers::AsrBundle>)> =
+        Vec::with_capacity(asr_models.len());
+    for arg in &asr_models {
+        let (name, path) = crate::loader::parse_asr_model_arg(arg)?;
+        let spinner = super::util::spinner(format!(
+            "Loading ASR model '{}' from {}...",
+            name,
+            path.display()
+        ));
+        let bundle = crate::loader::load_whisper_from_dir::<ServerRuntime, _>(&path, &device)?;
+        spinner.finish_and_clear();
+        eprintln!(
+            "  {} ASR model {} (variant={:?}, vocab={}, mel_bins={})",
+            "Loaded".green(),
+            name.bold(),
+            bundle.variant,
+            bundle.config.vocab_size,
+            bundle.num_mel_bins,
+        );
+        loaded_asr.push((name, Arc::new(bundle)));
+    }
+
+    // Load any TTS bundles (scaffolding-era: G2P + voice catalog only).
+    let mut loaded_tts: Vec<(String, Arc<crate::server::handlers::TtsBundle>)> =
+        Vec::with_capacity(tts_models.len());
+    for arg in &tts_models {
+        let (name, path) = crate::loader::parse_tts_model_arg(arg)?;
+        let spinner = super::util::spinner(format!(
+            "Loading TTS model '{}' from {}...",
+            name,
+            path.display()
+        ));
+        let bundle = crate::loader::load_tts_from_dir(&path)?;
+        spinner.finish_and_clear();
+        eprintln!(
+            "  {} TTS model {} (voices={}, sr={} Hz) {}",
+            "Loaded".green(),
+            name.bold(),
+            bundle.voices().len(),
+            bundle.sample_rate,
+            "[synthesis stubbed until neural path lands]".yellow(),
+        );
+        loaded_tts.push((name, Arc::new(bundle)));
+    }
+
+    // Resolve effective voice directory (CLI flag > env var > None; bundled
+    // fallback is handled inside `VoiceResolver` when None is passed).
+    let effective_voice_dir =
+        voice_dir.or_else(|| std::env::var("BLAZR_VOICE_DIR").ok().map(PathBuf::from));
+    if let Some(dir) = &effective_voice_dir {
+        eprintln!(
+            "  {} Voice directory: {}",
+            "✓".green(),
+            dir.display().to_string().bold()
+        );
+    }
+
     // Start server
-    server::start_with_batch(scheduler, server_config, api_keys, request_scheduler).await?;
+    server::start_with_batch(
+        scheduler,
+        server_config,
+        api_keys,
+        request_scheduler,
+        loaded_vision,
+        loaded_asr,
+        loaded_tts,
+        effective_voice_dir,
+    )
+    .await?;
 
     Ok(())
 }

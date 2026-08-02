@@ -4,6 +4,8 @@
 
 mod anthropic;
 mod audio;
+mod audio_decode;
+mod audio_transcribe;
 mod chat;
 mod chat_types;
 mod completions;
@@ -12,7 +14,7 @@ mod embeddings;
 mod encoding;
 mod gen_types;
 mod generation;
-mod handlers;
+pub mod handlers;
 mod infill;
 mod lora;
 mod management;

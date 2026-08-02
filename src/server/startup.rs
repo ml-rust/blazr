@@ -151,7 +151,17 @@ pub async fn start(
     config: ServerConfig,
     api_keys: Vec<String>,
 ) -> Result<()> {
-    start_with_batch(scheduler, config, api_keys, None).await
+    start_with_batch(
+        scheduler,
+        config,
+        api_keys,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .await
 }
 
 /// Start the HTTP server with optional continuous batching via RequestScheduler.
@@ -159,21 +169,37 @@ pub async fn start(
 /// When `request_scheduler` is Some, HTTP handlers submit requests through it
 /// instead of calling executor.generate() directly. A BatchEngine task must be
 /// spawned separately by the caller (see cli/serve.rs).
+#[allow(clippy::too_many_arguments)]
 pub async fn start_with_batch(
     scheduler: Arc<Scheduler<ServerRuntime>>,
     config: ServerConfig,
     api_keys: Vec<String>,
     request_scheduler: Option<Arc<RequestScheduler>>,
+    vision_embedders: Vec<(String, Arc<crate::server::handlers::VisionEmbedder>)>,
+    asr_models: Vec<(String, Arc<crate::server::handlers::AsrBundle>)>,
+    tts_models: Vec<(String, Arc<crate::server::handlers::TtsBundle>)>,
+    voice_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Install Prometheus metrics recorder
     let metrics_handle = metrics::install_recorder()
         .map_err(|e| anyhow::anyhow!("Failed to install Prometheus metrics recorder: {}", e))?;
     let mut app_state = AppState::new(scheduler, metrics_handle)
-        .with_max_inflight_tokens(config.max_inflight_tokens);
+        .with_max_inflight_tokens(config.max_inflight_tokens)
+        .with_voice_dir(voice_dir);
     if let Some(rs) = request_scheduler {
         app_state = app_state.with_request_scheduler(rs);
     }
     let state = Arc::new(app_state);
+
+    for (name, embedder) in vision_embedders {
+        state.register_vision_embedder(name, embedder).await;
+    }
+    for (name, bundle) in asr_models {
+        state.register_asr_model(name, bundle).await;
+    }
+    for (name, bundle) in tts_models {
+        state.register_tts_model(name, bundle).await;
+    }
 
     // Start config file watcher for hot-reload
     config_watch::spawn_config_watcher(state.user_config.clone());

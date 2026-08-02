@@ -47,8 +47,25 @@ async fn main() -> Result<()> {
             api_key_file,
             tls_cert,
             tls_key,
+            vision_models,
+            asr_models,
+            tts_models,
+            voice_dir,
         } => {
-            blazr::cli::serve(model, port, host, api_key, api_key_file, tls_cert, tls_key).await?;
+            blazr::cli::serve(
+                model,
+                port,
+                host,
+                api_key,
+                api_key_file,
+                tls_cert,
+                tls_key,
+                vision_models,
+                asr_models,
+                tts_models,
+                voice_dir,
+            )
+            .await?;
         }
         Commands::List { verbose } => {
             blazr::cli::list(verbose).await?;

@@ -17,9 +17,10 @@ use boostr::{
     TypeConversionOps, UnaryOps,
 };
 
+use splintr::AnyTokenizer;
+
 use crate::config::BlazrConfig;
 use crate::model::chat_template::ChatTemplate;
-use crate::tokenizer::{BoxedTokenizer, TokenizerTrait};
 
 use super::lora::{load_lora_adapter, LoraAdapterRegistry};
 use super::moe_offload::{LayerExpertPlacement, MoeOffloadConfig, MoeOffloadManager};
@@ -33,8 +34,8 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) model: Arc<LoadedModel<R>>,
     /// Model configuration
     pub(crate) config: BlazrConfig,
-    /// Tokenizer (boxed to allow different tokenizer types)
-    pub(crate) tokenizer: BoxedTokenizer,
+    /// Tokenizer — splintr's universal loaded-tokenizer handle, whatever its source
+    pub(crate) tokenizer: AnyTokenizer,
     /// Device
     pub(crate) device: R::Device,
     /// Initial context size for KV cache (like Ollama's num_ctx)
@@ -79,10 +80,10 @@ where
         + ModelClient<R>,
 {
     /// Create a new executor
-    pub fn new<T: TokenizerTrait + 'static>(
+    pub fn new(
         model: LoadedModel<R>,
         config: BlazrConfig,
-        tokenizer: T,
+        tokenizer: AnyTokenizer,
         device: R::Device,
         num_ctx: usize,
     ) -> Result<Self> {
@@ -216,7 +217,7 @@ where
         Ok(Self {
             model: Arc::new(model),
             config,
-            tokenizer: Box::new(tokenizer),
+            tokenizer,
             device,
             num_ctx,
             chat_template,
@@ -240,10 +241,10 @@ where
     /// the executor's lifetime. The model must already be loaded via
     /// `loader::load_model_tp` before calling this.
     #[cfg(feature = "cuda")]
-    pub fn new_tensor_parallel<T: TokenizerTrait + 'static>(
+    pub fn new_tensor_parallel(
         model: LoadedModel<R>,
         config: BlazrConfig,
-        tokenizer: T,
+        tokenizer: AnyTokenizer,
         device: R::Device,
         num_ctx: usize,
         tp_state: super::tensor_parallel::TensorParallelState,
@@ -328,8 +329,8 @@ where
     }
 
     /// Get the tokenizer
-    pub fn tokenizer(&self) -> &dyn TokenizerTrait {
-        self.tokenizer.as_ref()
+    pub fn tokenizer(&self) -> &AnyTokenizer {
+        &self.tokenizer
     }
 
     /// Get prefix cache statistics (if enabled)

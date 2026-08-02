@@ -331,6 +331,7 @@ where
                 src
             } else {
                 src.contiguous()
+                    .unwrap_or_else(|e| panic!("MoE expert weight copy failed: {e}"))
             };
             // Read raw bytes from the current device (CPU or GPU via R::copy_from_device).
             let bytes: Vec<u8> = src_c.to_vec::<u8>();

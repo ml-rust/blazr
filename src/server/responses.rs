@@ -267,11 +267,7 @@ pub async fn responses(
     };
 
     // Token budget admission
-    let prompt_token_count = executor
-        .tokenizer()
-        .encode(&prompt)
-        .map(|t| t.len())
-        .unwrap_or(prompt.len() / 4);
+    let prompt_token_count = executor.tokenizer().encode(&prompt).len();
     let estimated_tokens = prompt_token_count + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();

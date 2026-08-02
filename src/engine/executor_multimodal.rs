@@ -18,7 +18,6 @@ use boostr::{
 };
 
 use crate::config::{parse_dtype, GenerationConfig};
-use crate::tokenizer::TokenizerTrait;
 
 use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
@@ -85,8 +84,7 @@ where
             }
 
             // Encode prompt tokens
-            let prompt_tokens = self.tokenizer.encode(prompt)
-                .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+            let prompt_tokens = self.tokenizer.encode(prompt);
 
             if prompt_tokens.is_empty() {
                 return;
@@ -326,11 +324,7 @@ where
         audio_segments: &[Vec<f32>],
         gen_config: &GenerationConfig,
     ) -> Result<super::types::GenerationResult> {
-        let prompt_tokens = self
-            .tokenizer()
-            .encode(prompt)
-            .map_err(|e| anyhow!("Tokenization failed: {}", e))?
-            .len();
+        let prompt_tokens = self.tokenizer().encode(prompt).len();
 
         let mut result = String::new();
         let mut completion_tokens = 0usize;

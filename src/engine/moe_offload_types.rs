@@ -180,7 +180,7 @@ impl ExpertFrequencyTracker {
     /// Get the top-K most frequently activated experts.
     pub fn top_k(&self, k: usize) -> Vec<usize> {
         let mut sorted: Vec<(usize, usize)> = self.counts.iter().map(|(&e, &c)| (e, c)).collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
         sorted.into_iter().take(k).map(|(e, _)| e).collect()
     }
 

@@ -179,16 +179,7 @@ pub async fn embeddings(
 
     for (i, text) in texts.iter().enumerate() {
         // Tokenize
-        let token_ids = match executor.tokenizer().encode(text) {
-            Ok(ids) => ids,
-            Err(e) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Tokenization failed: {}", e),
-                    "server_error",
-                );
-            }
-        };
+        let token_ids = executor.tokenizer().encode(text);
         let num_tokens = token_ids.len();
         total_prompt_tokens += num_tokens;
 

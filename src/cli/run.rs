@@ -14,7 +14,7 @@ use crate::engine::Executor;
 #[cfg(feature = "cuda")]
 use crate::loader::OffloadingOptions;
 use crate::loader::{self, detect_model_source, ModelFormat};
-use crate::tokenizer::Tokenizer;
+use crate::tokenizer::from_vocab_size;
 use boostr::{CpuRuntime, DType, Runtime};
 
 /// Run interactive generation
@@ -65,7 +65,6 @@ async fn run_cuda(
     paged_attention: bool,
     graphs: bool,
 ) -> Result<()> {
-    use crate::tokenizer::BoxedTokenizer;
     // Initialize device
     let device = boostr::CudaDevice::new(0);
 
@@ -75,18 +74,18 @@ async fn run_cuda(
     let source = detect_model_source(std::path::Path::new(&model))?;
 
     // Load model with appropriate tokenizer based on format
-    let (loaded_model, mut config, tokenizer): (_, _, BoxedTokenizer) = match source.format {
+    let (loaded_model, mut config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
             // GGUF: use embedded tokenizer (exact vocabulary from the file)
             let (m, c, tok) = loader::load_gguf_with_tokenizer::<CudaRuntime, _>(&model, &device)?;
-            tracing::info!("Using GGUF-embedded tokenizer (SentencePiece)");
-            (m, c, Box::new(tok))
+            tracing::info!("Using GGUF-embedded tokenizer");
+            (m, c, tok)
         }
         ModelFormat::SafeTensors => {
             if gpu_layers < 0 {
                 let (m, c) = loader::load_model::<CudaRuntime, _>(&model, &device)?;
-                let tok = Tokenizer::from_vocab_size(c.vocab_size())?;
-                (m, c, Box::new(tok))
+                let tok = from_vocab_size(c.vocab_size())?;
+                (m, c, tok)
             } else {
                 let options = if gpu_layers > 0 {
                     OffloadingOptions::default().gpu_layers(gpu_layers as usize)
@@ -104,8 +103,8 @@ async fn run_cuda(
                     info.gpu_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
                 );
 
-                let tok = Tokenizer::from_vocab_size(c.vocab_size())?;
-                (m, c, Box::new(tok))
+                let tok = from_vocab_size(c.vocab_size())?;
+                (m, c, tok)
             }
         }
     };
@@ -192,7 +191,7 @@ async fn run_cpu(
         ModelFormat::SafeTensors => {
             // Load SafeTensors with splintr tokenizer
             let (loaded_model, config) = loader::load_model::<CpuRuntime, _>(&model, &device)?;
-            let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
+            let tokenizer = from_vocab_size(config.vocab_size())?;
             Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
         }
     };

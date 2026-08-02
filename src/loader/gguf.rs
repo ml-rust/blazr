@@ -10,6 +10,7 @@ use boostr::format::Gguf;
 use boostr::model::{LoadedModel, UniversalConfig};
 use boostr::ops::TensorOps;
 use boostr::{DType, Runtime, VarBuilder, VarMap};
+use splintr::AnyTokenizer;
 
 use crate::config::BlazrConfig;
 
@@ -72,7 +73,7 @@ where
 pub fn load_gguf_with_tokenizer<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
-) -> Result<(LoadedModel<R>, BlazrConfig, crate::tokenizer::GgufTokenizer)>
+) -> Result<(LoadedModel<R>, BlazrConfig, AnyTokenizer)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
@@ -82,7 +83,10 @@ where
         .map_err(|e| anyhow!("Failed to open GGUF file: {}", e))?;
 
     let config = config_from_gguf_metadata(&gguf)?;
-    let tokenizer = crate::tokenizer::GgufTokenizer::from_gguf(&gguf)?;
+    let vocab = boostr::format::extract_gguf_vocab(gguf.metadata())
+        .map_err(|e| anyhow!("Failed to extract GGUF vocabulary: {}", e))?;
+    let tokenizer = splintr::from_gguf_vocab(vocab)
+        .map_err(|e| anyhow!("Failed to build tokenizer from GGUF vocabulary: {}", e))?;
 
     let mut var_map = VarMap::<R>::from_gguf(path, device)
         .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
@@ -173,13 +177,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         let head_dim = metadata
             .get_u32(&format!("{arch}.attention.key_length"))
             .map(|v| v as usize)
-            .or_else(|| {
-                if num_heads > 0 {
-                    Some(hidden_size / num_heads)
-                } else {
-                    None
-                }
-            });
+            .or_else(|| hidden_size.checked_div(num_heads));
         let rope_theta = metadata
             .get_f32(&format!("{arch}.rope.freq_base"))
             .unwrap_or(10000.0);
@@ -199,7 +197,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         let use_alibi = model_type == "falcon"
             && metadata
                 .get_u32(&format!("{arch}.attention.use_alibi"))
-                .map_or(false, |v| v != 0);
+                .is_some_and(|v| v != 0);
 
         Some(AttentionConfig {
             num_heads,
@@ -236,11 +234,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
             .map(|v| v as usize)
             .unwrap_or(64);
         let ssm_num_heads = inner_size / ssm_head_dim;
-        let expand = if hidden_size > 0 {
-            inner_size / hidden_size
-        } else {
-            2
-        };
+        let expand = inner_size.checked_div(hidden_size).unwrap_or(2);
         let n_groups = metadata
             .get_u32(&format!("{arch}.ssm.group_count"))
             .map(|v| v as usize)

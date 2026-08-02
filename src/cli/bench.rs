@@ -12,7 +12,7 @@ use futures::StreamExt;
 use crate::config::GenerationConfig;
 use crate::engine::Executor;
 use crate::loader::{self, detect_model_source, ModelFormat};
-use crate::tokenizer::{BoxedTokenizer, Tokenizer};
+use crate::tokenizer::from_vocab_size;
 use boostr::{DType, Runtime};
 
 #[cfg(feature = "cuda")]
@@ -61,15 +61,15 @@ pub async fn bench(
 
     let source = detect_model_source(std::path::Path::new(&model))?;
 
-    let (loaded_model, config, tokenizer): (_, _, BoxedTokenizer) = match source.format {
+    let (loaded_model, config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
             let (m, c, tok) = loader::load_gguf_with_tokenizer::<BenchRuntime, _>(&model, &device)?;
-            (m, c, Box::new(tok))
+            (m, c, tok)
         }
         ModelFormat::SafeTensors => {
             let (m, c) = loader::load_model::<BenchRuntime, _>(&model, &device)?;
-            let tok = Tokenizer::from_vocab_size(c.vocab_size())?;
-            (m, c, Box::new(tok))
+            let tok = from_vocab_size(c.vocab_size())?;
+            (m, c, tok)
         }
     };
 

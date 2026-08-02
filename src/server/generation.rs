@@ -299,10 +299,7 @@ pub async fn generate_via_scheduler(
     prompt: &str,
     gen_config: &GenerationConfig,
 ) -> Result<BatchedGenerationResult, String> {
-    let prompt_tokens = executor
-        .tokenizer()
-        .encode(prompt)
-        .map_err(|e| format!("tokenization failed: {}", e))?;
+    let prompt_tokens = executor.tokenizer().encode(prompt);
     let prompt_len = prompt_tokens.len();
     let start = std::time::Instant::now();
 

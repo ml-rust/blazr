@@ -20,7 +20,7 @@ use boostr::{
 
 use crate::engine::Executor;
 use crate::loader;
-use crate::tokenizer::Tokenizer;
+use crate::tokenizer::from_vocab_size;
 
 /// Parse an Ollama-style keep_alive string into a Duration.
 ///
@@ -173,7 +173,7 @@ where
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 let (model, config) =
                     loader::load_model_tp::<R, _>(&model_path, &self.device, comm)?;
-                let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
+                let tokenizer = from_vocab_size(config.vocab_size())?;
                 let chat_template = ChatTemplate::detect(&model_path, config.model_type());
                 if let Some(ref moe_config) =
                     super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)
@@ -206,7 +206,7 @@ where
             }
         } else {
             let (model, config) = loader::load_model::<R, _>(&model_path, &self.device)?;
-            let tokenizer = Tokenizer::from_vocab_size(config.vocab_size())?;
+            let tokenizer = from_vocab_size(config.vocab_size())?;
             let chat_template = ChatTemplate::detect(&model_path, config.model_type());
             if let Some(ref moe_config) =
                 super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)

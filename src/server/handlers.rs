@@ -213,19 +213,11 @@ pub async fn tokenize(
         }
     };
 
-    match executor.tokenizer().encode(&request.content) {
-        Ok(tokens) => {
-            let response = TokenizeResponse {
-                tokens: tokens.iter().map(|&t| t as i64).collect(),
-            };
-            (StatusCode::OK, Json(response)).into_response()
-        }
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Tokenization failed: {}", e),
-            "server_error",
-        ),
-    }
+    let tokens = executor.tokenizer().encode(&request.content);
+    let response = TokenizeResponse {
+        tokens: tokens.iter().map(|&t| t as i64).collect(),
+    };
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// Detokenize token IDs endpoint

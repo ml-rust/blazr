@@ -19,7 +19,6 @@ use boostr::{
 };
 
 use crate::config::{parse_dtype, GenerationConfig};
-use crate::tokenizer::TokenizerTrait;
 
 use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
@@ -59,8 +58,7 @@ where
             }
 
             // Encode prompt
-            let prompt_tokens = self.tokenizer.encode(prompt)
-                .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+            let prompt_tokens = self.tokenizer.encode(prompt);
 
             if gen_config.verbose_prompt {
                 eprintln!("\nprompt: '{}'", prompt);

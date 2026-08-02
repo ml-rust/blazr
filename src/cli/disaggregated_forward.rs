@@ -9,9 +9,9 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::distributed::disaggregated::DisaggRouter;
 use crate::distributed::disaggregated::{DecodeStepFn, PrefillFn};
 use crate::distributed::kv_serialize;
-use crate::distributed::DisaggRouter;
 
 #[cfg(feature = "cuda")]
 type ServerRuntime = boostr::CudaRuntime;

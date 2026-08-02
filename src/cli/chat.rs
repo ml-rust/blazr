@@ -10,7 +10,7 @@ use crate::config::GenerationConfig;
 use crate::engine::Executor;
 use crate::loader::{self, detect_model_source, ModelFormat};
 use crate::model::chat_template::{ChatMessage, ChatTemplate};
-use crate::tokenizer::{BoxedTokenizer, Tokenizer};
+use crate::tokenizer::from_vocab_size;
 
 #[cfg(feature = "cuda")]
 type ChatRuntime = boostr::CudaRuntime;
@@ -213,16 +213,16 @@ pub async fn chat(
 macro_rules! load_model_from_source {
     ($model:expr, $device:expr, $num_ctx:expr) => {{
         let source = detect_model_source(std::path::Path::new($model))?;
-        let (loaded_model, config, tokenizer): (_, _, BoxedTokenizer) = match source.format {
+        let (loaded_model, config, tokenizer) = match source.format {
             ModelFormat::Gguf => {
                 let (m, c, tok) =
                     loader::load_gguf_with_tokenizer::<ChatRuntime, _>($model, &$device)?;
-                (m, c, Box::new(tok))
+                (m, c, tok)
             }
             ModelFormat::SafeTensors => {
                 let (m, c) = loader::load_model::<ChatRuntime, _>($model, &$device)?;
-                let tok = Tokenizer::from_vocab_size(c.vocab_size())?;
-                (m, c, Box::new(tok))
+                let tok = from_vocab_size(c.vocab_size())?;
+                (m, c, tok)
             }
         };
         Executor::new(loaded_model, config, tokenizer, $device, $num_ctx)

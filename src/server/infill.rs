@@ -35,7 +35,7 @@ const FIM_SUFFIX_TOKEN: &str = "<|fim_suffix|>";
 /// PSM order (prefix-suffix-middle): `<fim_prefix>PREFIX<fim_suffix>SUFFIX<fim_middle>`
 /// This is the standard order used by StarCoder, CodeLlama, and OpenAI models.
 fn build_fim_prompt(
-    tokenizer: &dyn crate::tokenizer::TokenizerTrait,
+    tokenizer: &splintr::AnyTokenizer,
     prefix: &str,
     suffix: &str,
 ) -> Result<String, String> {
@@ -113,11 +113,7 @@ pub async fn infill(
     let gen_config = request.sampling_params().into_gen_config();
 
     // Token budget admission control
-    let prompt_token_count = executor
-        .tokenizer()
-        .encode(&prompt)
-        .map(|t| t.len())
-        .unwrap_or(prompt.len() / 4);
+    let prompt_token_count = executor.tokenizer().encode(&prompt).len();
     let estimated_tokens = prompt_token_count + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();

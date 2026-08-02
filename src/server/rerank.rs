@@ -106,16 +106,7 @@ pub async fn rerank(
     }
 
     // Get query embedding
-    let query_tokens = match executor.tokenizer().encode(&request.query) {
-        Ok(ids) => ids,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Tokenization failed: {}", e),
-                "server_error",
-            );
-        }
-    };
+    let query_tokens = executor.tokenizer().encode(&request.query);
 
     let query_embedding = match executor.get_embeddings(&query_tokens).await {
         Ok(emb) => emb,
@@ -129,11 +120,7 @@ pub async fn rerank(
     };
 
     let query_len = query_tokens.len();
-    let hidden_size = if query_len > 0 {
-        query_embedding.len() / query_len
-    } else {
-        0
-    };
+    let hidden_size = query_embedding.len().checked_div(query_len).unwrap_or(0);
 
     // Mean-pool query embedding
     let query_pooled = pool_mean(&query_embedding, query_len, hidden_size);
@@ -143,16 +130,7 @@ pub async fn rerank(
 
     for (i, doc) in request.documents.iter().enumerate() {
         let doc_text = doc.text();
-        let doc_tokens = match executor.tokenizer().encode(doc_text) {
-            Ok(ids) => ids,
-            Err(e) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Tokenization failed for document {}: {}", i, e),
-                    "server_error",
-                );
-            }
-        };
+        let doc_tokens = executor.tokenizer().encode(doc_text);
         let doc_len = doc_tokens.len();
         total_tokens += doc_len;
 

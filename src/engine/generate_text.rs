@@ -71,10 +71,7 @@ where
             .as_ref()
             .ok_or_else(|| anyhow!("speculative config missing"))?;
 
-        let prompt_tokens = self
-            .tokenizer()
-            .encode(prompt)
-            .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+        let prompt_tokens = self.tokenizer().encode(prompt);
         let prompt_len = prompt_tokens.len();
         let prefill_start = std::time::Instant::now();
 
@@ -151,11 +148,7 @@ where
         prompt: &str,
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
-        let prompt_tokens = self
-            .tokenizer()
-            .encode(prompt)
-            .map_err(|e| anyhow!("Tokenization failed: {}", e))?
-            .len();
+        let prompt_tokens = self.tokenizer().encode(prompt).len();
 
         let mut result = String::new();
         let mut completion_tokens = 0usize;

@@ -43,8 +43,7 @@ impl Executor<boostr::CudaRuntime> {
         use boostr::Runtime;
 
         stream! {
-            let prompt_tokens = self.tokenizer().encode(prompt)
-                .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+            let prompt_tokens = self.tokenizer().encode(prompt);
 
             if prompt_tokens.is_empty() {
                 return;
@@ -121,7 +120,7 @@ impl Executor<boostr::CudaRuntime> {
                 .map_err(|e| anyhow!("RoPE pre-capture update failed: {}", e))?;
 
             // ── CUDA graph capture ──
-            let (graph, ()) = CudaRt::capture_graph(&client, |c| {
+            let graph = CudaRt::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
                 let logits = self.model().forward_graph_mode(
                     &token_buf, &mut kv_cache, &device_scalars, &cos_slice, &sin_slice,
                 ).map_err(|e| boostr::NumrError::Backend(format!("Capture forward failed: {e}")))?;
@@ -215,8 +214,7 @@ impl Executor<boostr::CudaRuntime> {
         use boostr::Runtime;
 
         stream! {
-            let prompt_tokens = self.tokenizer().encode(prompt)
-                .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
+            let prompt_tokens = self.tokenizer().encode(prompt);
 
             if prompt_tokens.is_empty() {
                 return;
@@ -330,7 +328,7 @@ impl Executor<boostr::CudaRuntime> {
                 .map_err(|e| anyhow!("RoPE pre-capture update failed: {}", e))?;
 
             // ── CUDA graph capture ──
-            let (graph, ()) = CudaRt::capture_graph(&client, |c| {
+            let graph = CudaRt::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
                 let logits = self.model().forward_graph_paged(
                     c, &token_buf, &paged_cache, &slot_mapping, &block_table,
                     &device_scalars, &cos_slice, &sin_slice,

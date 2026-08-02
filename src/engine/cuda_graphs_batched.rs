@@ -8,9 +8,6 @@
 use anyhow::{anyhow, Result};
 
 #[cfg(feature = "cuda")]
-use boostr::runtime::Graph;
-
-#[cfg(feature = "cuda")]
 use super::executor::Executor;
 
 #[cfg(feature = "cuda")]
@@ -149,7 +146,7 @@ impl Executor<boostr::CudaRuntime> {
         );
 
         // ── CUDA graph capture ──
-        let (graph, ()) = CudaRt::capture_graph(&client, |c| {
+        let graph = CudaRt::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
             let logits = self
                 .model()
                 .forward_graph_paged(
@@ -272,7 +269,7 @@ impl Executor<boostr::CudaRuntime> {
 #[cfg(feature = "cuda")]
 pub struct BatchedGraphState {
     /// Captured CUDA graph (the decode kernel chain for the full batch)
-    pub graph: boostr::runtime::cuda::CudaGraph,
+    pub graph: boostr::runtime::CapturedGraph<boostr::CudaRuntime>,
     /// Device-side scalar values (seq_len_k pointer used by paged attention kernel)
     pub device_scalars: boostr::inference::decode_graph::DeviceScalars,
     /// Input token IDs: `[max_batch_size, 1]` — fill before each replay

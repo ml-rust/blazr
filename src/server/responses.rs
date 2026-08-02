@@ -15,12 +15,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::generation::{
-    error_response, generate_via_scheduler, overloaded_response, record_generation_metrics,
-    validate_generation_params,
+    error_response, generate_via_scheduler, overloaded_response, policy_error_response,
+    record_generation_metrics, validate_generation_params,
 };
 use super::handlers::AppState;
 use super::metrics;
-use crate::model::chat_template::ChatMessage;
+use crate::model::chat_template::{encode_chat_prompt, ChatMessage};
 
 /// OpenAI Responses API request
 #[derive(Deserialize)]
@@ -256,7 +256,13 @@ pub async fn responses(
         }
     }
 
-    let prompt = executor.chat_template().apply(&msgs);
+    // One encode of the assembled prompt, under the template's own allow-list:
+    // a control token the server did not insert is refused, not promoted.
+    let (_prompt, prompt_tokens) =
+        match encode_chat_prompt(executor.chat_template(), executor.tokenizer(), &msgs, "") {
+            Ok(encoded) => encoded,
+            Err(e) => return policy_error_response(&e),
+        };
 
     let gen_config = crate::config::GenerationConfig {
         max_tokens: request.max_output_tokens,
@@ -267,8 +273,7 @@ pub async fn responses(
     };
 
     // Token budget admission
-    let prompt_token_count = executor.tokenizer().encode(&prompt).len();
-    let estimated_tokens = prompt_token_count + gen_config.max_tokens;
+    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
@@ -278,7 +283,7 @@ pub async fn responses(
     let model_name = request.model.clone();
 
     let gen_result = if let Some(ref rs) = state.request_scheduler {
-        match generate_via_scheduler(rs, &executor, &prompt, &gen_config).await {
+        match generate_via_scheduler(rs, prompt_tokens.clone(), &gen_config).await {
             Ok(r) => Ok(crate::engine::GenerationResult {
                 text: r.text,
                 prompt_tokens: r.prompt_tokens,
@@ -290,7 +295,7 @@ pub async fn responses(
             Err(e) => Err(anyhow::anyhow!(e)),
         }
     } else {
-        executor.generate_text(&prompt, &gen_config).await
+        executor.generate_text(&prompt_tokens, &gen_config).await
     };
 
     match gen_result {

@@ -33,7 +33,7 @@ impl Executor<boostr::CudaRuntime> {
     /// - `config.inference.paged_attention` must be false (use `generate_with_graphs_paged` for paged mode)
     pub fn generate_with_graphs<'a>(
         &'a self,
-        prompt: &'a str,
+        prompt_tokens: &'a [u32],
         gen_config: &'a crate::config::GenerationConfig,
     ) -> impl futures::Stream<Item = Result<GeneratedToken>> + 'a {
         use boostr::autograd::Var;
@@ -43,8 +43,6 @@ impl Executor<boostr::CudaRuntime> {
         use boostr::Runtime;
 
         stream! {
-            let prompt_tokens = self.tokenizer().encode(prompt);
-
             if prompt_tokens.is_empty() {
                 return;
             }
@@ -57,7 +55,7 @@ impl Executor<boostr::CudaRuntime> {
                 graph_capacity.saturating_sub(prompt_tokens.len())
             );
 
-            let input = self.create_input_tensor(&prompt_tokens)?;
+            let input = self.create_input_tensor(prompt_tokens)?;
 
             // ── KV cache at full capacity (required for stable device addresses) ──
             let num_layers = self.model().num_layers();
@@ -201,7 +199,7 @@ impl Executor<boostr::CudaRuntime> {
     /// - `config.inference.paged_attention` must be true
     pub fn generate_with_graphs_paged<'a>(
         &'a self,
-        prompt: &'a str,
+        prompt_tokens: &'a [u32],
         gen_config: &'a crate::config::GenerationConfig,
     ) -> impl futures::Stream<Item = Result<GeneratedToken>> + 'a {
         use boostr::autograd::Var;
@@ -214,8 +212,6 @@ impl Executor<boostr::CudaRuntime> {
         use boostr::Runtime;
 
         stream! {
-            let prompt_tokens = self.tokenizer().encode(prompt);
-
             if prompt_tokens.is_empty() {
                 return;
             }
@@ -226,7 +222,7 @@ impl Executor<boostr::CudaRuntime> {
                 graph_capacity.saturating_sub(prompt_tokens.len())
             );
 
-            let input = self.create_input_tensor(&prompt_tokens)?;
+            let input = self.create_input_tensor(prompt_tokens)?;
 
             // ── Paged KV cache setup ──
             let num_layers = self.model().num_layers();

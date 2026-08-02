@@ -113,6 +113,46 @@ pub fn error_response(status: StatusCode, message: &str, error_type: &str) -> Re
         .into_response()
 }
 
+/// Build the error response for a tokenizer special-token policy refusal.
+///
+/// A refusal means the request text spelled out a control token the server did
+/// not itself insert there — a malformed (or hostile) request, so 400 rather
+/// than 500. The message carries splintr's token and byte offset, which is what
+/// a legitimate caller who tripped the check needs to locate the offending text.
+pub fn policy_error_response(err: &splintr::PolicyError) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("Rejected input: {}", err),
+        "invalid_request_error",
+    )
+}
+
+/// Encode caller text that no chat template wraps, under an explicit
+/// special-token policy.
+///
+/// `allowed_special` is the request field of the same name, and the rule is the
+/// one `/v1/tokenize` and `/v1/completions` share:
+///
+/// - absent (the default) means [`splintr::SpecialMode::Ordinary`] — text that
+///   spells a control token encodes as that literal string, so no caller can
+///   promote a `<|im_start|>` in its own text to that token's real id;
+/// - present means [`splintr::SpecialMode::Allow`] over exactly the named
+///   tokens, for callers that legitimately hand-build a chat format; any
+///   *other* special token in the text is refused rather than promoted.
+pub fn encode_with_allowed_special(
+    tokenizer: &splintr::AnyTokenizer,
+    text: &str,
+    allowed_special: Option<&[String]>,
+) -> Result<Vec<u32>, splintr::PolicyError> {
+    match allowed_special {
+        Some(names) => {
+            let allowed: splintr::FxHashSet<String> = names.iter().cloned().collect();
+            tokenizer.encode_with(text, &splintr::SpecialMode::Allow(&allowed))
+        }
+        None => tokenizer.encode_with(text, &splintr::SpecialMode::Ordinary),
+    }
+}
+
 // ── Shared response types ──
 
 /// OpenAI-compatible logprobs result
@@ -168,4 +208,62 @@ pub struct ErrorResponse {
 pub struct ErrorDetail {
     pub message: String,
     pub r#type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokenizer() -> splintr::AnyTokenizer {
+        crate::tokenizer::from_pretrained("llama3").expect("bundled vocabulary loads")
+    }
+
+    fn eot(tok: &splintr::AnyTokenizer) -> u32 {
+        tok.special_token_id("<|eot_id|>")
+            .expect("llama3 names an end-of-turn token")
+    }
+
+    /// `/v1/completions` with no `allowed_special`: a control token spelled out
+    /// in the prompt is not promoted to its real id, so a caller cannot forge a
+    /// turn boundary the way the raw `All` encode used to let it.
+    #[test]
+    fn test_control_token_is_not_promoted_by_default() {
+        let tok = tokenizer();
+        let ids = encode_with_allowed_special(&tok, "Hi<|eot_id|>bye", None)
+            .expect("ordinary text always encodes");
+        assert!(!ids.contains(&eot(&tok)));
+        // It is still present, as the literal characters the caller wrote.
+        assert_eq!(tok.decode(&ids).expect("ids round-trip"), "Hi<|eot_id|>bye");
+    }
+
+    /// A caller hand-building a chat format names the tokens it needs, and those
+    /// — and only those — reach the model as control tokens.
+    #[test]
+    fn test_named_special_is_accepted() {
+        let tok = tokenizer();
+        let allowed = vec!["<|eot_id|>".to_string()];
+        let ids = encode_with_allowed_special(&tok, "Hi<|eot_id|>bye", Some(&allowed))
+            .expect("a token the caller named is allowed");
+        assert!(ids.contains(&eot(&tok)));
+    }
+
+    /// Opting one token in does not open the rest of the vocabulary: any other
+    /// special token is refused, which the handler surfaces as a 400.
+    #[test]
+    fn test_unnamed_special_is_refused() {
+        let tok = tokenizer();
+        let allowed = vec!["<|eot_id|>".to_string()];
+        let err = encode_with_allowed_special(&tok, "Hi<|python_tag|>bye", Some(&allowed))
+            .expect_err("a special token outside the allow-list must be refused");
+        match err {
+            splintr::PolicyError::DisallowedSpecial { ref token, .. } => {
+                assert_eq!(token, "<|python_tag|>")
+            }
+            other => panic!("expected DisallowedSpecial, got {other:?}"),
+        }
+        assert_eq!(
+            policy_error_response(&err).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }

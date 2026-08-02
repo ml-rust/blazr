@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::generation::error_response;
+use super::generation::{error_response, policy_error_response};
 use super::handlers::AppState;
 use super::pooling::pool_mean;
 
@@ -105,8 +105,15 @@ pub async fn rerank(
         );
     }
 
-    // Get query embedding
-    let query_tokens = executor.tokenizer().encode(&request.query);
+    // Get query embedding. Query and documents are raw caller text with no
+    // template around them, so nothing in them may become a control token.
+    let query_tokens = match executor
+        .tokenizer()
+        .encode_with(&request.query, &splintr::SpecialMode::Ordinary)
+    {
+        Ok(ids) => ids,
+        Err(e) => return policy_error_response(&e),
+    };
 
     let query_embedding = match executor.get_embeddings(&query_tokens).await {
         Ok(emb) => emb,
@@ -130,7 +137,13 @@ pub async fn rerank(
 
     for (i, doc) in request.documents.iter().enumerate() {
         let doc_text = doc.text();
-        let doc_tokens = executor.tokenizer().encode(doc_text);
+        let doc_tokens = match executor
+            .tokenizer()
+            .encode_with(doc_text, &splintr::SpecialMode::Ordinary)
+        {
+            Ok(ids) => ids,
+            Err(e) => return policy_error_response(&e),
+        };
         let doc_len = doc_tokens.len();
         total_tokens += doc_len;
 

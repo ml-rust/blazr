@@ -48,7 +48,7 @@ where
     /// text-only autoregressive generation using the KV cache.
     pub fn generate_multimodal<'a>(
         &'a self,
-        prompt: &'a str,
+        prompt_tokens: &'a [u32],
         images: &'a [Vec<u8>],
         audio_segments: &'a [Vec<f32>],
         gen_config: &'a GenerationConfig,
@@ -82,9 +82,6 @@ where
                 ));
                 return;
             }
-
-            // Encode prompt tokens
-            let prompt_tokens = self.tokenizer.encode(prompt);
 
             if prompt_tokens.is_empty() {
                 return;
@@ -189,7 +186,7 @@ where
             // on the LLM backbone. For decode, we use forward_with_kv_cache.
 
             let llm = multimodal_model.llm();
-            let input = self.create_input_tensor(&prompt_tokens)?;
+            let input = self.create_input_tensor(prompt_tokens)?;
 
             // Get text embeddings [1, seq_len, hidden]
             let text_embeds = llm.forward_embed(&input)
@@ -269,7 +266,7 @@ where
             tracing::info!(phase = "prefill_end", backend = "multimodal");
 
             // ── Autoregressive decode (text-only, same as regular generate) ──
-            let mut token_history: Vec<u32> = prompt_tokens.clone();
+            let mut token_history: Vec<u32> = prompt_tokens.to_vec();
             let mut mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
                 Some(MirostatState::new(gen_config.mirostat_tau, gen_config.mirostat_eta, gen_config.seed))
             } else {
@@ -319,18 +316,22 @@ where
     /// handling stop sequences and logprobs the same way as `generate_text`.
     pub async fn generate_multimodal_text(
         &self,
-        prompt: &str,
+        prompt_tokens: &[u32],
         images: &[Vec<u8>],
         audio_segments: &[Vec<f32>],
         gen_config: &GenerationConfig,
     ) -> Result<super::types::GenerationResult> {
-        let prompt_tokens = self.tokenizer().encode(prompt).len();
+        let prompt_token_count = prompt_tokens.len();
 
         let mut result = String::new();
         let mut completion_tokens = 0usize;
         let mut finish_reason = FinishReason::Length;
-        let mut stream =
-            std::pin::pin!(self.generate_multimodal(prompt, images, audio_segments, gen_config));
+        let mut stream = std::pin::pin!(self.generate_multimodal(
+            prompt_tokens,
+            images,
+            audio_segments,
+            gen_config
+        ));
         let prefill_start = std::time::Instant::now();
         let mut prompt_eval_duration_ms = 0u64;
         let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
@@ -359,7 +360,7 @@ where
                     result.truncate(result.len() - stop.len());
                     return Ok(super::types::GenerationResult {
                         text: result,
-                        prompt_tokens,
+                        prompt_tokens: prompt_token_count,
                         completion_tokens,
                         finish_reason: FinishReason::Stop,
                         prompt_eval_duration_ms,
@@ -375,7 +376,7 @@ where
 
         Ok(super::types::GenerationResult {
             text: result,
-            prompt_tokens,
+            prompt_tokens: prompt_token_count,
             completion_tokens,
             finish_reason,
             prompt_eval_duration_ms,

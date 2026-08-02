@@ -14,7 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::encoding::encode_f32_base64;
-use super::generation::error_response;
+use super::generation::{error_response, policy_error_response};
 use super::handlers::AppState;
 use super::multimodal::{decode_image, ContentPart};
 use super::pooling::{l2_normalize, pool_cls, pool_last, pool_mean};
@@ -192,7 +192,15 @@ pub async fn embeddings(
     for (i, item) in items.into_iter().enumerate() {
         let mut embedding = match item {
             EmbedItem::Text(text) => {
-                let token_ids = executor.tokenizer().encode(text);
+                // Raw caller text with no template around it: nothing in it may
+                // become a control token.
+                let token_ids = match executor
+                    .tokenizer()
+                    .encode_with(text, &splintr::SpecialMode::Ordinary)
+                {
+                    Ok(ids) => ids,
+                    Err(e) => return policy_error_response(&e),
+                };
                 let num_tokens = token_ids.len();
                 total_prompt_tokens += num_tokens;
 

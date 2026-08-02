@@ -272,7 +272,8 @@ where
     let mut last_token_time = start;
     let mut itl_samples = Vec::new();
 
-    let stream = executor.generate(prompt, gen_config);
+    let prompt_tokens = executor.tokenizer().encode(prompt);
+    let stream = executor.generate(&prompt_tokens, gen_config);
     let mut stream = std::pin::pin!(stream);
 
     while let Some(result) = stream.next().await {

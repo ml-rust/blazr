@@ -32,20 +32,26 @@ where
         + DequantOps<R>
         + QuantMatmulOps<R>,
 {
-    /// Generate text and return the complete result with metadata
+    /// Generate text from already-encoded prompt ids and return the complete
+    /// result with metadata.
+    ///
+    /// The ids come from the handler's validated encode; this path never
+    /// re-tokenizes.
     pub async fn generate_text(
         &self,
-        prompt: &str,
+        prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
         // Use speculative decoding if configured
         if self.config().inference.speculative.is_some() {
-            return self.generate_text_speculative(prompt, gen_config).await;
+            return self
+                .generate_text_speculative(prompt_tokens, gen_config)
+                .await;
         }
 
         let max_attempts = if gen_config.json_mode { 3 } else { 1 };
         for attempt in 0..max_attempts {
-            let result = self.generate_text_once(prompt, gen_config).await?;
+            let result = self.generate_text_once(prompt_tokens, gen_config).await?;
             if !gen_config.json_mode || is_valid_json(&result.text) {
                 return Ok(result);
             }
@@ -55,13 +61,13 @@ where
                 max_attempts
             );
         }
-        self.generate_text_once(prompt, gen_config).await
+        self.generate_text_once(prompt_tokens, gen_config).await
     }
 
     /// Speculative decoding path: uses draft model for fast speculation, target for verification.
     async fn generate_text_speculative(
         &self,
-        prompt: &str,
+        prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
         let spec_config = self
@@ -71,7 +77,6 @@ where
             .as_ref()
             .ok_or_else(|| anyhow!("speculative config missing"))?;
 
-        let prompt_tokens = self.tokenizer().encode(prompt);
         let prompt_len = prompt_tokens.len();
         let prefill_start = std::time::Instant::now();
 
@@ -103,7 +108,7 @@ where
             boostr::inference::speculative::SpeculativeExecutor::new(draft, target, boostr_config);
 
         let generated_ids = executor
-            .generate(&prompt_tokens, gen_config.max_tokens)
+            .generate(prompt_tokens, gen_config.max_tokens)
             .map_err(|e| anyhow!("speculative generation failed: {}", e))?;
 
         let prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
@@ -145,15 +150,15 @@ where
     /// Single generation attempt (used by generate_text for JSON retry)
     async fn generate_text_once(
         &self,
-        prompt: &str,
+        prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
-        let prompt_tokens = self.tokenizer().encode(prompt).len();
+        let prompt_token_count = prompt_tokens.len();
 
         let mut result = String::new();
         let mut completion_tokens = 0usize;
         let mut finish_reason = FinishReason::Length;
-        let mut stream = std::pin::pin!(self.generate(prompt, gen_config));
+        let mut stream = std::pin::pin!(self.generate(prompt_tokens, gen_config));
         let prefill_start = std::time::Instant::now();
         let mut prompt_eval_duration_ms = 0u64;
         let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
@@ -182,7 +187,7 @@ where
                     result.truncate(result.len() - stop.len());
                     return Ok(GenerationResult {
                         text: result,
-                        prompt_tokens,
+                        prompt_tokens: prompt_token_count,
                         completion_tokens,
                         finish_reason: FinishReason::Stop,
                         prompt_eval_duration_ms,
@@ -198,7 +203,7 @@ where
 
         Ok(GenerationResult {
             text: result,
-            prompt_tokens,
+            prompt_tokens: prompt_token_count,
             completion_tokens,
             finish_reason,
             prompt_eval_duration_ms,

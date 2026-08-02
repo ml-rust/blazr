@@ -39,9 +39,14 @@ where
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>,
 {
+    /// Generate from already-encoded prompt ids.
+    ///
+    /// The ids are the caller's — the handler that validated them against its
+    /// special-token policy — so nothing here re-tokenizes text and no second
+    /// encode can disagree with the one that was checked.
     pub fn generate<'a>(
         &'a self,
-        prompt: &'a str,
+        prompt_tokens: &'a [u32],
         gen_config: &'a GenerationConfig,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
@@ -57,13 +62,11 @@ where
                 }
             }
 
-            // Encode prompt
-            let prompt_tokens = self.tokenizer.encode(prompt);
-
             if gen_config.verbose_prompt {
+                let prompt = self.tokenizer.decode(prompt_tokens).unwrap_or_default();
                 eprintln!("\nprompt: '{}'", prompt);
                 eprintln!("number of tokens in prompt = {}", prompt_tokens.len());
-                for &tok in &prompt_tokens {
+                for &tok in prompt_tokens {
                     let piece = self.tokenizer.decode(&[tok]).unwrap_or_default();
                     eprintln!("{:>6} -> '{}'", tok, piece);
                 }
@@ -79,10 +82,10 @@ where
                 max_seq_len.saturating_sub(prompt_tokens.len())
             );
 
-            let input = self.create_input_tensor(&prompt_tokens)?;
+            let input = self.create_input_tensor(prompt_tokens)?;
 
             // Token history for repetition penalty
-            let mut token_history: Vec<u32> = prompt_tokens.clone();
+            let mut token_history: Vec<u32> = prompt_tokens.to_vec();
 
             // Mirostat state (if enabled)
             let mut mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
@@ -211,7 +214,7 @@ where
                 // Helper returns result without holding MutexGuard across yield points.
                 let (cached_token_count, prefix_cache_seq_id) =
                     Self::prefix_cache_allocate(
-                        &self.prefix_cache, &prompt_tokens, block_size,
+                        &self.prefix_cache, prompt_tokens, block_size,
                         &mut paged_cache, &allocator,
                     )?;
 
@@ -220,7 +223,7 @@ where
                 {
                     let bt = paged_cache.block_table(0);
                     Self::gpu_prefix_cache_insert(
-                        &self.gpu_prefix_cache, &prompt_tokens, block_size, &bt.blocks,
+                        &self.gpu_prefix_cache, prompt_tokens, block_size, &bt.blocks,
                     );
                 }
 
@@ -332,7 +335,7 @@ where
                 );
                 #[cfg(feature = "cuda")]
                 Self::gpu_prefix_cache_release(
-                    &self.gpu_prefix_cache, &prompt_tokens, block_size,
+                    &self.gpu_prefix_cache, prompt_tokens, block_size,
                 );
                 tracing::debug!("Freed {} blocks back to pool", blocks_to_free.len());
                 tracing::info!(phase = "decode_end", backend = "paged");

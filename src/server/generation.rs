@@ -15,8 +15,9 @@ use crate::engine::FinishReason;
 
 // Re-export types and utilities from gen_types so callers import from one place.
 pub use super::gen_types::{
-    apply_keep_alive, convert_logprobs, error_response, overloaded_response,
-    validate_generation_params, LogprobResult, ResponseFormat, Usage,
+    apply_keep_alive, convert_logprobs, encode_with_allowed_special, error_response,
+    overloaded_response, policy_error_response, validate_generation_params, LogprobResult,
+    ResponseFormat, Usage,
 };
 
 #[cfg(feature = "cuda")]
@@ -102,14 +103,17 @@ pub trait HasSamplingFields {
 }
 
 /// Stream generation tokens with stop sequence checking.
+///
+/// Takes the prompt ids the handler already validated — stop sequences are
+/// matched against the *generated* text, so nothing here needs the prompt text.
 pub async fn stream_with_stop_sequences(
     executor: Arc<crate::engine::Executor<ServerRuntime>>,
-    prompt: String,
+    prompt_tokens: Vec<u32>,
     gen_config: GenerationConfig,
     tx: tokio::sync::mpsc::Sender<StreamToken>,
 ) {
     let stop_sequences = gen_config.stop_sequences.clone();
-    let stream = executor.generate(&prompt, &gen_config);
+    let stream = executor.generate(&prompt_tokens, &gen_config);
     let mut stream = std::pin::pin!(stream);
     let mut accumulated = String::new();
     let mut last_token_time = std::time::Instant::now();
@@ -196,14 +200,15 @@ pub async fn stream_with_stop_sequences(
 /// for the underlying token stream, passing decoded images and audio segments.
 pub async fn stream_multimodal_with_stop_sequences(
     executor: Arc<crate::engine::Executor<ServerRuntime>>,
-    prompt: String,
+    prompt_tokens: Vec<u32>,
     images: Vec<Vec<u8>>,
     audio_segments: Vec<Vec<f32>>,
     gen_config: GenerationConfig,
     tx: tokio::sync::mpsc::Sender<StreamToken>,
 ) {
     let stop_sequences = gen_config.stop_sequences.clone();
-    let stream = executor.generate_multimodal(&prompt, &images, &audio_segments, &gen_config);
+    let stream =
+        executor.generate_multimodal(&prompt_tokens, &images, &audio_segments, &gen_config);
     let mut stream = std::pin::pin!(stream);
     let mut accumulated = String::new();
     let mut last_token_time = std::time::Instant::now();
@@ -295,11 +300,9 @@ pub struct BatchedGenerationResult {
 /// Used by chat/completion handlers when continuous batching is enabled.
 pub async fn generate_via_scheduler(
     request_scheduler: &crate::engine::RequestScheduler,
-    executor: &Arc<crate::engine::Executor<ServerRuntime>>,
-    prompt: &str,
+    prompt_tokens: Vec<u32>,
     gen_config: &GenerationConfig,
 ) -> Result<BatchedGenerationResult, String> {
-    let prompt_tokens = executor.tokenizer().encode(prompt);
     let prompt_len = prompt_tokens.len();
     let start = std::time::Instant::now();
 

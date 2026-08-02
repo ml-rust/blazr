@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use tokio::sync::RwLock;
 
-use super::generation::error_response;
+use super::generation::{encode_with_allowed_special, error_response, policy_error_response};
 use super::metrics;
 use super::tools::{request_msg_to_chat_msg, ChatRequestMessage};
 use crate::config::UserConfig;
@@ -286,7 +286,16 @@ pub async fn tokenize(
         }
     };
 
-    let tokens = executor.tokenizer().encode(&request.content);
+    // Untrusted text with no chat template around it: nothing in it becomes a
+    // control token unless the caller explicitly asks for that token by name.
+    let tokens = match encode_with_allowed_special(
+        executor.tokenizer(),
+        &request.content,
+        request.allowed_special.as_deref(),
+    ) {
+        Ok(tokens) => tokens,
+        Err(e) => return policy_error_response(&e),
+    };
     let response = TokenizeResponse {
         tokens: tokens.iter().map(|&t| t as i64).collect(),
     };
@@ -361,6 +370,15 @@ pub struct ModelInfo {
 pub struct TokenizeRequest {
     pub model: String,
     pub content: String,
+    /// Special tokens the caller permits `content` to spell out, tiktoken-style.
+    ///
+    /// Absent (the default) means none: the text is encoded as ordinary
+    /// content, so a `content` of `"<|im_start|>"` yields the tokens of that
+    /// literal string rather than the real control-token id. Naming a token
+    /// here opts that one token back in; any *other* special token in the text
+    /// is then refused rather than silently promoted.
+    #[serde(default)]
+    pub allowed_special: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]

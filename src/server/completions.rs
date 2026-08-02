@@ -12,10 +12,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::generation::{
-    apply_keep_alive, convert_logprobs, decode_context_prefix, error_response,
-    generate_via_scheduler, overloaded_response, record_generation_metrics,
-    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, LogprobResult,
-    ResponseFormat, SamplingParams, Usage,
+    apply_keep_alive, convert_logprobs, decode_context_prefix, encode_with_allowed_special,
+    error_response, generate_via_scheduler, overloaded_response, policy_error_response,
+    record_generation_metrics, stream_with_stop_sequences, validate_generation_params,
+    HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
@@ -59,9 +59,21 @@ pub async fn completions(
 
     let gen_config = request.sampling_params().into_gen_config();
 
+    // The prompt is encoded here, once, and these are the ids that reach the
+    // model. Nothing in the caller's text becomes a control token unless the
+    // request named that token in `allowed_special` — same rule and same shape
+    // as `/v1/tokenize`.
+    let prompt_tokens = match encode_with_allowed_special(
+        executor.tokenizer(),
+        &prompt,
+        request.allowed_special.as_deref(),
+    ) {
+        Ok(tokens) => tokens,
+        Err(e) => return policy_error_response(&e),
+    };
+
     // Token budget admission control
-    let prompt_token_count = executor.tokenizer().encode(&prompt).len();
-    let estimated_tokens = prompt_token_count + gen_config.max_tokens;
+    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
@@ -75,7 +87,7 @@ pub async fn completions(
 
         metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
-            stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
+            stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
             state_clone.release(budget);
             metrics::adjust_decode_slots(-1.0);
         });
@@ -103,7 +115,7 @@ pub async fn completions(
 
             // Use RequestScheduler if available (continuous batching), else direct generation
             let gen_result = if let Some(ref rs) = state.request_scheduler {
-                match generate_via_scheduler(rs, &executor, &prompt, &iter_config).await {
+                match generate_via_scheduler(rs, prompt_tokens.clone(), &iter_config).await {
                     Ok(r) => Ok(crate::engine::GenerationResult {
                         text: r.text,
                         prompt_tokens: r.prompt_tokens,
@@ -115,7 +127,7 @@ pub async fn completions(
                     Err(e) => Err(anyhow::anyhow!(e)),
                 }
             } else {
-                executor.generate_text(&prompt, &iter_config).await
+                executor.generate_text(&prompt_tokens, &iter_config).await
             };
 
             match gen_result {
@@ -206,6 +218,15 @@ pub async fn completions(
 pub struct CompletionRequest {
     pub model: String,
     pub prompt: String,
+    /// Special tokens the caller permits `prompt` to spell out, tiktoken-style.
+    ///
+    /// Absent (the default) means none: a `prompt` containing `"<|im_start|>"`
+    /// generates from the tokens of that literal string rather than from the
+    /// real control-token id. A caller hand-building a chat format opts each
+    /// token it needs back in by name; any *other* special token in the prompt
+    /// is then refused with a 400 rather than silently promoted.
+    #[serde(default)]
+    pub allowed_special: Option<Vec<String>>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
     #[serde(default)]

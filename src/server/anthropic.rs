@@ -20,7 +20,7 @@ use super::generation::{
 use super::handlers::AppState;
 use super::metrics;
 use super::streaming::{create_chat_stream, StreamToken};
-use crate::model::chat_template::ChatMessage;
+use crate::model::chat_template::{encode_chat_prompt, ChatMessage};
 
 /// Anthropic Messages API request
 #[derive(Deserialize)]
@@ -235,12 +235,23 @@ pub async fn messages(
         });
     }
 
-    let prompt = executor.chat_template().apply(&msgs);
+    // One encode of the assembled prompt, under the template's own allow-list:
+    // a control token the server did not insert is refused, not promoted.
+    let (_prompt, prompt_tokens) =
+        match encode_chat_prompt(executor.chat_template(), executor.tokenizer(), &msgs, "") {
+            Ok(encoded) => encoded,
+            Err(e) => {
+                return anthropic_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Rejected input: {}", e),
+                    "invalid_request_error",
+                );
+            }
+        };
     let gen_config = request.sampling_params().into_gen_config();
 
     // Token budget admission
-    let prompt_token_count = executor.tokenizer().encode(&prompt).len();
-    let estimated_tokens = prompt_token_count + gen_config.max_tokens;
+    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
@@ -254,7 +265,7 @@ pub async fn messages(
 
         metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
-            stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
+            stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
             state_clone.release(budget);
             metrics::adjust_decode_slots(-1.0);
         });
@@ -267,7 +278,7 @@ pub async fn messages(
         let model_name = request.model.clone();
 
         let gen_result = if let Some(ref rs) = state.request_scheduler {
-            match generate_via_scheduler(rs, &executor, &prompt, &gen_config).await {
+            match generate_via_scheduler(rs, prompt_tokens.clone(), &gen_config).await {
                 Ok(r) => Ok(crate::engine::GenerationResult {
                     text: r.text,
                     prompt_tokens: r.prompt_tokens,
@@ -279,7 +290,7 @@ pub async fn messages(
                 Err(e) => Err(anyhow::anyhow!(e)),
             }
         } else {
-            executor.generate_text(&prompt, &gen_config).await
+            executor.generate_text(&prompt_tokens, &gen_config).await
         };
 
         match gen_result {
@@ -364,11 +375,20 @@ pub async fn count_tokens(
         });
     }
 
-    let prompt = executor.chat_template().apply(&msgs);
-    let token_count = executor.tokenizer().encode(&prompt).len();
+    let (_prompt, prompt_tokens) =
+        match encode_chat_prompt(executor.chat_template(), executor.tokenizer(), &msgs, "") {
+            Ok(encoded) => encoded,
+            Err(e) => {
+                return anthropic_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Rejected input: {}", e),
+                    "invalid_request_error",
+                );
+            }
+        };
 
     let response = TokenCountResponse {
-        input_tokens: token_count,
+        input_tokens: prompt_tokens.len(),
     };
     (StatusCode::OK, Json(response)).into_response()
 }

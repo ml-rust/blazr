@@ -140,22 +140,23 @@ async fn run_cuda(
 
     // If prompt provided, generate once
     if let Some(prompt) = prompt {
+        let prompt_tokens = executor.tokenizer().encode(&prompt);
         if graphs && gen_config.is_greedy() {
             if paged_attention {
                 print_generation_stream(
-                    executor.generate_with_graphs_paged(&prompt, &gen_config),
+                    executor.generate_with_graphs_paged(&prompt_tokens, &gen_config),
                     "CUDA graph mode (paged)",
                 )
                 .await?;
             } else {
                 print_generation_stream(
-                    executor.generate_with_graphs(&prompt, &gen_config),
+                    executor.generate_with_graphs(&prompt_tokens, &gen_config),
                     "CUDA graph mode",
                 )
                 .await?;
             }
         } else {
-            print_generation_stream(executor.generate(&prompt, &gen_config), "").await?;
+            print_generation_stream(executor.generate(&prompt_tokens, &gen_config), "").await?;
         }
         return Ok(());
     }
@@ -202,7 +203,8 @@ async fn run_cpu(
 
     // If prompt provided, generate once
     if let Some(prompt) = prompt {
-        print_generation_stream(executor.generate(&prompt, &gen_config), "").await?;
+        let prompt_tokens = executor.tokenizer().encode(&prompt);
+        print_generation_stream(executor.generate(&prompt_tokens, &gen_config), "").await?;
         return Ok(());
     }
 
@@ -297,7 +299,8 @@ where
         }
 
         turn_count += 1;
-        print_generation_stream(executor.generate(&input, gen_config), "").await?;
+        let prompt_tokens = executor.tokenizer().encode(&input);
+        print_generation_stream(executor.generate(&prompt_tokens, gen_config), "").await?;
         println!();
     }
 

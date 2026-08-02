@@ -6,7 +6,7 @@
 //! The endpoint takes a `prefix` and `suffix`, wraps them with the model's
 //! FIM special tokens, and generates the middle portion.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use axum::{
@@ -17,9 +17,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::generation::{
-    apply_keep_alive, error_response, overloaded_response, record_generation_metrics,
-    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, SamplingParams,
-    Usage,
+    apply_keep_alive, error_response, overloaded_response, policy_error_response,
+    record_generation_metrics, stream_with_stop_sequences, validate_generation_params,
+    HasSamplingFields, SamplingParams, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
@@ -30,47 +30,45 @@ const FIM_PREFIX_TOKEN: &str = "<|fim_prefix|>";
 const FIM_MIDDLE_TOKEN: &str = "<|fim_middle|>";
 const FIM_SUFFIX_TOKEN: &str = "<|fim_suffix|>";
 
-/// Build a FIM prompt from prefix and suffix using special token IDs.
+/// The only special tokens this endpoint inserts, and therefore the only ones
+/// the assembled prompt may contain — a `prefix` spelling out `<|im_start|>` is
+/// refused rather than promoted to that control token's id.
+///
+/// Built once: every infill request borrows it.
+static FIM_MARKERS: LazyLock<splintr::FxHashSet<String>> = LazyLock::new(|| {
+    [FIM_PREFIX_TOKEN, FIM_MIDDLE_TOKEN, FIM_SUFFIX_TOKEN]
+        .iter()
+        .map(|t| (*t).to_string())
+        .collect()
+});
+
+/// Build a FIM prompt from prefix and suffix using the model's FIM markers.
 ///
 /// PSM order (prefix-suffix-middle): `<fim_prefix>PREFIX<fim_suffix>SUFFIX<fim_middle>`
 /// This is the standard order used by StarCoder, CodeLlama, and OpenAI models.
+///
+/// The markers go in as their literal spellings, which is exactly what the
+/// allow-list names, so the encode below turns them into the same ids
+/// `special_token_id` reports here.
 fn build_fim_prompt(
     tokenizer: &splintr::AnyTokenizer,
     prefix: &str,
     suffix: &str,
 ) -> Result<String, String> {
     // Check if tokenizer supports FIM tokens
-    let fim_prefix = tokenizer
-        .special_token_id(FIM_PREFIX_TOKEN)
-        .ok_or_else(|| {
-            "Model tokenizer does not support FIM tokens (<|fim_prefix|>)".to_string()
-        })?;
-    let fim_suffix = tokenizer
-        .special_token_id(FIM_SUFFIX_TOKEN)
-        .ok_or_else(|| {
-            "Model tokenizer does not support FIM tokens (<|fim_suffix|>)".to_string()
-        })?;
-    let fim_middle = tokenizer
-        .special_token_id(FIM_MIDDLE_TOKEN)
-        .ok_or_else(|| {
-            "Model tokenizer does not support FIM tokens (<|fim_middle|>)".to_string()
-        })?;
-
-    // Decode token IDs to their string representations
-    let prefix_tok = tokenizer
-        .decode(&[fim_prefix])
-        .map_err(|e| format!("Failed to decode FIM prefix token: {}", e))?;
-    let suffix_tok = tokenizer
-        .decode(&[fim_suffix])
-        .map_err(|e| format!("Failed to decode FIM suffix token: {}", e))?;
-    let middle_tok = tokenizer
-        .decode(&[fim_middle])
-        .map_err(|e| format!("Failed to decode FIM middle token: {}", e))?;
+    for token in [FIM_PREFIX_TOKEN, FIM_SUFFIX_TOKEN, FIM_MIDDLE_TOKEN] {
+        if tokenizer.special_token_id(token).is_none() {
+            return Err(format!(
+                "Model tokenizer does not support FIM tokens ({})",
+                token
+            ));
+        }
+    }
 
     // PSM order: <fim_prefix>PREFIX<fim_suffix>SUFFIX<fim_middle>
     Ok(format!(
         "{}{}{}{}{}",
-        prefix_tok, prefix, suffix_tok, suffix, middle_tok
+        FIM_PREFIX_TOKEN, prefix, FIM_SUFFIX_TOKEN, suffix, FIM_MIDDLE_TOKEN
     ))
 }
 
@@ -112,9 +110,17 @@ pub async fn infill(
 
     let gen_config = request.sampling_params().into_gen_config();
 
-    // Token budget admission control
-    let prompt_token_count = executor.tokenizer().encode(&prompt).len();
-    let estimated_tokens = prompt_token_count + gen_config.max_tokens;
+    // Token budget admission control. The single encode of the assembled prompt
+    // doubles as the gate: only the FIM markers this endpoint inserted are
+    // allowed to be control tokens.
+    let prompt_tokens = match executor
+        .tokenizer()
+        .encode_with(&prompt, &splintr::SpecialMode::Allow(&FIM_MARKERS))
+    {
+        Ok(tokens) => tokens,
+        Err(e) => return policy_error_response(&e),
+    };
+    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
@@ -128,7 +134,7 @@ pub async fn infill(
 
         metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
-            stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
+            stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
             state_clone.release(budget);
             metrics::adjust_decode_slots(-1.0);
         });
@@ -140,7 +146,7 @@ pub async fn infill(
         let model_name = request.model.clone();
         let start = Instant::now();
 
-        match executor.generate_text(&prompt, &gen_config).await {
+        match executor.generate_text(&prompt_tokens, &gen_config).await {
             Ok(result) => {
                 let elapsed = start.elapsed();
                 record_generation_metrics(

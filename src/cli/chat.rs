@@ -156,7 +156,8 @@ pub async fn chat(
 
         // Stream generation
         let start = std::time::Instant::now();
-        let stream = executor.generate(&prompt, &gen_config);
+        let prompt_tokens = executor.tokenizer().encode(&prompt);
+        let stream = executor.generate(&prompt_tokens, &gen_config);
         let mut stream = std::pin::pin!(stream);
         let mut response_text = String::new();
         let mut token_count = 0usize;

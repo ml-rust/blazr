@@ -12,7 +12,7 @@ use axum::{
 use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
 use super::generation::{
     apply_keep_alive, convert_logprobs, decode_context_prefix, error_response,
-    generate_via_scheduler, overloaded_response, record_generation_metrics,
+    generate_via_scheduler, overloaded_response, policy_error_response, record_generation_metrics,
     stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
     HasSamplingFields, Usage,
 };
@@ -20,6 +20,7 @@ use super::handlers::AppState;
 use super::metrics;
 use super::streaming::{create_chat_stream, StreamToken};
 use super::tools::{build_tools_system_prompt, extract_tool_calls, request_msg_to_chat_msg};
+use crate::model::chat_template::encode_chat_prompt;
 
 /// Chat completion endpoint
 pub async fn chat_completions(
@@ -117,13 +118,29 @@ pub async fn chat_completions(
         );
     }
 
-    let prompt = if request.raw.unwrap_or(false) {
-        request
-            .messages
-            .iter()
-            .map(|m| m.content.as_ref().map(|c| c.text()).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join("\n")
+    // The prompt is encoded here, once, under an explicit special-token policy:
+    // whatever the server itself inserts is allowed and everything else in the
+    // caller's text is refused. The ids double as the token-budget count.
+    let (_prompt, prompt_tokens) = if request.raw.unwrap_or(false) {
+        // Raw mode inserts no delimiters of its own, so nothing in the caller's
+        // text may become a control token.
+        let raw_prompt = format!(
+            "{}{}",
+            context_prefix,
+            request
+                .messages
+                .iter()
+                .map(|m| m.content.as_ref().map(|c| c.text()).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        match executor
+            .tokenizer()
+            .encode_with(&raw_prompt, &splintr::SpecialMode::Ordinary)
+        {
+            Ok(ids) => (raw_prompt, ids),
+            Err(e) => return policy_error_response(&e),
+        }
     } else {
         let mut msgs: Vec<crate::model::chat_template::ChatMessage> = Vec::new();
         if let Some(ref sys) = request.system {
@@ -143,23 +160,23 @@ pub async fn chat_completions(
             });
         }
         msgs.extend(request.messages.iter().map(request_msg_to_chat_msg));
-        if let Some(ref tpl_name) = request.template {
-            crate::model::chat_template::ChatTemplate::from_name(tpl_name).apply(&msgs)
-        } else {
-            executor.chat_template().apply(&msgs)
+        let override_template = request
+            .template
+            .as_deref()
+            .map(crate::model::chat_template::ChatTemplate::from_name);
+        let template = override_template
+            .as_ref()
+            .unwrap_or_else(|| executor.chat_template());
+        match encode_chat_prompt(template, executor.tokenizer(), &msgs, &context_prefix) {
+            Ok(encoded) => encoded,
+            Err(e) => return policy_error_response(&e),
         }
-    };
-    let prompt = if context_prefix.is_empty() {
-        prompt
-    } else {
-        format!("{}{}", context_prefix, prompt)
     };
 
     let gen_config = request.sampling_params().into_gen_config();
 
     // Token budget admission control
-    let prompt_token_count = executor.tokenizer().encode(&prompt).len();
-    let estimated_tokens = prompt_token_count + gen_config.max_tokens;
+    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
@@ -176,7 +193,7 @@ pub async fn chat_completions(
             tokio::spawn(async move {
                 stream_multimodal_with_stop_sequences(
                     executor,
-                    prompt,
+                    prompt_tokens,
                     decoded_images,
                     decoded_audio,
                     gen_config,
@@ -188,7 +205,7 @@ pub async fn chat_completions(
             });
         } else {
             tokio::spawn(async move {
-                stream_with_stop_sequences(executor, prompt, gen_config, tx).await;
+                stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
                 state_clone.release(budget);
                 metrics::adjust_decode_slots(-1.0);
             });
@@ -219,14 +236,14 @@ pub async fn chat_completions(
             let gen_result = if has_multimodal {
                 executor
                     .generate_multimodal_text(
-                        &prompt,
+                        &prompt_tokens,
                         &decoded_images,
                         &decoded_audio,
                         &iter_config,
                     )
                     .await
             } else if let Some(ref rs) = state.request_scheduler {
-                match generate_via_scheduler(rs, &executor, &prompt, &iter_config).await {
+                match generate_via_scheduler(rs, prompt_tokens.clone(), &iter_config).await {
                     Ok(r) => Ok(crate::engine::GenerationResult {
                         text: r.text,
                         prompt_tokens: r.prompt_tokens,
@@ -238,7 +255,7 @@ pub async fn chat_completions(
                     Err(e) => Err(anyhow::anyhow!(e)),
                 }
             } else {
-                executor.generate_text(&prompt, &iter_config).await
+                executor.generate_text(&prompt_tokens, &iter_config).await
             };
 
             match gen_result {

@@ -19,7 +19,7 @@ distributed = ["boostr/distributed", "dep:nexar"]
 
 [dependencies]
 # ML framework (model architectures, quant kernels, tensors via numr)
-boostr = { version = "0.2" }
+boostr = { version = "0.3" }
 
 # Tokenization
 splintr = { path = "../splintr" }

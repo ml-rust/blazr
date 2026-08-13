@@ -22,7 +22,13 @@ distributed = ["boostr/distributed", "dep:nexar"]
 boostr = { version = "0.3" }
 
 # Tokenization
-splintr = { path = "../splintr" }
+splintr = { version = "0.19", features = [
+  "vocab-cl100k",
+  "vocab-o200k",
+  "vocab-llama3",
+  "vocab-deepseek",
+  "vocab-mistral",
+] }
 
 # HTTP server
 axum = { version = "0.7", features = ["multipart"] }

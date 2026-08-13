@@ -1685,9 +1685,9 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "memchr"
-version = "2.7.6"
+version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memmap2"
@@ -2521,9 +2521,9 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "regexr"
-version = "0.1.4"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e93fd33a634983f485658be34b8c86bdec960278d958bc5dc378b942e904e3b"
+checksum = "4517eabcacff4d42a9242a75b867b37d54593beec2a427b514bfb646bb32c2c7"
 dependencies = [
  "aho-corasick",
  "dynasm",
@@ -3087,18 +3087,77 @@ checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "splintr"
-version = "0.11.0"
+version = "0.19.1"
 dependencies = [
  "aho-corasick",
  "base64",
  "lru",
+ "memchr",
  "rayon",
  "regexr",
  "rustc-hash",
+ "serde",
  "serde_json",
+ "splintr-vocab-cl100k",
+ "splintr-vocab-deepseek",
+ "splintr-vocab-llama3",
+ "splintr-vocab-mistral",
+ "splintr-vocab-o200k",
+ "splintr-vocab-whisper",
  "thiserror 2.0.17",
  "unicode-general-category",
  "unicode-normalization",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "splintr-vocab-cl100k"
+version = "1.0.0"
+dependencies = [
+ "splintr-vocab-pack",
+]
+
+[[package]]
+name = "splintr-vocab-deepseek"
+version = "1.0.0"
+dependencies = [
+ "splintr-vocab-pack",
+]
+
+[[package]]
+name = "splintr-vocab-llama3"
+version = "1.0.0"
+dependencies = [
+ "splintr-vocab-pack",
+]
+
+[[package]]
+name = "splintr-vocab-mistral"
+version = "1.0.0"
+dependencies = [
+ "splintr-vocab-pack",
+]
+
+[[package]]
+name = "splintr-vocab-o200k"
+version = "1.0.0"
+dependencies = [
+ "splintr-vocab-pack",
+]
+
+[[package]]
+name = "splintr-vocab-pack"
+version = "1.2.0"
+dependencies = [
+ "base64",
+ "serde_json",
+]
+
+[[package]]
+name = "splintr-vocab-whisper"
+version = "1.0.0"
+dependencies = [
+ "splintr-vocab-pack",
 ]
 
 [[package]]

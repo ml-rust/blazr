@@ -77,7 +77,8 @@ pub fn transcribe_once(
     chunk[..take].copy_from_slice(&samples[..take]);
 
     // 2. Mel spectrogram. Output layout: `[num_mel_bins, num_frames]`.
-    let mel = compute_mel_spectrogram(&chunk, bundle.num_mel_bins, 16_000);
+    let mel = compute_mel_spectrogram(&chunk, bundle.num_mel_bins, 16_000)
+        .map_err(|e| anyhow!("mel spectrogram: {e}"))?;
     let num_frames = mel.len() / bundle.num_mel_bins;
     if num_frames == 0 {
         return Err(anyhow!("mel spectrogram produced zero frames"));

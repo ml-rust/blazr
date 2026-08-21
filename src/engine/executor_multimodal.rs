@@ -140,7 +140,8 @@ where
                 for (i, samples) in audio_segments.iter().enumerate() {
                     let mel = boostr::model::audio::mel::compute_mel_spectrogram(
                         samples, num_mel_bins, sample_rate,
-                    );
+                    )
+                    .map_err(|e| anyhow!("Mel spectrogram failed: {}", e))?;
                     let frames = mel.len() / num_mel_bins;
                     if i == 0 {
                         num_frames = frames;

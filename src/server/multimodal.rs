@@ -238,9 +238,11 @@ impl AudioFormat {
 /// Convert raw PCM16 little-endian bytes to f32 samples normalized to [-1.0, 1.0].
 fn pcm16_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+            let sample = i16::from_le_bytes(*chunk);
             sample as f32 / 32768.0
         })
         .collect()

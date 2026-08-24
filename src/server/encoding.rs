@@ -132,8 +132,10 @@ mod tests {
         let encoded = encode_f32_base64(&data);
         let decoded = base64_decode(&encoded).unwrap();
         let floats: Vec<f32> = decoded
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         assert_eq!(floats, data);
     }

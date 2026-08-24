@@ -41,7 +41,7 @@ where
 
         let ids_i64: Vec<i64> = token_ids.iter().map(|&t| t as i64).collect();
         let seq_len = ids_i64.len();
-        let input = Tensor::<R>::try_from_slice(&ids_i64, &[1, seq_len], device)?;
+        let input = Tensor::<R>::from_slice(&ids_i64, &[1, seq_len], device)?;
 
         let hidden_var = self.model.forward_hidden(&input)?;
         let hidden_tensor = hidden_var.tensor();

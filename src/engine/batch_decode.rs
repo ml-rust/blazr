@@ -114,11 +114,11 @@ where
     // Build batched tensors.
     // input: [N, 1] i64
     let tokens_flat: Vec<i64> = seq_data.iter().map(|s| s.last_token as i64).collect();
-    let input = Tensor::try_from_slice(&tokens_flat, &[n, 1], device)?;
+    let input = Tensor::from_slice(&tokens_flat, &[n, 1], device)?;
 
     // slot_mapping: [N]
     let slots_flat: Vec<i32> = seq_data.iter().map(|s| s.slot).collect();
-    let slot_mapping = Tensor::try_from_slice(&slots_flat, &[n], device)?;
+    let slot_mapping = Tensor::from_slice(&slots_flat, &[n], device)?;
 
     // block_table: [N, max_num_blocks] — shorter tables padded with 0
     let mut bt_flat: Vec<i32> = vec![0i32; n * max_num_blocks];
@@ -128,7 +128,7 @@ where
             bt_flat[row_start + j] = b;
         }
     }
-    let block_table_tensor = Tensor::try_from_slice(&bt_flat, &[n, max_num_blocks], device)?;
+    let block_table_tensor = Tensor::from_slice(&bt_flat, &[n, max_num_blocks], device)?;
 
     // Use the maximum seq_len across all sequences for the attention kernel.
     let max_seq_len = seq_data.iter().map(|s| s.seq_len).max().unwrap_or(1);

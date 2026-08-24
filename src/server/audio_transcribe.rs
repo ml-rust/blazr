@@ -90,7 +90,7 @@ pub fn transcribe_once(
 
     // 3. Build tensor `[1, num_mel_bins, num_frames]` on the runtime's device.
     let device = <ServerRuntime as Runtime>::default_device();
-    let mel_tensor = Tensor::<ServerRuntime>::try_from_slice(
+    let mel_tensor = Tensor::<ServerRuntime>::from_slice(
         &mel,
         &[1, bundle.num_mel_bins, WHISPER_CHUNK_FRAMES],
         &device,

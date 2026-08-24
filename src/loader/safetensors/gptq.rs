@@ -269,5 +269,5 @@ fn cast_f16_bytes_to_f32<R: Runtime<DType = DType>>(
 ) -> Result<Tensor<R>> {
     let f16_data: &[half::f16] = bytemuck::cast_slice(bytes);
     let f32_data: Vec<f32> = f16_data.iter().map(|v| v.to_f32()).collect();
-    Ok(Tensor::<R>::try_from_slice(&f32_data, shape, device)?)
+    Ok(Tensor::<R>::from_slice(&f32_data, shape, device)?)
 }

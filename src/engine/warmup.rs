@@ -40,7 +40,7 @@ where
         let start = std::time::Instant::now();
 
         // Create a single-token input
-        let warmup_input = Tensor::try_from_slice(&[1i64], &[1, 1], self.device())?;
+        let warmup_input = Tensor::from_slice(&[1i64], &[1, 1], self.device())?;
 
         if self.model().needs_ssm_state() {
             self.warmup_mamba(&warmup_input)?;
@@ -52,7 +52,7 @@ where
 
         // Warmup argmax + pipelined D2H copy
         let vocab_size = self.model().vocab_size();
-        let dummy_logits = Tensor::try_zeros(&[1, 1, vocab_size], DType::F32, self.device())?;
+        let dummy_logits = Tensor::zeros(&[1, 1, vocab_size], DType::F32, self.device())?;
         let token_gpu = self.argmax_on_gpu(&dummy_logits)?;
         let event = token_gpu
             .record_event()
@@ -116,9 +116,9 @@ where
         let slot_vec = paged_cache
             .compute_slot_mapping(0, 1)
             .map_err(|e| anyhow!("Warmup slot mapping failed: {}", e))?;
-        let slot_mapping = Tensor::try_from_slice(&slot_vec, &[1], self.device())?;
+        let slot_mapping = Tensor::from_slice(&slot_vec, &[1], self.device())?;
         let bt_vec = paged_cache.block_table_device_format(0);
-        let block_table = Tensor::try_from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
+        let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
         paged_cache.set_seq_len(1);
 
         let _ = self
@@ -140,9 +140,9 @@ where
         let slot_vec = paged_cache
             .compute_slot_mapping(1, 1)
             .map_err(|e| anyhow!("Warmup decode slot mapping failed: {}", e))?;
-        let slot_mapping = Tensor::try_from_slice(&slot_vec, &[1], self.device())?;
+        let slot_mapping = Tensor::from_slice(&slot_vec, &[1], self.device())?;
         let bt_vec = paged_cache.block_table_device_format(0);
-        let block_table = Tensor::try_from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
+        let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
         paged_cache.set_seq_len(2);
 
         let _ = self

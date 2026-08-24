@@ -130,7 +130,7 @@ where
 
         let (token_id, _logprob) = mirostat.sample(last_logits, gen_config.temperature);
 
-        let token_tensor = Tensor::try_from_slice(&[token_id as i64], &[1], logits.device())?;
+        let token_tensor = Tensor::from_slice(&[token_id as i64], &[1], logits.device())?;
         Ok((token_tensor, token_id))
     }
 
@@ -406,7 +406,7 @@ where
                 Self::apply_typical_filter(last_logits, gen_config.typical_p);
             }
 
-            Tensor::try_from_slice(&all_logits, shape, logits.device())?
+            Tensor::from_slice(&all_logits, shape, logits.device())?
         } else {
             logits.clone()
         };
@@ -430,8 +430,8 @@ where
 
         let (ids, cnts) = Self::penalty_window(recent_tokens, gen_config.repeat_last_n);
 
-        let ids_tensor = Tensor::try_from_slice(&ids, &[ids.len()], self.device())?;
-        let cnts_tensor = Tensor::try_from_slice(&cnts, &[cnts.len()], self.device())?;
+        let ids_tensor = Tensor::from_slice(&ids, &[ids.len()], self.device())?;
+        let cnts_tensor = Tensor::from_slice(&cnts, &[cnts.len()], self.device())?;
 
         let client = R::default_client(self.device());
         let temperature = if gen_config.is_greedy() {
@@ -473,7 +473,7 @@ where
                 bias_vec[token_id as usize] = bias;
             }
         }
-        let bias_tensor = Tensor::try_from_slice(&bias_vec, &[1, 1, vocab_size], self.device())?;
+        let bias_tensor = Tensor::from_slice(&bias_vec, &[1, 1, vocab_size], self.device())?;
         logits
             .add(&bias_tensor)
             .map_err(|e| anyhow!("logit_bias add failed: {}", e))

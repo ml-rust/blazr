@@ -323,15 +323,15 @@ where
     match dtype {
         DType::F32 => {
             let data: &[f32] = bytemuck::cast_slice(bytes);
-            Ok(Tensor::try_from_slice(data, shape, device)?)
+            Ok(Tensor::from_slice(data, shape, device)?)
         }
         DType::BF16 => {
             let data: &[half::bf16] = bytemuck::cast_slice(bytes);
-            Ok(Tensor::try_from_slice(data, shape, device)?)
+            Ok(Tensor::from_slice(data, shape, device)?)
         }
         DType::F16 => {
             let data: &[half::f16] = bytemuck::cast_slice(bytes);
-            Ok(Tensor::try_from_slice(data, shape, device)?)
+            Ok(Tensor::from_slice(data, shape, device)?)
         }
         _ => Err(anyhow!("Unsupported dtype for GPU transfer: {:?}", dtype)),
     }

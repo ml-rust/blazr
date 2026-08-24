@@ -122,7 +122,7 @@ fn run_prefill_forward(
     let token_ids: &[i64] = bytemuck::cast_slice(token_ids_bytes);
     let seq_len = token_ids.len();
 
-    let input_tensor = Tensor::<ServerRuntime>::try_from_slice(token_ids, &[1, seq_len], device)?;
+    let input_tensor = Tensor::<ServerRuntime>::from_slice(token_ids, &[1, seq_len], device)?;
 
     // Embed tokens.
     let hidden = model.forward_embed(&input_tensor)?;
@@ -205,7 +205,7 @@ fn run_decode_step(
 
     // Embed the single token.
     let token_slice = [last_token_id];
-    let input_tensor = Tensor::<ServerRuntime>::try_from_slice(&token_slice, &[1, 1], device)?;
+    let input_tensor = Tensor::<ServerRuntime>::from_slice(&token_slice, &[1, 1], device)?;
     let hidden = model.forward_embed(&input_tensor)?;
 
     // Run all layers with the restored KV cache.

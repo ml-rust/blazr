@@ -228,10 +228,10 @@ where
                 })
                 .collect();
 
-            let slot_mapping = Tensor::try_from_slice(&slot_mapping_vec, &[chunk.len()], &device)?;
+            let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[chunk.len()], &device)?;
 
             let bt_vec: Vec<i32> = blocks.iter().map(|&b| b as i32).collect();
-            let block_table_tensor = Tensor::try_from_slice(&bt_vec, &[1, bt_vec.len()], &device)?;
+            let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &device)?;
 
             let input = self.executor.create_input_tensor(chunk)?;
 
@@ -373,12 +373,11 @@ where
             .collect();
 
         let device = self.executor.device();
-        let slot_mapping =
-            Tensor::try_from_slice(&slot_mapping_vec, &[prefill_tokens.len()], device)?;
+        let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prefill_tokens.len()], device)?;
 
         // Build block table tensor
         let bt_vec: Vec<i32> = blocks.iter().map(|&b| b as i32).collect();
-        let block_table_tensor = Tensor::try_from_slice(&bt_vec, &[1, bt_vec.len()], device)?;
+        let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], device)?;
 
         // Create input tensor for uncached tokens only
         let input = self.executor.create_input_tensor(prefill_tokens)?;

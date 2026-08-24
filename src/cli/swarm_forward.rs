@@ -204,7 +204,7 @@ fn run_forward(
             let token_ids: &[i64] = bytemuck::cast_slice(input_bytes);
             let seq_len = token_ids.len();
             let input_tensor =
-                Tensor::<ServerRuntime>::try_from_slice(token_ids, &[1, seq_len], device)?;
+                Tensor::<ServerRuntime>::from_slice(token_ids, &[1, seq_len], device)?;
             // Embed tokens → hidden state
             let hidden = model.forward_embed(&input_tensor)?;
             (hidden, None)
@@ -222,7 +222,7 @@ fn run_forward(
                     hidden_size
                 );
             }
-            let hidden_tensor = Tensor::<ServerRuntime>::try_from_slice(
+            let hidden_tensor = Tensor::<ServerRuntime>::from_slice(
                 &hidden_f32,
                 &[batch_size, seq_len, hidden_size],
                 device,
@@ -230,7 +230,7 @@ fn run_forward(
             let hidden_var = Var::new(hidden_tensor, false);
             let mlp_var = match prev_mlp_f32 {
                 Some(mlp_f32) => {
-                    let mlp_tensor = Tensor::<ServerRuntime>::try_from_slice(
+                    let mlp_tensor = Tensor::<ServerRuntime>::from_slice(
                         &mlp_f32,
                         &[batch_size, seq_len, hidden_size],
                         device,

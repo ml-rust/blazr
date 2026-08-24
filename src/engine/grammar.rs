@@ -131,10 +131,10 @@ impl GrammarDfa {
         }
 
         Ok(DeviceGrammarDfa {
-            transition_table: Tensor::try_from_slice(&table, &[num_states * 256], device)?,
-            accepting_mask: Tensor::try_from_slice(&accepting, &[num_states], device)?,
-            vocab_bytes: Tensor::try_from_slice(&all_bytes, &[all_bytes.len()], device)?,
-            vocab_offsets: Tensor::try_from_slice(&offsets, &[offsets.len()], device)?,
+            transition_table: Tensor::from_slice(&table, &[num_states * 256], device)?,
+            accepting_mask: Tensor::from_slice(&accepting, &[num_states], device)?,
+            vocab_bytes: Tensor::from_slice(&all_bytes, &[all_bytes.len()], device)?,
+            vocab_offsets: Tensor::from_slice(&offsets, &[offsets.len()], device)?,
             current_state: self.current_state as u32,
             num_states,
             vocab_size,

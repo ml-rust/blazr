@@ -108,7 +108,7 @@ where
                     all_pixels.extend_from_slice(&pixels);
                 }
                 let num_images = images.len();
-                let pixel_tensor: Tensor<R> = Tensor::try_from_slice(
+                let pixel_tensor: Tensor<R> = Tensor::from_slice(
                     &all_pixels,
                     &[num_images, 3, image_size, image_size],
                     &self.device,
@@ -157,7 +157,7 @@ where
                     all_mels.extend_from_slice(&mel);
                 }
                 let num_audio = audio_segments.len();
-                let mel_tensor: Tensor<R> = Tensor::try_from_slice(
+                let mel_tensor: Tensor<R> = Tensor::from_slice(
                     &all_mels,
                     &[num_audio, num_mel_bins, num_frames],
                     &self.device,

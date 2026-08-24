@@ -249,11 +249,11 @@ where
 
                 let slot_mapping_vec = paged_cache.compute_slot_mapping(prefill_start, prefill_tokens.len())
                     .map_err(|e| anyhow!("Failed to compute slot mapping: {}", e))?;
-                let slot_mapping = Tensor::try_from_slice(&slot_mapping_vec, &[prefill_tokens.len()], &self.device)?;
+                let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prefill_tokens.len()], &self.device)?;
 
                 let bt_vec = paged_cache.block_table_device_format(0);
                 let max_num_blocks = bt_vec.len();
-                let block_table_tensor = Tensor::try_from_slice(&bt_vec, &[1, max_num_blocks], &self.device)?;
+                let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, max_num_blocks], &self.device)?;
 
                 let seq_len_k = prompt_tokens.len();
                 paged_cache.set_seq_len(seq_len_k);
@@ -294,10 +294,10 @@ where
 
                     let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
                         .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
-                    let slot_mapping = Tensor::try_from_slice(&slot_vec, &[1], &self.device)?;
+                    let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device)?;
 
                     let bt_vec = paged_cache.block_table_device_format(0);
-                    let block_table_tensor = Tensor::try_from_slice(&bt_vec, &[1, bt_vec.len()], &self.device)?;
+                    let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device)?;
 
                     let new_seq_len_k = cur_seq_len + 1;
                     paged_cache.set_seq_len(new_seq_len_k);

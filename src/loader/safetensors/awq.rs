@@ -233,7 +233,7 @@ fn cast_f16_bytes_to_f32<R: Runtime<DType = DType>>(
 ) -> Result<Tensor<R>> {
     let f16_data: &[half::f16] = bytemuck::cast_slice(bytes);
     let f32_data: Vec<f32> = f16_data.iter().map(|v| v.to_f32()).collect();
-    Ok(Tensor::<R>::try_from_slice(&f32_data, shape, device)?)
+    Ok(Tensor::<R>::from_slice(&f32_data, shape, device)?)
 }
 
 /// Unpack AWQ-packed qzeros from [num_groups, N/8] int32 → [num_groups, N] f32
@@ -259,7 +259,7 @@ fn unpack_awq_zeros<R: Runtime<DType = DType>>(
         }
     }
 
-    Ok(Tensor::<R>::try_from_slice(
+    Ok(Tensor::<R>::from_slice(
         &unpacked,
         &[num_groups, n],
         device,

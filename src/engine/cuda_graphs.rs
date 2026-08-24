@@ -84,16 +84,16 @@ impl Executor<boostr::CudaRuntime> {
             let client = CudaRt::default_client(self.device());
 
             // ── Stable-address decode inputs (ALL allocated BEFORE graph capture) ──
-            let token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(&[1, 1], boostr::DType::I64, self.device())?;
+            let token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?;
 
-            let cos_slice_t = boostr::Tensor::<CudaRuntime>::try_zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
-            let sin_slice_t = boostr::Tensor::<CudaRuntime>::try_zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
+            let cos_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
+            let sin_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
             let cos_slice = Var::new(cos_slice_t, false);
             let sin_slice = Var::new(sin_slice_t, false);
 
             let device_scalars = DeviceScalars::new(kv_cache.seq_len(), self.device())?;
 
-            let next_token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(&[1], boostr::DType::I64, self.device())?;
+            let next_token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device())?;
 
             // ── Warmup pass: JIT all kernels, do NOT capture yet ──
             device_scalars.update(&client, kv_cache.seq_len())
@@ -248,11 +248,11 @@ impl Executor<boostr::CudaRuntime> {
             // ── Prefill via normal paged path ──
             let slot_mapping_vec = paged_cache.compute_slot_mapping(0, prompt_tokens.len())
                 .map_err(|e| anyhow!("Failed to compute prefill slot mapping: {}", e))?;
-            let prefill_slot_mapping = Tensor::try_from_slice(&slot_mapping_vec, &[prompt_tokens.len()], self.device())?;
+            let prefill_slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prompt_tokens.len()], self.device())?;
 
             let bt_vec = paged_cache.block_table_device_format(0);
             let max_num_blocks_bt = bt_vec.len();
-            let block_table = Tensor::try_from_slice(&bt_vec, &[1, max_num_blocks_bt], self.device())?;
+            let block_table = Tensor::from_slice(&bt_vec, &[1, max_num_blocks_bt], self.device())?;
 
             let seq_len_k = prompt_tokens.len();
             paged_cache.set_seq_len(seq_len_k);
@@ -274,19 +274,19 @@ impl Executor<boostr::CudaRuntime> {
             let client = CudaRt::default_client(self.device());
 
             // ── Stable-address tensors (ALL allocated BEFORE graph capture) ──
-            let token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(&[1, 1], boostr::DType::I64, self.device())?;
-            let cos_slice_t = boostr::Tensor::<CudaRuntime>::try_zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
-            let sin_slice_t = boostr::Tensor::<CudaRuntime>::try_zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
+            let token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?;
+            let cos_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
+            let sin_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
             let cos_slice = Var::new(cos_slice_t, false);
             let sin_slice = Var::new(sin_slice_t, false);
 
             // Slot mapping for single-token decode — stable address, value updated per step
-            let slot_mapping = boostr::Tensor::<CudaRuntime>::try_from_slice(
+            let slot_mapping = boostr::Tensor::<CudaRuntime>::from_slice(
                 &[seq_len_k as i32], &[1], self.device(),
             )?;
 
             let device_scalars = DeviceScalars::new(seq_len_k, self.device())?;
-            let next_token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(&[1], boostr::DType::I64, self.device())?;
+            let next_token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device())?;
 
             // ── Warmup pass (JIT kernels) ──
             device_scalars.update(&client, seq_len_k)
@@ -307,9 +307,9 @@ impl Executor<boostr::CudaRuntime> {
 
             let slot_mapping_vec = paged_cache.compute_slot_mapping(0, prompt_tokens.len())
                 .map_err(|e| anyhow!("Failed to re-compute prefill slot mapping: {}", e))?;
-            let prefill_slot_mapping = Tensor::try_from_slice(&slot_mapping_vec, &[prompt_tokens.len()], self.device())?;
+            let prefill_slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prompt_tokens.len()], self.device())?;
             let bt_vec = paged_cache.block_table_device_format(0);
-            let block_table = Tensor::try_from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
+            let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
             paged_cache.set_seq_len(seq_len_k);
 
             let _ = self.model().forward_with_paged_kv_cache(

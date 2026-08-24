@@ -462,7 +462,7 @@ async fn run_audio_pipeline(
         }
     };
 
-    // Decode audio off the executor thread — symphonia + rubato are CPU-bound.
+    // Decode audio off the executor thread — the boostr decode/resample path is CPU-bound.
     let ext_for_decode = file_ext.clone();
     let samples = match tokio::task::spawn_blocking(move || {
         decode_to_whisper_input(&file, ext_for_decode.as_deref())

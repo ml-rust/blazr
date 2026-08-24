@@ -305,10 +305,20 @@ pub async fn speech(
     };
 
     // Encode the produced waveform.
-    let (bytes, content_type) = match request.response_format.as_str() {
-        "pcm" => (encode_pcm16_raw(&samples), "audio/L16"),
-        "f32" => (encode_wav_f32(&samples, bundle.sample_rate), "audio/wav"),
-        _ => (encode_wav_pcm16(&samples, bundle.sample_rate), "audio/wav"),
+    let encoded = match request.response_format.as_str() {
+        "pcm" => Ok((encode_pcm16_raw(&samples), "audio/L16")),
+        "f32" => encode_wav_f32(&samples, bundle.sample_rate).map(|b| (b, "audio/wav")),
+        _ => encode_wav_pcm16(&samples, bundle.sample_rate).map(|b| (b, "audio/wav")),
+    };
+    let (bytes, content_type) = match encoded {
+        Ok(encoded) => encoded,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("WAV encode failed: {e}"),
+                "server_error",
+            );
+        }
     };
 
     let mut resp = (StatusCode::OK, bytes).into_response();

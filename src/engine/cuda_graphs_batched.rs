@@ -64,40 +64,46 @@ impl Executor<boostr::CudaRuntime> {
 
         // ── Stable-address tensors — ALL allocated BEFORE graph capture ──
         // token_buf: [max_batch_size, 1] — one token per sequence per step
-        let token_buf = boostr::Tensor::<CudaRuntime>::zeros(
+        let token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(
             &[max_batch_size, 1],
             boostr::DType::I64,
             self.device(),
-        );
+        )?;
 
         // cos/sin slices for the shared decode position
-        let cos_slice_t =
-            boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device());
-        let sin_slice_t =
-            boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device());
+        let cos_slice_t = boostr::Tensor::<CudaRuntime>::try_zeros(
+            &[1, half_dim],
+            boostr::DType::F32,
+            self.device(),
+        )?;
+        let sin_slice_t = boostr::Tensor::<CudaRuntime>::try_zeros(
+            &[1, half_dim],
+            boostr::DType::F32,
+            self.device(),
+        )?;
         let cos_slice = Var::new(cos_slice_t, false);
         let sin_slice = Var::new(sin_slice_t, false);
 
         // slot_mapping: [max_batch_size] — one decode slot per sequence
-        let slot_mapping = boostr::Tensor::<CudaRuntime>::zeros(
+        let slot_mapping = boostr::Tensor::<CudaRuntime>::try_zeros(
             &[max_batch_size],
             boostr::DType::I32,
             self.device(),
-        );
+        )?;
 
         // block_table: [max_batch_size, max_blocks_per_seq]
-        let block_table = boostr::Tensor::<CudaRuntime>::zeros(
+        let block_table = boostr::Tensor::<CudaRuntime>::try_zeros(
             &[max_batch_size, max_blocks_per_seq],
             boostr::DType::I32,
             self.device(),
-        );
+        )?;
 
         // output: [max_batch_size] — argmax token per sequence
-        let next_token_buf = boostr::Tensor::<CudaRuntime>::zeros(
+        let next_token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(
             &[max_batch_size],
             boostr::DType::I64,
             self.device(),
-        );
+        )?;
 
         let device_scalars = DeviceScalars::new(initial_seq_len_k, self.device());
 

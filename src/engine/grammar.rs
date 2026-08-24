@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use anyhow::Result;
 use boostr::ops::traits::inference::grammar::INVALID_STATE;
 use boostr::{DeviceGrammarDfa, Runtime, Tensor};
 
@@ -87,11 +88,13 @@ impl GrammarDfa {
     ///
     /// Flattens the transition table to `[num_states * 256]` i32 and builds
     /// concatenated vocab byte buffers with offsets.
+    ///
+    /// Returns an error if any of the device tensors cannot be allocated.
     pub fn to_device<R: Runtime<DType = boostr::DType>>(
         &self,
         vocab_bytes_list: &[Vec<u8>],
         device: &R::Device,
-    ) -> DeviceGrammarDfa<R> {
+    ) -> Result<DeviceGrammarDfa<R>> {
         let num_states = self.transitions.len();
         let vocab_size = vocab_bytes_list.len();
 
@@ -127,15 +130,15 @@ impl GrammarDfa {
             all_bytes.push(0.0);
         }
 
-        DeviceGrammarDfa {
-            transition_table: Tensor::from_slice(&table, &[num_states * 256], device),
-            accepting_mask: Tensor::from_slice(&accepting, &[num_states], device),
-            vocab_bytes: Tensor::from_slice(&all_bytes, &[all_bytes.len()], device),
-            vocab_offsets: Tensor::from_slice(&offsets, &[offsets.len()], device),
+        Ok(DeviceGrammarDfa {
+            transition_table: Tensor::try_from_slice(&table, &[num_states * 256], device)?,
+            accepting_mask: Tensor::try_from_slice(&accepting, &[num_states], device)?,
+            vocab_bytes: Tensor::try_from_slice(&all_bytes, &[all_bytes.len()], device)?,
+            vocab_offsets: Tensor::try_from_slice(&offsets, &[offsets.len()], device)?,
             current_state: self.current_state as u32,
             num_states,
             vocab_size,
-        }
+        })
     }
 
     /// Apply grammar mask to logits: set disallowed tokens to -inf

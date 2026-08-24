@@ -74,13 +74,15 @@ pub fn deserialize_activation(bytes: &[u8]) -> Result<(Vec<f32>, Option<Vec<f32>
 /// and serializes the output activations (or logits for the final stage).
 ///
 /// KV cache is protected by a Mutex so the `Fn` closure can call it repeatedly.
+///
+/// Returns an error if the SSM state for a Mamba model cannot be allocated.
 pub fn build_forward_fn(
     model: Arc<boostr::model::LoadedModel<ServerRuntime>>,
     device: <ServerRuntime as boostr::Runtime>::Device,
     assignment: crate::distributed::transport::LayerAssignment,
     has_prev_rank: bool,
     has_next_rank: bool,
-) -> crate::distributed::worker::ForwardFn {
+) -> Result<crate::distributed::worker::ForwardFn> {
     use boostr::inference::{LayeredKvCache, LayeredSsmState};
     use boostr::DType;
     use std::sync::Mutex;
@@ -123,7 +125,7 @@ pub fn build_forward_fn(
                 mamba_cfg,
                 DType::F32,
                 &device,
-            )))
+            )?))
         } else {
             None
         }
@@ -136,28 +138,30 @@ pub fn build_forward_fn(
     let model = Arc::clone(&model);
     let device = device.clone();
 
-    Box::new(move |input_bytes: &[u8], size_hint: usize| -> Vec<u8> {
-        let result = run_forward(
-            &model,
-            &device,
-            input_bytes,
-            size_hint,
-            has_prev_rank,
-            has_next_rank,
-            start_layer,
-            end_layer,
-            hidden_size,
-            &kv_cache,
-            &ssm_state,
-        );
-        match result {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!("Worker forward pass failed: {}", e);
-                Vec::new()
+    Ok(Box::new(
+        move |input_bytes: &[u8], size_hint: usize| -> Vec<u8> {
+            let result = run_forward(
+                &model,
+                &device,
+                input_bytes,
+                size_hint,
+                has_prev_rank,
+                has_next_rank,
+                start_layer,
+                end_layer,
+                hidden_size,
+                &kv_cache,
+                &ssm_state,
+            );
+            match result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::error!("Worker forward pass failed: {}", e);
+                    Vec::new()
+                }
             }
-        }
-    })
+        },
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -200,7 +204,7 @@ fn run_forward(
             let token_ids: &[i64] = bytemuck::cast_slice(input_bytes);
             let seq_len = token_ids.len();
             let input_tensor =
-                Tensor::<ServerRuntime>::from_slice(token_ids, &[1, seq_len], device);
+                Tensor::<ServerRuntime>::try_from_slice(token_ids, &[1, seq_len], device)?;
             // Embed tokens → hidden state
             let hidden = model.forward_embed(&input_tensor)?;
             (hidden, None)
@@ -218,20 +222,23 @@ fn run_forward(
                     hidden_size
                 );
             }
-            let hidden_tensor = Tensor::<ServerRuntime>::from_slice(
+            let hidden_tensor = Tensor::<ServerRuntime>::try_from_slice(
                 &hidden_f32,
                 &[batch_size, seq_len, hidden_size],
                 device,
-            );
+            )?;
             let hidden_var = Var::new(hidden_tensor, false);
-            let mlp_var = prev_mlp_f32.map(|mlp_f32| {
-                let mlp_tensor = Tensor::<ServerRuntime>::from_slice(
-                    &mlp_f32,
-                    &[batch_size, seq_len, hidden_size],
-                    device,
-                );
-                Var::new(mlp_tensor, false)
-            });
+            let mlp_var = match prev_mlp_f32 {
+                Some(mlp_f32) => {
+                    let mlp_tensor = Tensor::<ServerRuntime>::try_from_slice(
+                        &mlp_f32,
+                        &[batch_size, seq_len, hidden_size],
+                        device,
+                    )?;
+                    Some(Var::new(mlp_tensor, false))
+                }
+                None => None,
+            };
             (hidden_var, mlp_var)
         };
 

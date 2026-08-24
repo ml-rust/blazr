@@ -243,15 +243,12 @@ fn load_cuda(model: &str, num_ctx: usize) -> Result<Executor<ChatRuntime>> {
     load_model_from_source!(model, device, num_ctx)
 }
 
+// Gated to mirror `load_cuda` above. Previously this was defined
+// unconditionally with an `unreachable!()` cuda branch, which made it dead code
+// under `--features cuda` — and put a panic in a path the compiler can rule out
+// entirely.
+#[cfg(not(feature = "cuda"))]
 fn load_cpu(model: &str, num_ctx: usize) -> Result<Executor<ChatRuntime>> {
-    #[cfg(feature = "cuda")]
-    {
-        let _ = (model, num_ctx);
-        unreachable!("load_cpu should not be called when cuda feature is enabled");
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        let device = boostr::CpuDevice::new();
-        load_model_from_source!(model, device, num_ctx)
-    }
+    let device = boostr::CpuDevice::new();
+    load_model_from_source!(model, device, num_ctx)
 }

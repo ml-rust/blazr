@@ -75,39 +75,36 @@ impl<R: Runtime> LoraAdapterRegistry<R> {
     /// Insert a loaded adapter.
     ///
     /// If an adapter with the same name already exists it is replaced.
+    ///
+    /// # Lock poisoning
+    ///
+    /// Every method here recovers a poisoned lock via `into_inner()` rather
+    /// than panicking. The guarded value is a plain `HashMap` of adapters: a
+    /// panic elsewhere while holding the lock cannot leave it in a state that
+    /// is unsafe to read, only one where an insert or removal may not have
+    /// landed. Panicking instead would take a serving process down for the
+    /// rest of its life on every subsequent registry access.
     pub fn insert(&self, adapter: LoraAdapter<R>) {
         let name = adapter.name.clone();
-        let mut guard = self
-            .adapters
-            .write()
-            .expect("LoraAdapterRegistry lock poisoned");
+        let mut guard = self.adapters.write().unwrap_or_else(|p| p.into_inner());
         guard.insert(name, Arc::new(adapter));
     }
 
     /// Remove an adapter by name. Returns `true` if the adapter existed.
     pub fn remove(&self, name: &str) -> bool {
-        let mut guard = self
-            .adapters
-            .write()
-            .expect("LoraAdapterRegistry lock poisoned");
+        let mut guard = self.adapters.write().unwrap_or_else(|p| p.into_inner());
         guard.remove(name).is_some()
     }
 
     /// Retrieve an adapter by name.
     pub fn get(&self, name: &str) -> Option<Arc<LoraAdapter<R>>> {
-        let guard = self
-            .adapters
-            .read()
-            .expect("LoraAdapterRegistry lock poisoned");
+        let guard = self.adapters.read().unwrap_or_else(|p| p.into_inner());
         guard.get(name).cloned()
     }
 
     /// List names of all currently loaded adapters.
     pub fn list(&self) -> Vec<String> {
-        let guard = self
-            .adapters
-            .read()
-            .expect("LoraAdapterRegistry lock poisoned");
+        let guard = self.adapters.read().unwrap_or_else(|p| p.into_inner());
         guard.keys().cloned().collect()
     }
 }

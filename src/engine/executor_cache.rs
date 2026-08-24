@@ -177,11 +177,11 @@ where
     /// Create input tensor from token IDs
     pub(crate) fn create_input_tensor(&self, tokens: &[u32]) -> Result<Tensor<R>> {
         let tokens_i64: Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
-        Ok(Tensor::from_slice(
+        Ok(Tensor::try_from_slice(
             &tokens_i64,
             &[1, tokens.len()],
             &self.device,
-        ))
+        )?)
     }
 
     /// Greedy argmax on GPU — returns the token as a GPU tensor [1] i64.

@@ -350,7 +350,7 @@ async fn run_worker(_manager: &SwarmManager, leader_addr: Option<&str>) -> Resul
         assignment,
         has_prev_rank,
         has_next_rank,
-    );
+    )?;
 
     // Enter compute loop
     let worker = SwarmWorker::new(

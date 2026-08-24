@@ -154,10 +154,9 @@ where
         } else {
             model_bytes
         };
-        if bytes_per_layer == 0 {
-            total_layers
-        } else {
-            ((usable_vram / bytes_per_layer) as usize).min(total_layers)
+        match usable_vram.checked_div(bytes_per_layer) {
+            Some(fits) => (fits as usize).min(total_layers),
+            None => total_layers,
         }
     });
 
@@ -324,15 +323,15 @@ where
     match dtype {
         DType::F32 => {
             let data: &[f32] = bytemuck::cast_slice(bytes);
-            Ok(Tensor::from_slice(data, shape, device))
+            Ok(Tensor::try_from_slice(data, shape, device)?)
         }
         DType::BF16 => {
             let data: &[half::bf16] = bytemuck::cast_slice(bytes);
-            Ok(Tensor::from_slice(data, shape, device))
+            Ok(Tensor::try_from_slice(data, shape, device)?)
         }
         DType::F16 => {
             let data: &[half::f16] = bytemuck::cast_slice(bytes);
-            Ok(Tensor::from_slice(data, shape, device))
+            Ok(Tensor::try_from_slice(data, shape, device)?)
         }
         _ => Err(anyhow!("Unsupported dtype for GPU transfer: {:?}", dtype)),
     }

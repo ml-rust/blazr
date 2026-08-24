@@ -122,7 +122,7 @@ fn run_prefill_forward(
     let token_ids: &[i64] = bytemuck::cast_slice(token_ids_bytes);
     let seq_len = token_ids.len();
 
-    let input_tensor = Tensor::<ServerRuntime>::from_slice(token_ids, &[1, seq_len], device);
+    let input_tensor = Tensor::<ServerRuntime>::try_from_slice(token_ids, &[1, seq_len], device)?;
 
     // Embed tokens.
     let hidden = model.forward_embed(&input_tensor)?;
@@ -144,7 +144,7 @@ fn run_prefill_forward(
         let cache = mutex
             .lock()
             .map_err(|_| anyhow::anyhow!("KV cache lock poisoned"))?;
-        kv_serialize::serialize_kv_cache::<ServerRuntime>(&cache)
+        kv_serialize::serialize_kv_cache::<ServerRuntime>(&cache)?
     } else {
         // No KV cache (e.g. Mamba/SSM): return empty payload.
         Vec::new()
@@ -205,7 +205,7 @@ fn run_decode_step(
 
     // Embed the single token.
     let token_slice = [last_token_id];
-    let input_tensor = Tensor::<ServerRuntime>::from_slice(&token_slice, &[1, 1], device);
+    let input_tensor = Tensor::<ServerRuntime>::try_from_slice(&token_slice, &[1, 1], device)?;
     let hidden = model.forward_embed(&input_tensor)?;
 
     // Run all layers with the restored KV cache.
@@ -236,7 +236,7 @@ fn run_decode_step(
         .unwrap_or(0);
 
     // Serialize the updated KV cache.
-    let updated_kv = kv_serialize::serialize_kv_cache::<ServerRuntime>(&kv_cache);
+    let updated_kv = kv_serialize::serialize_kv_cache::<ServerRuntime>(&kv_cache)?;
 
     Ok((next_token, updated_kv))
 }

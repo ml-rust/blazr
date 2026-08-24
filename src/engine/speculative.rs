@@ -103,7 +103,7 @@ where
             })?;
 
         let tokens_i64: Vec<i64> = input_tokens.iter().map(|&t| t as i64).collect();
-        let input = Tensor::from_slice(&tokens_i64, &[1, input_tokens.len()], &self.device);
+        let input = Tensor::try_from_slice(&tokens_i64, &[1, input_tokens.len()], &self.device)?;
 
         let kv = self
             .kv_cache

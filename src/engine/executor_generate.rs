@@ -7,6 +7,7 @@
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use futures::Stream;
+use std::sync::Mutex;
 
 use boostr::inference::kv_cache::LayeredPagedKvCache;
 use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
@@ -24,6 +25,25 @@ use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
 
 use super::executor::Executor;
+
+/// Clone the shared block allocator, confining the lock guard to this frame.
+///
+/// Deliberately NOT inlined into the `stream!` body: a `MutexGuard` held across
+/// a `?` inside an async generator becomes part of the generator's state, and
+/// `MutexGuard` is not `Send`, so the whole future stops being `Send` and
+/// `tokio::spawn` rejects it. Keeping the lock inside a plain fn means the
+/// guard is gone before the caller resumes.
+///
+/// A poisoned lock propagates rather than recovering: a panic mid-allocation
+/// can leave block accounting inconsistent, and handing out a double-allocated
+/// block would corrupt inference. That is unlike the adapter registry in
+/// `lora.rs`, whose guarded `HashMap` is always safe to read.
+fn clone_shared_allocator(shared: &Mutex<CpuBlockAllocator>) -> Result<CpuBlockAllocator> {
+    let guard = shared
+        .lock()
+        .map_err(|e| anyhow!("Block allocator lock poisoned: {e}"))?;
+    Ok(guard.clone())
+}
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -112,7 +132,7 @@ where
                                     .into_bytes()
                             })
                             .collect();
-                        device_grammar = Some(dfa.to_device::<R>(&vocab_bytes, &self.device));
+                        device_grammar = Some(dfa.to_device::<R>(&vocab_bytes, &self.device)?);
                         grammar_dfa = Some(dfa);
                     }
                     Err(e) => {
@@ -131,7 +151,7 @@ where
 
                 let mut ssm_state = LayeredSsmState::new(
                     num_layers, 1, mamba_config, state_dtype, &self.device,
-                );
+                )?;
 
                 // Prefill
                 tracing::info!(phase = "prefill_start", backend = "mamba2", prompt_tokens = prompt_tokens.len());
@@ -197,18 +217,14 @@ where
                 };
 
                 let allocator = if let Some(ref shared) = self.shared_allocator {
-                    let cloned = {
-                        let guard = shared.lock().expect("block allocator lock poisoned");
-                        guard.clone()
-                    };
-                    cloned
+                    clone_shared_allocator(shared)?
                 } else {
                     CpuBlockAllocator::new(num_blocks, block_size)
                 };
 
                 let mut paged_cache = LayeredPagedKvCache::new(
                     num_layers, num_blocks, block_size, num_kv_heads, head_dim, kv_dtype, &self.device,
-                );
+                )?;
 
                 // Prefix cache: get block IDs with KV reuse for cached prefixes.
                 // Helper returns result without holding MutexGuard across yield points.
@@ -233,11 +249,11 @@ where
 
                 let slot_mapping_vec = paged_cache.compute_slot_mapping(prefill_start, prefill_tokens.len())
                     .map_err(|e| anyhow!("Failed to compute slot mapping: {}", e))?;
-                let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prefill_tokens.len()], &self.device);
+                let slot_mapping = Tensor::try_from_slice(&slot_mapping_vec, &[prefill_tokens.len()], &self.device)?;
 
                 let bt_vec = paged_cache.block_table_device_format(0);
                 let max_num_blocks = bt_vec.len();
-                let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, max_num_blocks], &self.device);
+                let block_table_tensor = Tensor::try_from_slice(&bt_vec, &[1, max_num_blocks], &self.device)?;
 
                 let seq_len_k = prompt_tokens.len();
                 paged_cache.set_seq_len(seq_len_k);
@@ -278,10 +294,10 @@ where
 
                     let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
                         .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
-                    let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device);
+                    let slot_mapping = Tensor::try_from_slice(&slot_vec, &[1], &self.device)?;
 
                     let bt_vec = paged_cache.block_table_device_format(0);
-                    let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device);
+                    let block_table_tensor = Tensor::try_from_slice(&bt_vec, &[1, bt_vec.len()], &self.device)?;
 
                     let new_seq_len_k = cur_seq_len + 1;
                     paged_cache.set_seq_len(new_seq_len_k);

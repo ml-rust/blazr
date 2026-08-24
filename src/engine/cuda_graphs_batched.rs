@@ -105,7 +105,7 @@ impl Executor<boostr::CudaRuntime> {
             self.device(),
         )?;
 
-        let device_scalars = DeviceScalars::new(initial_seq_len_k, self.device());
+        let device_scalars = DeviceScalars::new(initial_seq_len_k, self.device())?;
 
         // ── Warmup pass: JIT all kernels, do NOT capture yet ──
         device_scalars

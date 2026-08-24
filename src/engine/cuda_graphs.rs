@@ -91,7 +91,7 @@ impl Executor<boostr::CudaRuntime> {
             let cos_slice = Var::new(cos_slice_t, false);
             let sin_slice = Var::new(sin_slice_t, false);
 
-            let device_scalars = DeviceScalars::new(kv_cache.seq_len(), self.device());
+            let device_scalars = DeviceScalars::new(kv_cache.seq_len(), self.device())?;
 
             let next_token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(&[1], boostr::DType::I64, self.device())?;
 
@@ -285,7 +285,7 @@ impl Executor<boostr::CudaRuntime> {
                 &[seq_len_k as i32], &[1], self.device(),
             )?;
 
-            let device_scalars = DeviceScalars::new(seq_len_k, self.device());
+            let device_scalars = DeviceScalars::new(seq_len_k, self.device())?;
             let next_token_buf = boostr::Tensor::<CudaRuntime>::try_zeros(&[1], boostr::DType::I64, self.device())?;
 
             // ── Warmup pass (JIT kernels) ──

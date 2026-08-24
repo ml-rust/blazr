@@ -292,6 +292,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         moe,
         hybrid_layers: None,
         tie_word_embeddings: false,
+        grow_vocab: false,
         vision: None,
         audio: None,
     };

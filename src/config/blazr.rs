@@ -139,6 +139,7 @@ impl Default for BlazrConfig {
                 moe: None,
                 hybrid_layers: None,
                 tie_word_embeddings: false,
+                grow_vocab: false,
                 vision: None,
                 audio: None,
             },
@@ -392,6 +393,7 @@ generation:
             moe: None,
             hybrid_layers: None,
             tie_word_embeddings: false,
+            grow_vocab: false,
             vision: None,
             audio: None,
         };
@@ -414,6 +416,7 @@ generation:
                 moe: None,
                 hybrid_layers: None,
                 tie_word_embeddings: false,
+                grow_vocab: false,
                 vision: None,
                 audio: None,
             },

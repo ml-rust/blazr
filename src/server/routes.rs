@@ -8,6 +8,7 @@ use axum::{
 };
 
 use super::anthropic::{count_tokens, messages};
+#[cfg(feature = "audio")]
 use super::audio::{speech, transcriptions, translations};
 use super::chat::chat_completions;
 use super::completions::completions;
@@ -26,7 +27,7 @@ use super::responses::responses;
 
 /// Create the API router with OpenAI-compatible endpoints (auth-protected)
 pub fn api_routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let router = Router::new()
         // OpenAI-compatible endpoints
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model_id}", get(get_model))
@@ -36,10 +37,18 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/v1/responses", post(responses))
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
-        .route("/v1/infill", post(infill))
+        .route("/v1/infill", post(infill));
+
+    // The audio endpoints exist only in a build that can serve them.
+    // Registering them anyway would answer a client with a 500 where a 404 is
+    // the truth: the endpoint is absent from this build, not broken in it.
+    #[cfg(feature = "audio")]
+    let router = router
         .route("/v1/audio/speech", post(speech))
         .route("/v1/audio/transcriptions", post(transcriptions))
-        .route("/v1/audio/translations", post(translations))
+        .route("/v1/audio/translations", post(translations));
+
+    router
         .route("/rerank", post(rerank))
         .route("/v1/rerank", post(rerank))
         // Tokenization endpoints

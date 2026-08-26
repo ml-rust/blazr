@@ -31,9 +31,11 @@ pub type ServerRuntime = boostr::CpuRuntime;
 pub type VisionEmbedder = boostr::model::vision::ImageEmbedder<ServerRuntime>;
 
 /// Standalone Whisper ASR bundle keyed by model name.
+#[cfg(feature = "audio")]
 pub type AsrBundle = boostr::model::audio::WhisperBundle<ServerRuntime>;
 
 /// Standalone TTS bundle keyed by model name.
+#[cfg(feature = "audio")]
 pub type TtsBundle = boostr::model::audio::TtsBundle;
 
 /// Shared application state
@@ -55,9 +57,11 @@ pub struct AppState {
     pub vision_embedders: Arc<RwLock<HashMap<String, Arc<VisionEmbedder>>>>,
     /// Standalone Whisper ASR bundles keyed by model name, used by
     /// `/v1/audio/transcriptions`. Populated at server startup from `--asr-model`.
+    #[cfg(feature = "audio")]
     pub asr_models: Arc<RwLock<HashMap<String, Arc<AsrBundle>>>>,
     /// Standalone TTS bundles keyed by model name, used by `/v1/audio/speech`.
     /// Populated at server startup from `--tts-model`.
+    #[cfg(feature = "audio")]
     pub tts_models: Arc<RwLock<HashMap<String, Arc<TtsBundle>>>>,
     /// Directory searched for TTS voice files when the request specifies a
     /// bare voice ID (e.g. `af_alloy`). Resolved once at startup in this
@@ -80,7 +84,9 @@ impl AppState {
             slot_manager: SlotManager::new(0), // unlimited by default
             request_scheduler: None,
             vision_embedders: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "audio")]
             asr_models: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "audio")]
             tts_models: Arc::new(RwLock::new(HashMap::new())),
             voice_dir: None,
         }
@@ -111,21 +117,25 @@ impl AppState {
     }
 
     /// Register a Whisper ASR bundle under `model_name`.
+    #[cfg(feature = "audio")]
     pub async fn register_asr_model(&self, model_name: String, bundle: Arc<AsrBundle>) {
         self.asr_models.write().await.insert(model_name, bundle);
     }
 
     /// Look up a Whisper ASR bundle by model name.
+    #[cfg(feature = "audio")]
     pub async fn asr_model(&self, model_name: &str) -> Option<Arc<AsrBundle>> {
         self.asr_models.read().await.get(model_name).cloned()
     }
 
     /// Register a TTS bundle under `model_name`.
+    #[cfg(feature = "audio")]
     pub async fn register_tts_model(&self, model_name: String, bundle: Arc<TtsBundle>) {
         self.tts_models.write().await.insert(model_name, bundle);
     }
 
     /// Look up a TTS bundle by model name.
+    #[cfg(feature = "audio")]
     pub async fn tts_model(&self, model_name: &str) -> Option<Arc<TtsBundle>> {
         self.tts_models.read().await.get(model_name).cloned()
     }

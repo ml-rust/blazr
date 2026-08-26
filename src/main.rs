@@ -48,7 +48,9 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             vision_models,
+            #[cfg(feature = "audio")]
             asr_models,
+            #[cfg(feature = "audio")]
             tts_models,
             voice_dir,
         } => {
@@ -61,7 +63,9 @@ async fn main() -> Result<()> {
                 tls_cert,
                 tls_key,
                 vision_models,
+                #[cfg(feature = "audio")]
                 asr_models,
+                #[cfg(feature = "audio")]
                 tts_models,
                 voice_dir,
             )

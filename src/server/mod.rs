@@ -3,8 +3,11 @@
 //! Provides OpenAI-compatible REST API.
 
 mod anthropic;
+#[cfg(feature = "audio")]
 mod audio;
+#[cfg(feature = "audio")]
 mod audio_decode;
+#[cfg(feature = "audio")]
 mod audio_transcribe;
 mod chat;
 mod chat_types;

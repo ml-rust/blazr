@@ -17,6 +17,11 @@ cuda = ["boostr/cuda"]
 nccl = ["boostr/nccl"]
 distributed = ["boostr/distributed", "dep:nexar"]
 
+# Speech: text-to-speech synthesis and audio transcription endpoints, plus the
+# TTS/Whisper loaders they need. Off by default — a text-only inference server
+# has no use for boostr's 21k-line audio module or its four codec decoders.
+audio = ["boostr/audio"]
+
 [dependencies]
 # ML framework (model architectures, quant kernels, tensors via numr)
 boostr = { version = "0.3" }

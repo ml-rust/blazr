@@ -157,7 +157,9 @@ pub async fn start(
         api_keys,
         None,
         Vec::new(),
+        #[cfg(feature = "audio")]
         Vec::new(),
+        #[cfg(feature = "audio")]
         Vec::new(),
         None,
     )
@@ -176,8 +178,8 @@ pub async fn start_with_batch(
     api_keys: Vec<String>,
     request_scheduler: Option<Arc<RequestScheduler>>,
     vision_embedders: Vec<(String, Arc<crate::server::handlers::VisionEmbedder>)>,
-    asr_models: Vec<(String, Arc<crate::server::handlers::AsrBundle>)>,
-    tts_models: Vec<(String, Arc<crate::server::handlers::TtsBundle>)>,
+    #[cfg(feature = "audio")] asr_models: Vec<(String, Arc<crate::server::handlers::AsrBundle>)>,
+    #[cfg(feature = "audio")] tts_models: Vec<(String, Arc<crate::server::handlers::TtsBundle>)>,
     voice_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Install Prometheus metrics recorder
@@ -194,9 +196,11 @@ pub async fn start_with_batch(
     for (name, embedder) in vision_embedders {
         state.register_vision_embedder(name, embedder).await;
     }
+    #[cfg(feature = "audio")]
     for (name, bundle) in asr_models {
         state.register_asr_model(name, bundle).await;
     }
+    #[cfg(feature = "audio")]
     for (name, bundle) in tts_models {
         state.register_tts_model(name, bundle).await;
     }

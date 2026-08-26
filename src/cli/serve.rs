@@ -26,8 +26,8 @@ pub async fn serve(
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     vision_models: Vec<String>,
-    asr_models: Vec<String>,
-    tts_models: Vec<String>,
+    #[cfg(feature = "audio")] asr_models: Vec<String>,
+    #[cfg(feature = "audio")] tts_models: Vec<String>,
     voice_dir: Option<PathBuf>,
 ) -> Result<()> {
     // Get model directory
@@ -249,51 +249,58 @@ pub async fn serve(
         loaded_vision.push((name, Arc::new(embedder)));
     }
 
-    // Load any standalone Whisper ASR bundles before serving.
-    let mut loaded_asr: Vec<(String, Arc<crate::server::handlers::AsrBundle>)> =
-        Vec::with_capacity(asr_models.len());
-    for arg in &asr_models {
-        let (name, path) = crate::loader::parse_asr_model_arg(arg)?;
-        let spinner = super::util::spinner(format!(
-            "Loading ASR model '{}' from {}...",
-            name,
-            path.display()
-        ));
-        let bundle = crate::loader::load_whisper_from_dir::<ServerRuntime, _>(&path, &device)?;
-        spinner.finish_and_clear();
-        eprintln!(
-            "  {} ASR model {} (variant={:?}, vocab={}, mel_bins={})",
-            "Loaded".green(),
-            name.bold(),
-            bundle.variant,
-            bundle.config.vocab_size,
-            bundle.num_mel_bins,
-        );
-        loaded_asr.push((name, Arc::new(bundle)));
-    }
+    // ASR and TTS bundles exist only in an `audio` build. Both lists are
+    // threaded into `startup` under the same gate, so without the feature
+    // neither the flags nor the loaders are compiled at all.
+    #[cfg(feature = "audio")]
+    let (loaded_asr, loaded_tts) = {
+        // Load any standalone Whisper ASR bundles before serving.
+        let mut loaded_asr: Vec<(String, Arc<crate::server::handlers::AsrBundle>)> =
+            Vec::with_capacity(asr_models.len());
+        for arg in &asr_models {
+            let (name, path) = crate::loader::parse_asr_model_arg(arg)?;
+            let spinner = super::util::spinner(format!(
+                "Loading ASR model '{}' from {}...",
+                name,
+                path.display()
+            ));
+            let bundle = crate::loader::load_whisper_from_dir::<ServerRuntime, _>(&path, &device)?;
+            spinner.finish_and_clear();
+            eprintln!(
+                "  {} ASR model {} (variant={:?}, vocab={}, mel_bins={})",
+                "Loaded".green(),
+                name.bold(),
+                bundle.variant,
+                bundle.config.vocab_size,
+                bundle.num_mel_bins,
+            );
+            loaded_asr.push((name, Arc::new(bundle)));
+        }
 
-    // Load any TTS bundles (scaffolding-era: G2P + voice catalog only).
-    let mut loaded_tts: Vec<(String, Arc<crate::server::handlers::TtsBundle>)> =
-        Vec::with_capacity(tts_models.len());
-    for arg in &tts_models {
-        let (name, path) = crate::loader::parse_tts_model_arg(arg)?;
-        let spinner = super::util::spinner(format!(
-            "Loading TTS model '{}' from {}...",
-            name,
-            path.display()
-        ));
-        let bundle = crate::loader::load_tts_from_dir(&path)?;
-        spinner.finish_and_clear();
-        eprintln!(
-            "  {} TTS model {} (voices={}, sr={} Hz) {}",
-            "Loaded".green(),
-            name.bold(),
-            bundle.voices().len(),
-            bundle.sample_rate,
-            "[synthesis stubbed until neural path lands]".yellow(),
-        );
-        loaded_tts.push((name, Arc::new(bundle)));
-    }
+        // Load any TTS bundles (scaffolding-era: G2P + voice catalog only).
+        let mut loaded_tts: Vec<(String, Arc<crate::server::handlers::TtsBundle>)> =
+            Vec::with_capacity(tts_models.len());
+        for arg in &tts_models {
+            let (name, path) = crate::loader::parse_tts_model_arg(arg)?;
+            let spinner = super::util::spinner(format!(
+                "Loading TTS model '{}' from {}...",
+                name,
+                path.display()
+            ));
+            let bundle = crate::loader::load_tts_from_dir(&path)?;
+            spinner.finish_and_clear();
+            eprintln!(
+                "  {} TTS model {} (voices={}, sr={} Hz) {}",
+                "Loaded".green(),
+                name.bold(),
+                bundle.voices().len(),
+                bundle.sample_rate,
+                "[synthesis stubbed until neural path lands]".yellow(),
+            );
+            loaded_tts.push((name, Arc::new(bundle)));
+        }
+        (loaded_asr, loaded_tts)
+    };
 
     // Resolve effective voice directory (CLI flag > env var > None; bundled
     // fallback is handled inside `VoiceResolver` when None is passed).
@@ -314,7 +321,9 @@ pub async fn serve(
         api_keys,
         request_scheduler,
         loaded_vision,
+        #[cfg(feature = "audio")]
         loaded_asr,
+        #[cfg(feature = "audio")]
         loaded_tts,
         effective_voice_dir,
     )

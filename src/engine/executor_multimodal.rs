@@ -129,6 +129,21 @@ where
             };
 
             // ── Encode audio ──
+            // Vision and audio share this path, so the module is not gated as a
+            // whole; only the audio branch is. Without the feature a request
+            // carrying audio is refused rather than answered from its text
+            // alone, which would look like a working reply to a half-read prompt.
+            #[cfg(not(feature = "audio"))]
+            if !audio_segments.is_empty() {
+                yield Err(anyhow!(
+                    "Request carries audio but this build lacks the `audio` feature. \
+                     Rebuild blazr with --features audio."
+                ));
+                return;
+            }
+            #[cfg(not(feature = "audio"))]
+            let audio_embeds: Option<Tensor<R>> = None;
+            #[cfg(feature = "audio")]
             let audio_embeds: Option<Tensor<R>> = if !audio_segments.is_empty() {
                 let ac = audio_config.unwrap();
                 let num_mel_bins = ac.num_mel_bins;

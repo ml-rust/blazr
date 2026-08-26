@@ -146,6 +146,7 @@ pub enum Commands {
         /// Format: `name=/path/to/whisper_dir` where the directory contains
         /// `config.json`, `tokenizer.json`, and `model.safetensors`. May be
         /// repeated.
+        #[cfg(feature = "audio")]
         #[arg(long = "asr-model", value_name = "NAME=PATH")]
         asr_models: Vec<String>,
 
@@ -153,6 +154,7 @@ pub enum Commands {
         /// `name=/path/to/tts_dir`. The neural synthesis path is under
         /// construction; today this wires G2P + voice catalog and returns 503
         /// on actual synthesis requests. May be repeated.
+        #[cfg(feature = "audio")]
         #[arg(long = "tts-model", value_name = "NAME=PATH")]
         tts_models: Vec<String>,
 

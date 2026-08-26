@@ -106,10 +106,13 @@ pub fn transcribe_once(
     // 5. Greedy decode with KV cache.
     let prompt = bundle.sot_prompt(language, translate);
     let prefix_budget = prompt.len();
+    // `bundle.generate_options()` carries the checkpoint's own suppression
+    // lists. Hand-building these fields dropped them, which lets the decoder
+    // emit the leading space and the markup tokens the reference implementation
+    // forbids — a transcript that drifts from Whisper's, silently.
     let options = GenerateOptions {
         max_new_tokens: max_new_tokens.min(bundle.config.max_target_positions - prefix_budget),
-        eos_token_ids: vec![bundle.variant.eos_token_id()],
-        suppress_tokens: Vec::new(),
+        ..bundle.generate_options()
     };
     let token_ids = bundle
         .model

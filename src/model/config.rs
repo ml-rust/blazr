@@ -114,6 +114,13 @@ pub struct RopeScalingConfig {
     pub original_max_position_embeddings: usize,
     #[serde(default)]
     pub rope_type: Option<String>,
+    /// Per-dimension divisors for `longrope` scaling (Phi-3, MiniCPM4), each
+    /// `head_dim / 2` entries. `short_factor` applies at or below
+    /// `original_max_position_embeddings`, `long_factor` above it.
+    #[serde(default)]
+    pub short_factor: Option<Vec<f32>>,
+    #[serde(default)]
+    pub long_factor: Option<Vec<f32>>,
 }
 
 fn default_rms_norm_eps() -> f64 {

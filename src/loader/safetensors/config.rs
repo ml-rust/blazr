@@ -92,6 +92,8 @@ fn detected_to_universal(
             attention_factor: None,
             beta_fast: None,
             beta_slow: None,
+            short_factor: None,
+            long_factor: None,
         });
 
     let attention = if detected.num_attention_heads.is_some() || detected.num_kv_heads.is_some() {

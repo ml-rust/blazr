@@ -31,7 +31,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     /// Compute dynamic temperature from logit entropy.
     ///

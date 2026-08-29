@@ -264,7 +264,8 @@ where
         + boostr::TypeConversionOps<R>
         + boostr::SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + boostr::model::ModelClient<R>,
+        + boostr::model::ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     let start = std::time::Instant::now();
     let mut first_token_time = None;

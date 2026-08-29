@@ -50,7 +50,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     let block_size = paged_cache.block_size();
     let device = executor.device();

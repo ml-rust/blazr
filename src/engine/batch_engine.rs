@@ -44,7 +44,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     /// Create a new batch engine
     pub fn new(executor: Arc<Executor<R>>, scheduler: Arc<RequestScheduler>) -> Result<Self> {

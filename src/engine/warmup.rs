@@ -28,7 +28,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     /// Warm up the model by running a dummy forward pass
     ///

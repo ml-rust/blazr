@@ -57,7 +57,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     /// Generate from already-encoded prompt ids.
     ///

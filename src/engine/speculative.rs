@@ -39,7 +39,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     pub fn new(
         model: Arc<LoadedModel<R>>,
@@ -94,7 +95,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     fn forward(&mut self, input_tokens: &[TokenId], position: usize) -> BoostrResult<Vec<f32>> {
         self.ensure_kv_cache()

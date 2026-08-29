@@ -231,7 +231,8 @@ where
         + boostr::TypeConversionOps<R>
         + boostr::SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + boostr::model::ModelClient<R>,
+        + boostr::model::ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     eprintln!("{} - Interactive generation", "blazr run".bold().cyan());
     eprintln!("Model: {}", model_name.bold());

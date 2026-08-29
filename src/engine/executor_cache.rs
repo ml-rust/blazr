@@ -34,7 +34,8 @@ where
         + TypeConversionOps<R>
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
-        + ModelClient<R>,
+        + ModelClient<R>
+        + boostr::quant::traits::DequantOps<R>,
 {
     /// Allocate blocks for paged KV cache, reusing prefix cache blocks when available.
     ///

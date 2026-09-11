@@ -728,9 +728,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "cudarc"
-version = "0.19.7"
+version = "0.19.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cea5f10a99e025c1b44ae2354c2d8326b25ddbd0baf76bde8e55cfd4018a2cc"
+checksum = "804764d10e844da09765a7b2ca9641a0851523d1702efb0d7299d73e31b86e80"
 dependencies = [
  "half",
  "libloading",
@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -2523,8 +2523,6 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 [[package]]
 name = "regexr"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a10e63d4a65161fc4e8a0bf34c9b65aaee6a325fd6cf44a624204d18276c6551"
 dependencies = [
  "aho-corasick",
  "dynasm",
@@ -3062,7 +3060,7 @@ checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "splintr"
-version = "0.19.1"
+version = "0.20.0"
 dependencies = [
  "aho-corasick",
  "base64",

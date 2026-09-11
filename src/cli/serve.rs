@@ -277,7 +277,7 @@ pub async fn serve(
             loaded_asr.push((name, Arc::new(bundle)));
         }
 
-        // Load any TTS bundles (scaffolding-era: G2P + voice catalog only).
+        // Load any TTS bundles: Kokoro or VoxCPM2 by directory layout.
         let mut loaded_tts: Vec<(String, Arc<crate::server::handlers::TtsBundle>)> =
             Vec::with_capacity(tts_models.len());
         for arg in &tts_models {
@@ -289,13 +289,18 @@ pub async fn serve(
             ));
             let bundle = crate::loader::load_tts_from_dir(&path)?;
             spinner.finish_and_clear();
+            let status = if bundle.has_engine() {
+                "".normal()
+            } else {
+                "[no engine: synthesis returns 503]".yellow()
+            };
             eprintln!(
                 "  {} TTS model {} (voices={}, sr={} Hz) {}",
                 "Loaded".green(),
                 name.bold(),
                 bundle.voices().len(),
                 bundle.sample_rate,
-                "[synthesis stubbed until neural path lands]".yellow(),
+                status,
             );
             loaded_tts.push((name, Arc::new(bundle)));
         }

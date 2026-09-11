@@ -151,9 +151,10 @@ pub enum Commands {
         asr_models: Vec<String>,
 
         /// Register a TTS model for `/v1/audio/speech`. Format:
-        /// `name=/path/to/tts_dir`. The neural synthesis path is under
-        /// construction; today this wires G2P + voice catalog and returns 503
-        /// on actual synthesis requests. May be repeated.
+        /// `name=/path/to/tts_dir`. The directory's `config.json` picks the
+        /// engine: a VoxCPM2 config (with `dit_config`) loads the voice-cloning
+        /// engine, whose voices are the recordings under `voices/`; a Kokoro
+        /// config loads Kokoro. May be repeated.
         #[cfg(feature = "audio")]
         #[arg(long = "tts-model", value_name = "NAME=PATH")]
         tts_models: Vec<String>,

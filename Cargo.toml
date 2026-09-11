@@ -27,7 +27,7 @@ audio = ["boostr/audio"]
 boostr = { version = "0.3" }
 
 # Tokenization
-splintr = { version = "0.19", features = [
+splintr = { version = "0.20", features = [
   "vocab-cl100k",
   "vocab-o200k",
   "vocab-llama3",

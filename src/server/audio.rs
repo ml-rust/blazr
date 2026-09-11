@@ -262,8 +262,8 @@ pub async fn speech(
         Ok(Err(TtsError::NotImplemented)) => {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "TTS neural synthesis path is under construction — the server has \
-                 validated input, G2P, and voice lookup. See kokoro_tts_checklist.md.",
+                "this TTS model has no synthesis engine: its directory carried no \
+                 loadable config.json, so only voice lookup and G2P ran",
                 "not_implemented",
             );
         }
@@ -287,6 +287,9 @@ pub async fn speech(
                 &format!("TTS bundle load error: {e}"),
                 "server_error",
             );
+        }
+        Ok(Err(TtsError::InvalidRequest(e))) => {
+            return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
         }
         Ok(Err(TtsError::Engine(e))) => {
             return error_response(

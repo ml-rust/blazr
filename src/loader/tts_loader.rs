@@ -1,21 +1,29 @@
 //! TTS model loader.
 //!
-//! Parses `--tts-model NAME=PATH` and builds a [`TtsBundle`]. When the target
-//! directory contains a full Kokoro checkpoint (`config.json`, `vocab.json`,
-//! safetensors weights), loads everything and attaches a live
-//! [`KokoroEngine`] so `/v1/audio/speech` can actually synthesize. Otherwise
-//! falls back to a scaffolding bundle whose `synthesize` returns
-//! `NotImplemented` (same behavior as before the Kokoro port landed).
+//! Parses `--tts-model NAME=PATH` and builds a [`TtsBundle`]. The directory's
+//! `config.json` decides the engine:
+//!
+//! - a VoxCPM2 config (it carries `dit_config`) loads a
+//!   [`VoxCpm2Engine`] — voice cloning from the reference recordings in
+//!   `voices/`, on CUDA when this binary was built with it;
+//! - a Kokoro config (`vocab.json` or an inlined `vocab`, safetensors
+//!   weights) loads a [`KokoroEngine`] on the CPU;
+//! - no `config.json` at all gives a scaffolding bundle whose `synthesize`
+//!   returns `NotImplemented`.
+//!
+//! All engine logic lives in boostr; this file only recognises the layout and
+//! picks the device.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
 use boostr::model::audio::kokoro::{
     load_kokoro_v2, KokoroEngine, KokoroPhonemeVocab, VoiceResolver,
 };
+use boostr::model::audio::voxcpm::{VoxCpm2Engine, VoxCpm2SynthOptions, VoxCpm2Weights};
 use boostr::model::audio::{default_kokoro_voices, TtsBundle};
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
 use boostr::Runtime;
@@ -62,6 +70,9 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P) -> Result<TtsBundle> {
             KOKORO_SAMPLE_RATE,
         ));
     }
+    if is_voxcpm2_config(&config_path)? {
+        return load_voxcpm2(path, &config_path);
+    }
     let device = Arc::new(CpuDevice::new());
     let client = Arc::new(CpuRuntime::default_client(&device));
 
@@ -96,6 +107,113 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P) -> Result<TtsBundle> {
     let sample_rate = engine.sample_rate();
 
     Ok(TtsBundle::scaffolding(default_kokoro_voices(), sample_rate).with_engine(Arc::new(engine)))
+}
+
+/// Whether `config.json` is a VoxCPM2 config: it carries the DiT sub-model's
+/// config, which no Kokoro config has.
+fn is_voxcpm2_config(config_path: &Path) -> Result<bool> {
+    let text = std::fs::read_to_string(config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parsing {}", config_path.display()))?;
+    Ok(value.get("dit_config").is_some())
+}
+
+/// The one file in `dir` with extension `ext`, if exactly one exists. Two is
+/// an error: the loader cannot guess which stack to serve.
+fn single_file_with_ext(dir: &Path, ext: &str) -> Result<Option<PathBuf>> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some(ext))
+        .collect();
+    found.sort();
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.pop()),
+        n => Err(anyhow!(
+            "{} holds {n} .{ext} files; a TTS model directory carries one transformer stack",
+            dir.display()
+        )),
+    }
+}
+
+/// Build the VoxCPM2 engine from a model directory.
+///
+/// ```text
+/// PATH/
+///   config.json               — VoxCPM2 config (has `dit_config`)
+///   model.safetensors         — dense checkpoint, OR
+///   <one>.tcf | <one>.gguf    — single-file quantized stack (TCF preferred)
+///   tokenizer.json
+///   audiovae.pth | audiovae.safetensors
+///   voices/                   — reference recordings, one per voice id
+/// ```
+fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
+    let weights = if let Some(tcf) = single_file_with_ext(dir, "tcf")? {
+        VoxCpm2Weights::Tcf {
+            path: tcf,
+            config: config_path.to_path_buf(),
+        }
+    } else if let Some(gguf) = single_file_with_ext(dir, "gguf")? {
+        VoxCpm2Weights::Gguf {
+            path: gguf,
+            config: config_path.to_path_buf(),
+        }
+    } else {
+        VoxCpm2Weights::Checkpoint(dir.to_path_buf())
+    };
+    let audiovae = ["audiovae.pth", "audiovae.safetensors"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            anyhow!(
+                "no audiovae.pth or audiovae.safetensors in {}: VoxCPM2 ships its AudioVAE                  as a separate file",
+                dir.display()
+            )
+        })?;
+    let voices_dir = dir.join("voices");
+
+    #[cfg(feature = "cuda")]
+    let engine: Arc<dyn boostr::model::audio::TtsEngine> = {
+        use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
+        let device = CudaDevice::new(0);
+        let client = Arc::new(CudaRuntime::default_client(&device));
+        Arc::new(
+            VoxCpm2Engine::<CudaRuntime>::load(
+                &weights,
+                &audiovae,
+                &voices_dir,
+                &device,
+                client,
+                None,
+                VoxCpm2SynthOptions::default(),
+            )
+            .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?,
+        )
+    };
+    #[cfg(not(feature = "cuda"))]
+    let engine: Arc<dyn boostr::model::audio::TtsEngine> = {
+        let device = CpuDevice::new();
+        let client = Arc::new(CpuRuntime::default_client(&device));
+        Arc::new(
+            VoxCpm2Engine::<CpuRuntime>::load(
+                &weights,
+                &audiovae,
+                &voices_dir,
+                &device,
+                client,
+                None,
+                VoxCpm2SynthOptions::default(),
+            )
+            .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?,
+        )
+    };
+
+    let voices = engine.voices();
+    let sample_rate = engine.sample_rate();
+    Ok(TtsBundle::scaffolding(voices, sample_rate).with_engine(engine))
 }
 
 /// Parse `--tts-model NAME=PATH` into `(name, path)`.

@@ -193,9 +193,13 @@ fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
 ///   <one>.tcf | <one>.gguf    — single-file quantized stack (TCF preferred)
 ///   tokenizer.json
 ///   audiovae.pth | audiovae.safetensors
-///   voices/                   — reference recordings, one per voice id
+///   voices/                   — optional reference recordings, one per voice id
 ///   adapters/<one>.safetensors — optional LoRA adapter, folded in at load
 /// ```
+///
+/// `voices/` is optional: absent, or present but empty, the bundle still
+/// loads and renders zero-shot — the adapted voice when `adapters/` is
+/// present, the base model's voice otherwise.
 ///
 /// `adapters/` holds AT MOST ONE adapter: this bundle serves one adapted
 /// model for its lifetime, chosen at load time, not per request. Serving
@@ -221,11 +225,16 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
         .find(|p| p.is_file())
         .ok_or_else(|| {
             anyhow!(
-                "no audiovae.pth or audiovae.safetensors in {}: VoxCPM2 ships its AudioVAE                  as a separate file",
+                "no audiovae.pth or audiovae.safetensors in {}: VoxCPM2 ships its AudioVAE as a separate file",
                 dir.display()
             )
         })?;
     let voices_dir = dir.join("voices");
+    // `Some` only when `voices/` actually exists: `VoxCpm2Engine::load`
+    // treats `None` and a missing/empty directory identically (zero
+    // encoded voices, zero-shot still available), so this guard is a
+    // clarity choice, not a correctness one.
+    let voices_dir = voices_dir.is_dir().then_some(voices_dir.as_path());
     let adapter = discover_adapter(dir)?;
 
     let load_options = VoxCpm2LoadOptions {
@@ -242,7 +251,7 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
         let engine = VoxCpm2Engine::<CudaRuntime>::load(
             &weights,
             &audiovae,
-            &voices_dir,
+            voices_dir,
             &device,
             client,
             load_options,
@@ -258,7 +267,7 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
         let engine = VoxCpm2Engine::<CpuRuntime>::load(
             &weights,
             &audiovae,
-            &voices_dir,
+            voices_dir,
             &device,
             client,
             load_options,

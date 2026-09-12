@@ -22,11 +22,11 @@ use colored::Colorize;
 
 use boostr::model::audio::kokoro::{load_kokoro_v2, KokoroPhonemeVocab};
 use boostr::model::audio::voxcpm::VoxCpm2Weights;
+use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
+use boostr::Runtime;
 use boostr_audio::kokoro::{KokoroEngine, VoiceResolver};
 use boostr_audio::voxcpm::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions};
 use boostr_audio::{default_kokoro_voices, TtsBundle};
-use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
-use boostr::Runtime;
 
 /// Kokoro's native sample rate (used as the sample rate advertised by a
 /// scaffolding bundle when no real checkpoint is present).

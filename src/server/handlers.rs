@@ -32,7 +32,7 @@ pub type VisionEmbedder = boostr::model::vision::ImageEmbedder<ServerRuntime>;
 
 /// Standalone Whisper ASR bundle keyed by model name.
 #[cfg(feature = "audio")]
-pub type AsrBundle = boostr::model::audio::WhisperBundle<ServerRuntime>;
+pub type AsrBundle = boostr_audio::WhisperBundle<ServerRuntime>;
 
 /// Standalone TTS bundle keyed by model name.
 #[cfg(feature = "audio")]

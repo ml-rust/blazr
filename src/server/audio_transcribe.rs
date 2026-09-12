@@ -5,8 +5,9 @@
 
 use anyhow::{anyhow, Result};
 
-use boostr::model::audio::{mel::compute_mel_spectrogram, GenerateOptions, WhisperBundle};
+use boostr::model::audio::{mel::compute_mel_spectrogram, GenerateOptions};
 use boostr::{Runtime, Tensor};
+use boostr_audio::WhisperBundle;
 
 use super::handlers::ServerRuntime;
 

@@ -398,6 +398,8 @@ version = "0.1.0"
 dependencies = [
  "boostr",
  "numr",
+ "serde",
+ "serde_json",
  "splintr",
  "symphonia",
  "thiserror 2.0.17",

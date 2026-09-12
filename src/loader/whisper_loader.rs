@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-use boostr::model::audio::WhisperBundle;
 use boostr::{DType, Runtime};
+use boostr_audio::WhisperBundle;
 
 /// Load a Whisper bundle from an HF-style directory (config.json + tokenizer.json + model.safetensors).
 pub fn load_whisper_from_dir<R: Runtime<DType = DType>, P: AsRef<Path>>(

@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use super::audio_decode::{decode_to_whisper_input, extension_hint};
 use super::gen_types::error_response;
 use super::handlers::AppState;
-use boostr_audio::{encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16, SynthesizeOptions, TtsError};
+use boostr_audio::{
+    encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16, SynthesizeOptions, TtsError,
+};
 
 // ─── TTS types ───────────────────────────────────────────────────────────────
 

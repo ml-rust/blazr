@@ -19,12 +19,20 @@ distributed = ["boostr/distributed", "dep:nexar"]
 
 # Speech: text-to-speech synthesis and audio transcription endpoints, plus the
 # TTS/Whisper loaders they need. Off by default — a text-only inference server
-# has no use for boostr's 21k-line audio module or its four codec decoders.
-audio = ["boostr/audio", "boostr/whisper", "boostr/kokoro", "boostr/voxcpm"]
+# has no use for the audio pipelines or their four codec decoders. Whisper is
+# served straight from boostr; the TTS engines come from boostr-audio.
+audio = [
+  "dep:boostr-audio",
+  "boostr-audio/kokoro",
+  "boostr-audio/voxcpm",
+  "boostr/whisper",
+]
 
 [dependencies]
 # ML framework (model architectures, quant kernels, tensors via numr)
 boostr = { version = "0.3" }
+# Sample-level audio: codecs, resampling, WAV encoding, TTS engines.
+boostr-audio = { path = "../boostr/crates/boostr-audio", optional = true }
 
 # Tokenization
 splintr = { version = "0.20", features = [

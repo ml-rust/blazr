@@ -17,9 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::audio_decode::{decode_to_whisper_input, extension_hint};
 use super::gen_types::error_response;
 use super::handlers::AppState;
-use boostr::model::audio::{
-    encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16, SynthesizeOptions, TtsError,
-};
+use boostr_audio::{encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16, SynthesizeOptions, TtsError};
 
 // ─── TTS types ───────────────────────────────────────────────────────────────
 
@@ -210,7 +208,7 @@ pub async fn speech(
         // actual loading happens once the neural synth path is wired; for now
         // we surface invalid paths as 400s at the HTTP layer so users get
         // fast feedback rather than waiting for a cryptic synth error.
-        let mut resolver = boostr::model::audio::kokoro::VoiceResolver::new();
+        let mut resolver = boostr_audio::kokoro::VoiceResolver::new();
         if let Some(dir) = state.voice_dir.clone() {
             resolver = resolver.with_asset_dir(dir);
         }
@@ -226,7 +224,7 @@ pub async fn speech(
         // bundled lookup before giving up. This lets users drop a new voice
         // into the voice directory and reference it by ID without restarting
         // TTS model registration.
-        let mut resolver = boostr::model::audio::kokoro::VoiceResolver::new();
+        let mut resolver = boostr_audio::kokoro::VoiceResolver::new();
         if let Some(dir) = state.voice_dir.clone() {
             resolver = resolver.with_asset_dir(dir);
         }

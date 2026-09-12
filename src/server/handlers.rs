@@ -36,7 +36,7 @@ pub type AsrBundle = boostr::model::audio::WhisperBundle<ServerRuntime>;
 
 /// Standalone TTS bundle keyed by model name.
 #[cfg(feature = "audio")]
-pub type TtsBundle = boostr::model::audio::TtsBundle;
+pub type TtsBundle = boostr_audio::TtsBundle;
 
 /// Shared application state
 pub struct AppState {

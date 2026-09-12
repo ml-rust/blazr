@@ -20,13 +20,11 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
-use boostr::model::audio::kokoro::{
-    load_kokoro_v2, KokoroEngine, KokoroPhonemeVocab, VoiceResolver,
-};
-use boostr::model::audio::voxcpm::{
-    VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions, VoxCpm2Weights,
-};
-use boostr::model::audio::{default_kokoro_voices, TtsBundle};
+use boostr::model::audio::kokoro::{load_kokoro_v2, KokoroPhonemeVocab};
+use boostr::model::audio::voxcpm::VoxCpm2Weights;
+use boostr_audio::kokoro::{KokoroEngine, VoiceResolver};
+use boostr_audio::voxcpm::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions};
+use boostr_audio::{default_kokoro_voices, TtsBundle};
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
 use boostr::Runtime;
 
@@ -237,7 +235,7 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
     };
 
     #[cfg(feature = "cuda")]
-    let engine: Arc<dyn boostr::model::audio::TtsEngine> = {
+    let engine: Arc<dyn boostr_audio::TtsEngine> = {
         use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
         let device = CudaDevice::new(0);
         let client = Arc::new(CudaRuntime::default_client(&device));
@@ -254,7 +252,7 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
         Arc::new(engine)
     };
     #[cfg(not(feature = "cuda"))]
-    let engine: Arc<dyn boostr::model::audio::TtsEngine> = {
+    let engine: Arc<dyn boostr_audio::TtsEngine> = {
         let device = CpuDevice::new();
         let client = Arc::new(CpuRuntime::default_client(&device));
         let engine = VoxCpm2Engine::<CpuRuntime>::load(

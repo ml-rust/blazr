@@ -23,7 +23,9 @@ use colored::Colorize;
 use boostr::model::audio::kokoro::{
     load_kokoro_v2, KokoroEngine, KokoroPhonemeVocab, VoiceResolver,
 };
-use boostr::model::audio::voxcpm::{VoxCpm2Engine, VoxCpm2SynthOptions, VoxCpm2Weights};
+use boostr::model::audio::voxcpm::{
+    VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions, VoxCpm2Weights,
+};
 use boostr::model::audio::{default_kokoro_voices, TtsBundle};
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
 use boostr::Runtime;
@@ -138,6 +140,52 @@ fn single_file_with_ext(dir: &Path, ext: &str) -> Result<Option<PathBuf>> {
     }
 }
 
+/// The one `.safetensors` file in `dir`, required (unlike
+/// [`single_file_with_ext`], which allows zero). Mirrors its
+/// exactly-one-or-error rule: an `adapters/` directory that exists but is
+/// empty, or holds more than one file, can't be resolved without a caller
+/// saying which adapter to apply.
+fn single_adapter_file(dir: &Path) -> Result<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("safetensors"))
+        .collect();
+    found.sort();
+    if found.len() == 1 {
+        return Ok(found.remove(0));
+    }
+    if found.is_empty() {
+        return Err(anyhow!(
+            "{} exists but holds no .safetensors file; add exactly one LoRA adapter or remove \
+             the empty adapters directory",
+            dir.display()
+        ));
+    }
+    Err(anyhow!(
+        "{} holds {} .safetensors files; a bundle applies one LoRA adapter — split them into \
+         separate --tts-model NAME=DIR bundles",
+        dir.display(),
+        found.len()
+    ))
+}
+
+/// This bundle's LoRA adapter, if `dir/adapters/` exists: exactly one
+/// `.safetensors` file, applied to the model once at load time. Missing
+/// `adapters/` means the base model, unchanged.
+///
+/// One adapted model per bundle: serving several adapters means repeating
+/// `--tts-model NAME=DIR` with several bundles, each carrying its own
+/// `adapters/` directory. Per-request adapter switching is not offered —
+/// LoRA is folded into the weights, not applied per call.
+fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
+    let adapters_dir = dir.join("adapters");
+    if !adapters_dir.is_dir() {
+        return Ok(None);
+    }
+    Ok(Some(single_adapter_file(&adapters_dir)?))
+}
+
 /// Build the VoxCPM2 engine from a model directory.
 ///
 /// ```text
@@ -148,7 +196,13 @@ fn single_file_with_ext(dir: &Path, ext: &str) -> Result<Option<PathBuf>> {
 ///   tokenizer.json
 ///   audiovae.pth | audiovae.safetensors
 ///   voices/                   — reference recordings, one per voice id
+///   adapters/<one>.safetensors — optional LoRA adapter, folded in at load
 /// ```
+///
+/// `adapters/` holds AT MOST ONE adapter: this bundle serves one adapted
+/// model for its lifetime, chosen at load time, not per request. Serving
+/// several adapters means several `--tts-model NAME=DIR` bundles, each with
+/// its own `adapters/` directory.
 fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
     let weights = if let Some(tcf) = single_file_with_ext(dir, "tcf")? {
         VoxCpm2Weights::Tcf {
@@ -174,46 +228,73 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
             )
         })?;
     let voices_dir = dir.join("voices");
+    let adapter = discover_adapter(dir)?;
+
+    let load_options = VoxCpm2LoadOptions {
+        dtype: None,
+        synth: VoxCpm2SynthOptions::default(),
+        adapter,
+    };
 
     #[cfg(feature = "cuda")]
     let engine: Arc<dyn boostr::model::audio::TtsEngine> = {
         use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
         let device = CudaDevice::new(0);
         let client = Arc::new(CudaRuntime::default_client(&device));
-        Arc::new(
-            VoxCpm2Engine::<CudaRuntime>::load(
-                &weights,
-                &audiovae,
-                &voices_dir,
-                &device,
-                client,
-                None,
-                VoxCpm2SynthOptions::default(),
-            )
-            .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?,
+        let engine = VoxCpm2Engine::<CudaRuntime>::load(
+            &weights,
+            &audiovae,
+            &voices_dir,
+            &device,
+            client,
+            load_options,
         )
+        .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?;
+        log_adapter_report(dir, engine.adapter());
+        Arc::new(engine)
     };
     #[cfg(not(feature = "cuda"))]
     let engine: Arc<dyn boostr::model::audio::TtsEngine> = {
         let device = CpuDevice::new();
         let client = Arc::new(CpuRuntime::default_client(&device));
-        Arc::new(
-            VoxCpm2Engine::<CpuRuntime>::load(
-                &weights,
-                &audiovae,
-                &voices_dir,
-                &device,
-                client,
-                None,
-                VoxCpm2SynthOptions::default(),
-            )
-            .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?,
+        let engine = VoxCpm2Engine::<CpuRuntime>::load(
+            &weights,
+            &audiovae,
+            &voices_dir,
+            &device,
+            client,
+            load_options,
         )
+        .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?;
+        log_adapter_report(dir, engine.adapter());
+        Arc::new(engine)
     };
 
     let voices = engine.voices();
     let sample_rate = engine.sample_rate();
     Ok(TtsBundle::scaffolding(voices, sample_rate).with_engine(engine))
+}
+
+/// Log the one line a loaded adapter earns: rank, alpha, targets, counts.
+/// `None` (no `adapters/` directory) logs nothing — the base model needs no
+/// announcement.
+fn log_adapter_report(
+    dir: &Path,
+    report: Option<&boostr::model::audio::voxcpm::LoraAdapterReport>,
+) {
+    if let Some(report) = report {
+        eprintln!(
+            "  {} applied LoRA adapter from {}/adapters: rank={} alpha={} targets={:?} \
+             projections_adapted={} tensors_loaded={}",
+            "+".green(),
+            dir.display(),
+            report.rank,
+            report.alpha,
+            report.targets,
+            report.projections_adapted,
+            report.tensors_loaded,
+        );
+    }
 }
 
 /// Parse `--tts-model NAME=PATH` into `(name, path)`.

@@ -372,6 +372,7 @@ name = "boostr"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytemuck",
  "cudarc",
  "half",
@@ -386,7 +387,6 @@ dependencies = [
  "serde_json",
  "splintr",
  "symphonia",
- "tcf-core",
  "thiserror 2.0.17",
  "tracing",
  "zip",
@@ -3332,13 +3332,6 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
-]
-
-[[package]]
-name = "tcf-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
 ]
 
 [[package]]

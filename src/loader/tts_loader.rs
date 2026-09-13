@@ -192,10 +192,16 @@ fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
 ///   model.safetensors         — dense checkpoint, OR
 ///   <one>.tcf | <one>.gguf    — single-file quantized stack (TCF preferred)
 ///   tokenizer.json
-///   audiovae.pth | audiovae.safetensors
+///   audiovae.pth | audiovae.safetensors — the separate AudioVAE; optional
+///                               when the .tcf/.gguf embeds one (compressr
+///                               writes it under `vae.`), required otherwise
 ///   voices/                   — optional reference recordings, one per voice id
 ///   adapters/<one>.safetensors — optional LoRA adapter, folded in at load
 /// ```
+///
+/// The AudioVAE file is looked for and passed when present; the engine
+/// decides — an embedded copy wins, and a bundle with neither is refused by
+/// the loader with an error naming both ways to supply it.
 ///
 /// `voices/` is optional: absent, or present but empty, the bundle still
 /// loads and renders zero-shot — the adapted voice when `adapters/` is
@@ -222,13 +228,7 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
     let audiovae = ["audiovae.pth", "audiovae.safetensors"]
         .iter()
         .map(|name| dir.join(name))
-        .find(|p| p.is_file())
-        .ok_or_else(|| {
-            anyhow!(
-                "no audiovae.pth or audiovae.safetensors in {}: VoxCPM2 ships its AudioVAE as a separate file",
-                dir.display()
-            )
-        })?;
+        .find(|p| p.is_file());
     let voices_dir = dir.join("voices");
     // `Some` only when `voices/` actually exists: `VoxCpm2Engine::load`
     // treats `None` and a missing/empty directory identically (zero
@@ -261,7 +261,7 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
         let client = Arc::new(CudaRuntime::default_client(&device));
         let engine = VoxCpm2Engine::<CudaRuntime>::load(
             &weights,
-            &audiovae,
+            audiovae.as_deref(),
             voices_dir,
             &device,
             client,
@@ -277,7 +277,7 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
         let client = Arc::new(CpuRuntime::default_client(&device));
         let engine = VoxCpm2Engine::<CpuRuntime>::load(
             &weights,
-            &audiovae,
+            audiovae.as_deref(),
             voices_dir,
             &device,
             client,

@@ -237,8 +237,19 @@ fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
     let voices_dir = voices_dir.is_dir().then_some(voices_dir.as_path());
     let adapter = discover_adapter(dir)?;
 
+    // The AudioVAE decoder runs in F16 on CUDA: every decoder kernel has a
+    // half variant, the transposed convolutions fold from an F32 product,
+    // and the output stays within the F32 decoder's tolerance while the
+    // decoder's weights take half the memory. The CPU backend keeps the
+    // checkpoint's F32.
+    #[cfg(feature = "cuda")]
+    let vae_decoder_dtype = Some(boostr::DType::F16);
+    #[cfg(not(feature = "cuda"))]
+    let vae_decoder_dtype = None;
+
     let load_options = VoxCpm2LoadOptions {
         dtype: None,
+        vae_decoder_dtype,
         synth: VoxCpm2SynthOptions::default(),
         adapter,
     };

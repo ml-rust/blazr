@@ -8,8 +8,11 @@
 //!   `voices/`, on CUDA when this binary was built with it;
 //! - a Kokoro config (`vocab.json` or an inlined `vocab`, safetensors
 //!   weights) loads a [`KokoroEngine`] on the CPU;
-//! - no `config.json` at all gives a scaffolding bundle whose `synthesize`
-//!   returns `NotImplemented`.
+//! - no `config.json`, but one `.gguf` whose `general.architecture` is
+//!   `voxcpm2`, loads a [`VoxCpm2Engine`] from that file alone: a GGUF
+//!   written by compressr embeds its config, tokenizer and AudioVAE;
+//! - nothing else gives a scaffolding bundle whose `synthesize` returns
+//!   `NotImplemented`.
 //!
 //! All engine logic lives in boostr; this file only recognises the layout and
 //! picks the device.
@@ -20,6 +23,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
+use boostr::format::gguf::Gguf;
 use boostr::model::audio::kokoro::{load_kokoro_v2, KokoroPhonemeVocab};
 use boostr::model::audio::voxcpm::VoxCpm2Weights;
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
@@ -57,9 +61,15 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P) -> Result<TtsBundle> {
     let vocab_path = path.join("vocab.json");
     let voices_dir = path.join("voices");
 
-    // If config.json is missing, we can't build an engine — fall back to the
-    // scaffolding bundle and let the endpoint return 503.
+    // No config.json: a lone VoxCPM2 GGUF still loads, since compressr
+    // embeds everything the engine needs. Anything else falls back to the
+    // scaffolding bundle and lets the endpoint return 503.
     if !config_path.exists() {
+        if let Some(gguf) = single_file_with_ext(path, "gguf")? {
+            if is_voxcpm2_gguf(&gguf)? {
+                return load_voxcpm2(path, None);
+            }
+        }
         eprintln!(
             "  {} no config.json in {} — TTS bundle will return 503 on synthesis",
             "!".yellow(),
@@ -71,7 +81,7 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P) -> Result<TtsBundle> {
         ));
     }
     if is_voxcpm2_config(&config_path)? {
-        return load_voxcpm2(path, &config_path);
+        return load_voxcpm2(path, Some(&config_path));
     }
     let device = Arc::new(CpuDevice::new());
     let client = Arc::new(CpuRuntime::default_client(&device));
@@ -117,6 +127,17 @@ fn is_voxcpm2_config(config_path: &Path) -> Result<bool> {
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("parsing {}", config_path.display()))?;
     Ok(value.get("dit_config").is_some())
+}
+
+/// Whether a GGUF names VoxCPM2 as its `general.architecture`. Both
+/// compressr's and cstr's files do; only compressr's embeds the config, and
+/// the engine's loader says so when it is missing.
+fn is_voxcpm2_gguf(path: &Path) -> Result<bool> {
+    let gguf = Gguf::open(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(gguf
+        .metadata()
+        .architecture()
+        .is_some_and(|arch| arch.eq_ignore_ascii_case("voxcpm2")))
 }
 
 /// The one file in `dir` with extension `ext`, if exactly one exists. Two is
@@ -188,16 +209,22 @@ fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
 ///
 /// ```text
 /// PATH/
-///   config.json               — VoxCPM2 config (has `dit_config`)
+///   config.json               — VoxCPM2 config (has `dit_config`); optional
+///                               when the .gguf embeds one, required otherwise
 ///   model.safetensors         — dense checkpoint, OR
 ///   <one>.tcf | <one>.gguf    — single-file quantized stack (TCF preferred)
-///   tokenizer.json
+///   tokenizer.json            — optional when the .gguf embeds one
 ///   audiovae.pth | audiovae.safetensors — the separate AudioVAE; optional
 ///                               when the .tcf/.gguf embeds one (compressr
 ///                               writes it under `vae.`), required otherwise
 ///   voices/                   — optional reference recordings, one per voice id
 ///   adapters/<one>.safetensors — optional LoRA adapter, folded in at load
 /// ```
+///
+/// A `.gguf` written by compressr needs nothing beside it: config,
+/// tokenizer and AudioVAE are all inside. `voices/` and `adapters/` stay
+/// directory-level. `config_path` is `Some` only when `config.json` exists;
+/// a TCF needs it, and is refused without it.
 ///
 /// The AudioVAE file is looked for and passed when present; the engine
 /// decides — an embedded copy wins, and a bundle with neither is refused by
@@ -211,16 +238,23 @@ fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
 /// model for its lifetime, chosen at load time, not per request. Serving
 /// several adapters means several `--tts-model NAME=DIR` bundles, each with
 /// its own `adapters/` directory.
-fn load_voxcpm2(dir: &Path, config_path: &Path) -> Result<TtsBundle> {
+fn load_voxcpm2(dir: &Path, config_path: Option<&Path>) -> Result<TtsBundle> {
     let weights = if let Some(tcf) = single_file_with_ext(dir, "tcf")? {
+        let config = config_path.ok_or_else(|| {
+            anyhow!(
+                "{} holds no config.json; a TCF carries no config, so the checkpoint's \
+                 config.json must sit beside it",
+                dir.display()
+            )
+        })?;
         VoxCpm2Weights::Tcf {
             path: tcf,
-            config: config_path.to_path_buf(),
+            config: config.to_path_buf(),
         }
     } else if let Some(gguf) = single_file_with_ext(dir, "gguf")? {
         VoxCpm2Weights::Gguf {
             path: gguf,
-            config: config_path.to_path_buf(),
+            config: config_path.map(Path::to_path_buf),
         }
     } else {
         VoxCpm2Weights::Checkpoint(dir.to_path_buf())
@@ -360,6 +394,56 @@ mod tests {
         let tmp = std::env::temp_dir().join("blazr_tts_loader_no_config");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
+        let bundle = load_tts_from_dir(&tmp).unwrap();
+        assert!(!bundle.has_engine());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A GGUF v3 image with no tensors and one `general.architecture`
+    /// string. Enough for the dispatch probe, which reads metadata only.
+    fn gguf_with_architecture(arch: &str) -> Vec<u8> {
+        fn put_str(out: &mut Vec<u8>, s: &str) {
+            out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GGUF");
+        out.extend_from_slice(&3u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&1u64.to_le_bytes());
+        put_str(&mut out, "general.architecture");
+        out.extend_from_slice(&8u32.to_le_bytes());
+        put_str(&mut out, arch);
+        let aligned = out.len().div_ceil(32) * 32;
+        out.resize(aligned, 0);
+        out
+    }
+
+    /// No config.json, one VoxCPM2 GGUF: dispatch reaches the VoxCPM2
+    /// loader (which then fails on the empty file) instead of handing back
+    /// a scaffolding bundle.
+    #[test]
+    fn a_lone_voxcpm2_gguf_is_dispatched_without_a_config() {
+        let tmp = std::env::temp_dir().join("blazr_tts_loader_lone_gguf");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let gguf = tmp.join("model.gguf");
+        std::fs::write(&gguf, gguf_with_architecture("voxcpm2")).unwrap();
+        assert!(is_voxcpm2_gguf(&gguf).unwrap());
+        assert!(load_tts_from_dir(&tmp).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// No config.json, one GGUF of another architecture: scaffolding, as
+    /// with no GGUF at all.
+    #[test]
+    fn a_lone_foreign_gguf_still_gives_scaffolding() {
+        let tmp = std::env::temp_dir().join("blazr_tts_loader_foreign_gguf");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let gguf = tmp.join("model.gguf");
+        std::fs::write(&gguf, gguf_with_architecture("llama")).unwrap();
+        assert!(!is_voxcpm2_gguf(&gguf).unwrap());
         let bundle = load_tts_from_dir(&tmp).unwrap();
         assert!(!bundle.has_engine());
         let _ = std::fs::remove_dir_all(&tmp);

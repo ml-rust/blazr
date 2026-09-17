@@ -16,6 +16,12 @@ pub struct SpeechRequest {
     pub response_format: String,
     #[serde(default = "default_speed")]
     pub speed: f32,
+    /// `true` streams the body as the engine renders: a WAV header with
+    /// unknown-length size fields (or nothing, for `pcm`) followed by raw
+    /// sample chunks. Only the native formats stream; the validation and
+    /// voice rules before the first byte are the same as the buffered path.
+    #[serde(default)]
+    pub stream: bool,
 }
 
 pub(super) fn default_response_format() -> String {
@@ -47,6 +53,14 @@ mod tests {
         assert_eq!(req.voice, None);
         assert_eq!(req.response_format, "wav");
         assert!((req.speed - 1.0).abs() < f32::EPSILON);
+        assert!(!req.stream);
+    }
+
+    #[test]
+    fn speech_request_stream_flag() {
+        let json = r#"{"model": "tts-1", "input": "Hello", "stream": true}"#;
+        let req: SpeechRequest = serde_json::from_str(json).unwrap();
+        assert!(req.stream);
     }
 
     #[test]

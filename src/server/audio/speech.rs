@@ -1,4 +1,9 @@
 //! `POST /v1/audio/speech` handler — text-to-speech synthesis.
+//!
+//! One prologue validates the request, finds the bundle and resolves the
+//! voice; then the body is either rendered whole and encoded
+//! (`stream: false`) or streamed chunk by chunk as the engine produces it
+//! (`stream: true`, see [`super::stream`]).
 
 use std::sync::Arc;
 
@@ -10,78 +15,28 @@ use axum::{
 };
 
 use crate::server::gen_types::error_response;
-use crate::server::handlers::AppState;
+use crate::server::handlers::{AppState, TtsBundle};
 use boostr_audio::{SynthesizeOptions, TtsError};
 
 use super::encode::encode_speech;
 use super::request::{SpeechRequest, NATIVE_TTS_FORMATS, VALID_TTS_FORMATS};
+use super::stream::{stream_speech, StreamFormat};
 use super::voice::resolve_voice;
 
-/// `POST /v1/audio/speech` — Text-to-speech synthesis (Kokoro).
+/// `POST /v1/audio/speech` — Text-to-speech synthesis.
 pub async fn speech(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SpeechRequest>,
 ) -> Response {
-    // Basic input validation.
-    if request.input.is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "Input text must not be empty",
-            "invalid_request_error",
-        );
-    }
-
-    if !VALID_TTS_FORMATS.contains(&request.response_format.as_str()) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            &format!(
-                "Invalid response_format '{}'. Must be one of: {}",
-                request.response_format,
-                VALID_TTS_FORMATS.join(", ")
-            ),
-            "invalid_request_error",
-        );
-    }
-
-    if !NATIVE_TTS_FORMATS.contains(&request.response_format.as_str()) {
-        return error_response(
-            StatusCode::NOT_IMPLEMENTED,
-            &format!(
-                "response_format '{}' is not yet encoded natively. Use 'wav', 'pcm', or 'f32'.",
-                request.response_format
-            ),
-            "not_implemented",
-        );
-    }
-
-    if !(0.25..=4.0).contains(&request.speed) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "Speed must be between 0.25 and 4.0",
-            "invalid_request_error",
-        );
-    }
-
-    // Look up the loaded TTS bundle.
-    let bundle = match state.tts_model(&request.model).await {
-        Some(b) => b,
-        None => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!(
-                    "TTS model '{}' is not loaded. Start the server with \
-                     `--tts-model {}=PATH` to register a Kokoro checkpoint.",
-                    request.model, request.model
-                ),
-                "invalid_request_error",
-            );
-        }
-    };
-
-    let voice_id = match resolve_voice(&state, &bundle, request.voice.as_deref(), &request.model) {
-        Ok(id) => id,
+    let (bundle, voice_id) = match prologue(&state, &request).await {
+        Ok(ok) => ok,
         Err(resp) => return *resp,
     };
+
+    if request.stream {
+        let format = StreamFormat::from_response_format(&request.response_format);
+        return stream_speech(bundle, request.input, voice_id, request.speed, format).await;
+    }
 
     // Run synthesis off the reactor — neural inference is CPU-bound.
     let input = request.input.clone();
@@ -94,45 +49,7 @@ pub async fn speech(
 
     let samples = match samples {
         Ok(Ok(s)) => s,
-        Ok(Err(TtsError::NotImplemented)) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "this TTS model has no synthesis engine: its directory carried no \
-                 loadable config.json, so only voice lookup and G2P ran",
-                "not_implemented",
-            );
-        }
-        Ok(Err(TtsError::UnknownVoice(v))) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Unknown voice: {v}"),
-                "invalid_request_error",
-            );
-        }
-        Ok(Err(TtsError::G2p(e))) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("G2P failed: {e}"),
-                "invalid_request_error",
-            );
-        }
-        Ok(Err(TtsError::Load(e))) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("TTS bundle load error: {e}"),
-                "server_error",
-            );
-        }
-        Ok(Err(TtsError::InvalidRequest(e))) => {
-            return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
-        }
-        Ok(Err(TtsError::Engine(e))) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("TTS synthesis failed: {e}"),
-                "server_error",
-            );
-        }
+        Ok(Err(e)) => return tts_error_response(e),
         Err(e) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -165,8 +82,114 @@ pub async fn speech(
     resp
 }
 
+/// Everything before synthesis, shared by the buffered and streamed paths:
+/// input and format validation, the speed range, the bundle lookup and the
+/// voice resolution. Returns the bundle and the resolved voice id, or the
+/// error response to send back verbatim.
+async fn prologue(
+    state: &AppState,
+    request: &SpeechRequest,
+) -> Result<(Arc<TtsBundle>, String), Box<Response>> {
+    if request.input.is_empty() {
+        return Err(Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            "Input text must not be empty",
+            "invalid_request_error",
+        )));
+    }
+
+    if !VALID_TTS_FORMATS.contains(&request.response_format.as_str()) {
+        return Err(Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Invalid response_format '{}'. Must be one of: {}",
+                request.response_format,
+                VALID_TTS_FORMATS.join(", ")
+            ),
+            "invalid_request_error",
+        )));
+    }
+
+    if !NATIVE_TTS_FORMATS.contains(&request.response_format.as_str()) {
+        return Err(Box::new(error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            &format!(
+                "response_format '{}' is not yet encoded natively. Use 'wav', 'pcm', or 'f32'.",
+                request.response_format
+            ),
+            "not_implemented",
+        )));
+    }
+
+    if !(0.25..=4.0).contains(&request.speed) {
+        return Err(Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            "Speed must be between 0.25 and 4.0",
+            "invalid_request_error",
+        )));
+    }
+
+    // Look up the loaded TTS bundle.
+    let bundle = match state.tts_model(&request.model).await {
+        Some(b) => b,
+        None => {
+            return Err(Box::new(error_response(
+                StatusCode::NOT_FOUND,
+                &format!(
+                    "TTS model '{}' is not loaded. Start the server with \
+                     `--tts-model {}=PATH` to register a Kokoro checkpoint.",
+                    request.model, request.model
+                ),
+                "invalid_request_error",
+            )));
+        }
+    };
+
+    let voice_id = resolve_voice(state, &bundle, request.voice.as_deref(), &request.model)?;
+    Ok((bundle, voice_id))
+}
+
+/// The HTTP status and message for every [`TtsError`]. Shared by the
+/// buffered path and the streamed path's pre-first-byte failure, so the two
+/// answer the same request the same way.
+pub(super) fn tts_error_response(err: TtsError) -> Response {
+    match err {
+        TtsError::NotImplemented => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this TTS model has no synthesis engine: its directory carried no \
+             loadable config.json, so only voice lookup and G2P ran",
+            "not_implemented",
+        ),
+        TtsError::UnknownVoice(v) => error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Unknown voice: {v}"),
+            "invalid_request_error",
+        ),
+        TtsError::G2p(e) => error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("G2P failed: {e}"),
+            "invalid_request_error",
+        ),
+        TtsError::Load(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("TTS bundle load error: {e}"),
+            "server_error",
+        ),
+        TtsError::InvalidRequest(e) => {
+            error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error")
+        }
+        TtsError::Engine(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("TTS synthesis failed: {e}"),
+            "server_error",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn speed_range_validation() {
         assert!((0.25..=4.0).contains(&0.25));
@@ -174,5 +197,29 @@ mod tests {
         assert!((0.25..=4.0).contains(&1.0));
         assert!(!(0.25..=4.0).contains(&0.24));
         assert!(!(0.25..=4.0).contains(&4.1));
+    }
+
+    #[test]
+    fn tts_error_status_mapping() {
+        assert_eq!(
+            tts_error_response(TtsError::NotImplemented).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            tts_error_response(TtsError::UnknownVoice("x".into())).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            tts_error_response(TtsError::InvalidRequest("speed".into())).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            tts_error_response(TtsError::Engine("boom".into())).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            tts_error_response(TtsError::Load("boom".into())).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

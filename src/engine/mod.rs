@@ -40,6 +40,6 @@ pub use data_parallel::DataParallelGroup;
 pub use executor::Executor;
 pub use lora::{load_lora_adapter, LoraAdapter, LoraAdapterRegistry};
 pub use request_scheduler::RequestScheduler;
-pub use scheduler::{parse_keep_alive, Scheduler};
+pub use scheduler::{parse_keep_alive, AvailableModelInfo, Scheduler};
 pub use slots::SlotManager;
 pub use types::{FinishReason, GeneratedToken, GenerationResult, TokenLogprob};

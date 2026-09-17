@@ -9,7 +9,7 @@ use axum::{
 
 use super::anthropic::{count_tokens, messages};
 #[cfg(feature = "audio")]
-use super::audio::{speech, transcriptions, translations};
+use super::audio::{speech, transcriptions, translations, voices};
 use super::chat::chat_completions;
 use super::completions::completions;
 use super::embeddings::embeddings;
@@ -30,7 +30,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
     let router = Router::new()
         // OpenAI-compatible endpoints
         .route("/v1/models", get(list_models))
-        .route("/v1/models/{model_id}", get(get_model))
+        .route("/v1/models/:model_id", get(get_model))
         .route("/v1/completions", post(completions))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
@@ -46,7 +46,8 @@ pub fn api_routes() -> Router<Arc<AppState>> {
     let router = router
         .route("/v1/audio/speech", post(speech))
         .route("/v1/audio/transcriptions", post(transcriptions))
-        .route("/v1/audio/translations", post(translations));
+        .route("/v1/audio/translations", post(translations))
+        .route("/v1/audio/voices", get(voices));
 
     router
         .route("/rerank", post(rerank))
@@ -57,7 +58,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/apply-template", post(apply_template))
         // Slot management endpoints
         .route("/api/slots", get(list_slots).post(create_slot))
-        .route("/api/slots/{slot_id}", delete(delete_slot))
+        .route("/api/slots/:slot_id", delete(delete_slot))
         // Model management endpoints
         .route("/api/tags", get(list_tags))
         .route("/api/show", post(show_model))
@@ -67,5 +68,5 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/pull", post(pull_model))
         // LoRA adapter management endpoints
         .route("/v1/lora", get(list_loras).post(load_lora))
-        .route("/v1/lora/{name}", delete(unload_lora))
+        .route("/v1/lora/:name", delete(unload_lora))
 }

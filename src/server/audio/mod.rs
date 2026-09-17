@@ -1,7 +1,9 @@
-//! Audio endpoints: TTS (speech) and ASR (transcriptions)
+//! Audio endpoints: TTS (speech), ASR (transcriptions), and voice listing.
 //!
 //! OpenAI-compatible `/v1/audio/speech` and `/v1/audio/transcriptions`
 //! endpoints, served by the `TtsBundle`/`WhisperBundle` registered per model.
+//! `GET /v1/audio/voices?model=<name>` lists a registered TTS model's voice
+//! catalog (`bundle.voices()`), 400 when `model` is missing or unknown.
 //!
 //! `voice` on `/v1/audio/speech` is optional and its absence is meaningful: an
 //! omitted `voice` renders zero-shot on a VoxCPM2 bundle (or the previous
@@ -22,6 +24,8 @@ mod stream;
 mod transcription;
 mod types;
 mod voice;
+mod voices;
 
 pub use speech::speech;
 pub use transcription::{transcriptions, translations};
+pub use voices::voices;

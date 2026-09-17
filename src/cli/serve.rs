@@ -227,8 +227,11 @@ pub async fn serve(
     };
 
     // Load any standalone vision embedders before serving
-    let mut loaded_vision: Vec<(String, Arc<crate::server::handlers::VisionEmbedder>)> =
-        Vec::with_capacity(vision_models.len());
+    let mut loaded_vision: Vec<(
+        String,
+        Arc<crate::server::handlers::VisionEmbedder>,
+        PathBuf,
+    )> = Vec::with_capacity(vision_models.len());
     for arg in &vision_models {
         let (name, path) = crate::loader::parse_vision_model_arg(arg)?;
         let spinner = super::util::spinner(format!(
@@ -246,7 +249,7 @@ pub async fn serve(
             embedder.hidden_size(),
             path.display(),
         );
-        loaded_vision.push((name, Arc::new(embedder)));
+        loaded_vision.push((name, Arc::new(embedder), path));
     }
 
     // ASR and TTS bundles exist only in an `audio` build. Both lists are
@@ -255,7 +258,7 @@ pub async fn serve(
     #[cfg(feature = "audio")]
     let (loaded_asr, loaded_tts) = {
         // Load any standalone Whisper ASR bundles before serving.
-        let mut loaded_asr: Vec<(String, Arc<crate::server::handlers::AsrBundle>)> =
+        let mut loaded_asr: Vec<(String, Arc<crate::server::handlers::AsrBundle>, PathBuf)> =
             Vec::with_capacity(asr_models.len());
         for arg in &asr_models {
             let (name, path) = crate::loader::parse_asr_model_arg(arg)?;
@@ -274,11 +277,11 @@ pub async fn serve(
                 bundle.config.vocab_size,
                 bundle.num_mel_bins,
             );
-            loaded_asr.push((name, Arc::new(bundle)));
+            loaded_asr.push((name, Arc::new(bundle), path));
         }
 
         // Load any TTS bundles: Kokoro or VoxCPM2 by directory layout.
-        let mut loaded_tts: Vec<(String, Arc<crate::server::handlers::TtsBundle>)> =
+        let mut loaded_tts: Vec<(String, Arc<crate::server::handlers::TtsBundle>, PathBuf)> =
             Vec::with_capacity(tts_models.len());
         for arg in &tts_models {
             let (name, path) = crate::loader::parse_tts_model_arg(arg)?;
@@ -302,7 +305,7 @@ pub async fn serve(
                 bundle.sample_rate,
                 status,
             );
-            loaded_tts.push((name, Arc::new(bundle)));
+            loaded_tts.push((name, Arc::new(bundle), path));
         }
         (loaded_asr, loaded_tts)
     };

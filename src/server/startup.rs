@@ -177,9 +177,21 @@ pub async fn start_with_batch(
     config: ServerConfig,
     api_keys: Vec<String>,
     request_scheduler: Option<Arc<RequestScheduler>>,
-    vision_embedders: Vec<(String, Arc<crate::server::handlers::VisionEmbedder>)>,
-    #[cfg(feature = "audio")] asr_models: Vec<(String, Arc<crate::server::handlers::AsrBundle>)>,
-    #[cfg(feature = "audio")] tts_models: Vec<(String, Arc<crate::server::handlers::TtsBundle>)>,
+    vision_embedders: Vec<(
+        String,
+        Arc<crate::server::handlers::VisionEmbedder>,
+        std::path::PathBuf,
+    )>,
+    #[cfg(feature = "audio")] asr_models: Vec<(
+        String,
+        Arc<crate::server::handlers::AsrBundle>,
+        std::path::PathBuf,
+    )>,
+    #[cfg(feature = "audio")] tts_models: Vec<(
+        String,
+        Arc<crate::server::handlers::TtsBundle>,
+        std::path::PathBuf,
+    )>,
     voice_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Install Prometheus metrics recorder
@@ -193,16 +205,16 @@ pub async fn start_with_batch(
     }
     let state = Arc::new(app_state);
 
-    for (name, embedder) in vision_embedders {
-        state.register_vision_embedder(name, embedder).await;
+    for (name, embedder, path) in vision_embedders {
+        state.register_vision_embedder(name, embedder, path).await;
     }
     #[cfg(feature = "audio")]
-    for (name, bundle) in asr_models {
-        state.register_asr_model(name, bundle).await;
+    for (name, bundle, path) in asr_models {
+        state.register_asr_model(name, bundle, path).await;
     }
     #[cfg(feature = "audio")]
-    for (name, bundle) in tts_models {
-        state.register_tts_model(name, bundle).await;
+    for (name, bundle, path) in tts_models {
+        state.register_tts_model(name, bundle, path).await;
     }
 
     // Start config file watcher for hot-reload
@@ -391,16 +403,18 @@ fn log_startup_info(scheme: &str, addr: &str, config: &ServerConfig, api_keys: &
     }
     tracing::info!("API endpoints:");
     tracing::info!("  GET  /health - Health check (no auth required)");
-    tracing::info!("  GET  /v1/models - List models");
+    tracing::info!("  GET  /v1/models - List models (text + resident vision/ASR/TTS)");
     tracing::info!("  GET  /v1/models/{{id}} - Model details");
     tracing::info!("  POST /v1/completions - Text completion");
     tracing::info!("  POST /v1/chat/completions - Chat completion");
     tracing::info!("  POST /v1/infill - Fill-in-the-middle (FIM)");
     tracing::info!("  POST /tokenize - Tokenize text");
     tracing::info!("  POST /detokenize - Detokenize tokens");
-    tracing::info!("  GET  /api/tags - List local models with metadata");
+    #[cfg(feature = "audio")]
+    tracing::info!("  GET  /v1/audio/voices - List a TTS model's voices");
+    tracing::info!("  GET  /api/tags - List local models with metadata (+ vision/ASR/TTS)");
     tracing::info!("  POST /api/show - Model details");
-    tracing::info!("  GET  /api/ps - Currently loaded models");
+    tracing::info!("  GET  /api/ps - Currently loaded models (+ resident vision/ASR/TTS)");
     tracing::info!("  DEL  /api/delete - Delete local model");
     tracing::info!("  POST /api/copy - Copy/alias model");
     tracing::info!("  POST /api/pull - Pull model from HuggingFace");

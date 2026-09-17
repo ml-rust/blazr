@@ -204,7 +204,8 @@ async fn run_audio_pipeline(
         .join(" ")
         .trim()
         .to_string();
-    let total_duration = samples.len() as f64 / 16_000.0;
+    let total_duration =
+        samples.len() as f64 / crate::server::audio_transcribe::WHISPER_SAMPLE_RATE as f64;
     let segments: Vec<TranscriptionSegment> = chunks
         .iter()
         .enumerate()
@@ -221,9 +222,17 @@ async fn run_audio_pipeline(
         "srt" => (StatusCode::OK, render_srt(&segments)).into_response(),
         "vtt" => (StatusCode::OK, render_vtt(&segments)).into_response(),
         "verbose_json" => {
+            // The language the first window was decoded under: the request's
+            // own, or the detected one. An english-only checkpoint has none.
+            let decoded_language = chunks
+                .first()
+                .and_then(|c| c.language)
+                .map(str::to_string)
+                .or(language)
+                .unwrap_or_else(|| "en".to_string());
             let resp = VerboseTranscriptionResponse {
                 text: full_text,
-                language: language.unwrap_or_else(|| "en".to_string()),
+                language: decoded_language,
                 duration: total_duration,
                 segments,
             };

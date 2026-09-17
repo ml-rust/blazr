@@ -4,16 +4,25 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-use boostr::{DType, Runtime};
+use boostr::{DType, Runtime, TypeConversionOps};
 use boostr_audio::WhisperBundle;
 
-/// Load a Whisper bundle from an HF-style directory (config.json + tokenizer.json + model.safetensors).
-pub fn load_whisper_from_dir<R: Runtime<DType = DType>, P: AsRef<Path>>(
-    dir: P,
-    device: &R::Device,
-) -> Result<WhisperBundle<R>> {
+/// Load a Whisper bundle from an HF-style directory (config.json +
+/// tokenizer.json + model.safetensors), casting every weight to F32.
+///
+/// The mel front end produces F32 and numr's ops require input and weight to
+/// share a dtype, so an F16 checkpoint (`whisper-large-v3` ships one) is cast
+/// on the way in. This is the same load every other Whisper consumer in the
+/// workspace performs.
+pub fn load_whisper_from_dir<R, P>(dir: P, device: &R::Device) -> Result<WhisperBundle<R>>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TypeConversionOps<R>,
+    P: AsRef<Path>,
+{
     let dir = dir.as_ref();
-    WhisperBundle::from_dir(dir, device)
+    let client = R::default_client(device);
+    WhisperBundle::from_dir_with_dtype(dir, device, &client, DType::F32)
         .map_err(|e| anyhow!("loading whisper model from {}: {e}", dir.display()))
         .context("whisper bundle load")
 }

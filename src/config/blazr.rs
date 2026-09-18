@@ -144,6 +144,7 @@ impl Default for BlazrConfig {
                 audio: None,
                 gdn: None,
                 qwen35_attention: None,
+                hadamard: None,
             },
             inference: InferenceConfig::default(),
             server: None,
@@ -400,6 +401,7 @@ generation:
             audio: None,
             gdn: None,
             qwen35_attention: None,
+            hadamard: None,
         };
         let config = BlazrConfig::from_universal(universal);
         assert_eq!(config.model_type(), "llama");
@@ -425,6 +427,7 @@ generation:
                 audio: None,
                 gdn: None,
                 qwen35_attention: None,
+                hadamard: None,
             },
             "f16",
         );

@@ -142,6 +142,8 @@ impl Default for BlazrConfig {
                 grow_vocab: false,
                 vision: None,
                 audio: None,
+                gdn: None,
+                qwen35_attention: None,
             },
             inference: InferenceConfig::default(),
             server: None,
@@ -396,6 +398,8 @@ generation:
             grow_vocab: false,
             vision: None,
             audio: None,
+            gdn: None,
+            qwen35_attention: None,
         };
         let config = BlazrConfig::from_universal(universal);
         assert_eq!(config.model_type(), "llama");
@@ -419,6 +423,8 @@ generation:
                 grow_vocab: false,
                 vision: None,
                 audio: None,
+                gdn: None,
+                qwen35_attention: None,
             },
             "f16",
         );

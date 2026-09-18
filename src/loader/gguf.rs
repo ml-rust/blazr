@@ -295,6 +295,8 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         grow_vocab: false,
         vision: None,
         audio: None,
+        gdn: None,
+        qwen35_attention: None,
     };
 
     Ok(BlazrConfig::from_universal_with_dtype(model_config, "f32"))

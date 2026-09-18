@@ -190,6 +190,8 @@ fn detected_to_universal(
         grow_vocab: false,
         vision: None,
         audio: None,
+        gdn: None,
+        qwen35_attention: None,
     }
 }
 

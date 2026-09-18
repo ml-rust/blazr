@@ -43,7 +43,9 @@ where
         // Create a single-token input
         let warmup_input = Tensor::from_slice(&[1i64], &[1, 1], self.device())?;
 
-        if self.model().needs_ssm_state() {
+        if self.model().needs_gdn_state() {
+            self.warmup_qwen35(&warmup_input)?;
+        } else if self.model().needs_ssm_state() {
             self.warmup_mamba(&warmup_input)?;
         } else if self.config().inference.paged_attention {
             self.warmup_paged(&warmup_input)?;
@@ -61,6 +63,24 @@ where
         let _ = Self::read_token_id(&token_gpu, event)?;
 
         tracing::debug!("Model warmup complete in {:?}", start.elapsed());
+        Ok(())
+    }
+
+    /// KV cache for the attention layers, GDN state for the rest. Sized
+    /// through `qwen35_caches`, never by `num_layers()`.
+    fn warmup_qwen35(&self, warmup_input: &Tensor<R>) -> Result<()> {
+        let (mut kv_cache, mut gdn_state) = self.qwen35_caches(16, 16)?;
+
+        let _ = self
+            .model()
+            .forward_qwen35(warmup_input, &mut kv_cache, &mut gdn_state, 0)
+            .map_err(|e| anyhow!("Warmup prefill forward pass failed: {}", e))?;
+
+        let position = kv_cache.seq_len();
+        let _ = self
+            .model()
+            .forward_qwen35(warmup_input, &mut kv_cache, &mut gdn_state, position)
+            .map_err(|e| anyhow!("Warmup decode forward pass failed: {}", e))?;
         Ok(())
     }
 

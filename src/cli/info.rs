@@ -227,6 +227,17 @@ fn print_gguf_info(path: &std::path::Path) -> Result<()> {
     if let Some(context_length) = info.context_length {
         eprintln!("  {}: {}", "Max context".dimmed(), context_length);
     }
+    if info.is_gdn {
+        if let Some(attention_layers) = info.attention_layers {
+            eprintln!("  {}: {}", "Attention layers".dimmed(), attention_layers);
+        }
+        if let Some(gdn_layers) = info.gdn_layers {
+            eprintln!("  {}: {}", "GDN layers".dimmed(), gdn_layers);
+        }
+        if let Some(state_size) = info.ssm_state_size {
+            eprintln!("  {}: {}", "GDN state size".dimmed(), state_size);
+        }
+    }
 
     eprintln!(
         "\n  {}: {}",

@@ -184,6 +184,14 @@ pub async fn run_disagg_prefill_worker(
         "Model loaded on prefill worker"
     );
 
+    if model.needs_gdn_state() {
+        return Err(crate::engine::qwen35_unsupported(
+            "disaggregated prefill",
+            None,
+            None,
+        ));
+    }
+
     // Build the prefill forward function.
     let forward_fn = build_prefill_fn(Arc::clone(&model), device);
 
@@ -269,6 +277,14 @@ pub async fn run_disagg_decode_worker(
         vocab_size = model.vocab_size(),
         "Model loaded on decode worker"
     );
+
+    if model.needs_gdn_state() {
+        return Err(crate::engine::qwen35_unsupported(
+            "disaggregated decode",
+            None,
+            None,
+        ));
+    }
 
     // Build the decode step function.
     let step_fn = build_decode_step_fn(Arc::clone(&model), device);

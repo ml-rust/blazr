@@ -49,6 +49,13 @@ where
 {
     /// Create a new batch engine
     pub fn new(executor: Arc<Executor<R>>, scheduler: Arc<RequestScheduler>) -> Result<Self> {
+        if executor.model().needs_gdn_state() {
+            return Err(super::qwen35_unsupported(
+                "continuous batching",
+                None,
+                Some("disable paged attention or set max_batch_size = 1"),
+            ));
+        }
         let config = executor.config();
         let paged_cache = if config.inference.paged_attention {
             let num_layers = executor.model().num_layers();

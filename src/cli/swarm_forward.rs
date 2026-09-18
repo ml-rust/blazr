@@ -87,6 +87,14 @@ pub fn build_forward_fn(
     use boostr::DType;
     use std::sync::Mutex;
 
+    if model.needs_gdn_state() {
+        return Err(crate::engine::qwen35_unsupported(
+            "swarm pipeline",
+            None,
+            None,
+        ));
+    }
+
     let num_layers = model.num_layers();
     let num_kv_heads = model.num_kv_heads().unwrap_or(1);
     let head_dim = model.head_dim().unwrap_or(64);

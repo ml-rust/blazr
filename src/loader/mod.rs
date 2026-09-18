@@ -9,6 +9,8 @@
 mod api;
 mod detect;
 pub(crate) mod gguf;
+mod gguf_config;
+mod gguf_info;
 mod safetensors;
 #[cfg(feature = "audio")]
 mod tts_loader;
@@ -19,7 +21,8 @@ mod whisper_loader;
 
 pub use api::{load_model, load_model_tp, load_model_with_config, load_model_with_offloading};
 pub use detect::{detect_model_source, ModelFormat, ModelSource};
-pub use gguf::{get_gguf_info, load_gguf, load_gguf_with_tokenizer, GgufInfo};
+pub use gguf::{load_gguf, load_gguf_with_tokenizer};
+pub use gguf_info::{get_gguf_info, GgufInfo};
 pub use safetensors::{
     load_safetensors, load_safetensors_with_offloading, OffloadingInfo, OffloadingOptions,
 };

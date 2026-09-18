@@ -67,6 +67,15 @@ where
                 }
             };
 
+            if multimodal_model.llm().needs_gdn_state() {
+                yield Err(super::qwen35_unsupported(
+                    "multimodal",
+                    None,
+                    Some("it needs GDN state beside the KV cache"),
+                ));
+                return;
+            }
+
             let vision_config = multimodal_model.config().vision.as_ref();
             let audio_config = multimodal_model.config().audio.as_ref();
 
@@ -97,7 +106,9 @@ where
 
             // ── Encode images ──
             let image_embeds: Option<Tensor<R>> = if !images.is_empty() {
-                let vc = vision_config.unwrap();
+                let vc = vision_config.ok_or_else(|| {
+                    anyhow!("Vision encoder config missing despite the presence check above")
+                })?;
                 let image_size = vc.image_size;
 
                 // Preprocess all images into a batched pixel tensor [N, 3, H, W]
@@ -146,7 +157,9 @@ where
             let audio_embeds: Option<Tensor<R>> = None;
             #[cfg(feature = "audio")]
             let audio_embeds: Option<Tensor<R>> = if !audio_segments.is_empty() {
-                let ac = audio_config.unwrap();
+                let ac = audio_config.ok_or_else(|| {
+                    anyhow!("Audio encoder config missing despite the presence check above")
+                })?;
                 let num_mel_bins = ac.num_mel_bins;
                 let sample_rate = 16000usize; // Standard for Whisper-family encoders
 
@@ -240,7 +253,7 @@ where
 
                 // Concatenate along sequence dimension
                 if parts.len() == 1 {
-                    Var::new(parts.into_iter().next().unwrap(), false)
+                    Var::new(parts.remove(0), false)
                 } else {
                     let refs: Vec<&Tensor<R>> = parts.iter().collect();
                     let concatenated = Tensor::cat(&refs, 1)

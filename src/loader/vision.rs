@@ -14,7 +14,7 @@ use boostr::{DType, Runtime, VarBuilder, VarMap};
 
 use crate::config::BlazrConfig;
 
-use super::gguf::config_from_gguf_metadata;
+use super::gguf_config::config_from_gguf_metadata;
 
 /// Load vision projector weights from a separate GGUF mmproj file.
 ///

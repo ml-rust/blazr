@@ -48,6 +48,13 @@ where
         dtype_str: &str,
         name: &str,
     ) -> anyhow::Result<Self> {
+        if model.needs_gdn_state() {
+            return Err(super::qwen35_unsupported(
+                "speculative decoding",
+                Some(name),
+                Some("it needs GDN state beside the KV cache"),
+            ));
+        }
         let dtype = parse_dtype(dtype_str)?;
         Ok(Self {
             model,

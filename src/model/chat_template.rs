@@ -86,7 +86,7 @@ impl ChatTemplate {
         match model_type {
             "llama" => ChatTemplate::Llama3, // Default to Llama3 for llama models
             "mistral" => ChatTemplate::MistralInstruct,
-            "qwen2" | "qwen2_moe" => ChatTemplate::ChatML,
+            "qwen2" | "qwen2_moe" | "qwen35" => ChatTemplate::ChatML,
             "phi3" | "phi" => ChatTemplate::Phi3,
             "gemma" | "gemma2" => ChatTemplate::Gemma,
             "deepseek_v2" | "deepseek_v3" => ChatTemplate::DeepSeek,
@@ -419,6 +419,10 @@ mod tests {
             ChatTemplate::MistralInstruct
         );
         assert_eq!(ChatTemplate::from_model_type("qwen2"), ChatTemplate::ChatML);
+        assert_eq!(
+            ChatTemplate::from_model_type("qwen35"),
+            ChatTemplate::ChatML
+        );
         assert_eq!(ChatTemplate::from_model_type("phi3"), ChatTemplate::Phi3);
         assert_eq!(ChatTemplate::from_model_type("gemma2"), ChatTemplate::Gemma);
         assert_eq!(

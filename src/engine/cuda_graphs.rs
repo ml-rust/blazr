@@ -46,6 +46,10 @@ impl Executor<boostr::CudaRuntime> {
             if prompt_tokens.is_empty() {
                 return;
             }
+            if self.model().needs_gdn_state() {
+                yield Err(super::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
+                return;
+            }
 
             let max_seq_len = self.config().max_seq_len();
             // Graph mode pre-allocates KV cache at fixed capacity.
@@ -213,6 +217,10 @@ impl Executor<boostr::CudaRuntime> {
 
         stream! {
             if prompt_tokens.is_empty() {
+                return;
+            }
+            if self.model().needs_gdn_state() {
+                yield Err(super::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
                 return;
             }
 

@@ -85,9 +85,8 @@ where
         .map_err(|e| anyhow!("Failed to open GGUF file: {}", e))?;
 
     let config = config_from_gguf_metadata(&gguf)?;
-    let mut vocab = boostr::format::extract_gguf_vocab(gguf.metadata())
+    let vocab = boostr::format::extract_gguf_vocab(gguf.metadata())
         .map_err(|e| anyhow!("Failed to extract GGUF vocabulary: {}", e))?;
-    crate::tokenizer::map_gguf_pre_tokenizer(&mut vocab);
     let tokenizer = splintr::from_gguf_vocab(vocab)
         .map_err(|e| anyhow!("Failed to build tokenizer from GGUF vocabulary: {}", e))?;
 

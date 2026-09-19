@@ -12,6 +12,7 @@ pub mod bench_config;
 pub mod cache_router;
 mod cuda_graphs;
 mod cuda_graphs_batched;
+mod cuda_graphs_qwen35;
 pub mod data_parallel;
 pub(crate) mod executor;
 mod executor_cache;

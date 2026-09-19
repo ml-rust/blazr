@@ -1,35 +1,39 @@
 //! CUDA graph-accelerated greedy decode loop.
 //!
-//! The config flag `inference.graphs` is backend-agnostic. For now the graph-mode
-//! forward pass (`forward_graph_mode`) uses CUDA-specific kernel APIs
-//! (device-ptr seq_len, kv_insert kernel), so this impl block is CUDA-only.
-//! When ROCm/Metal graph support is added, a parallel impl block will be added
-//! for those runtimes using their respective graph-mode ops.
+//! The config flag `inference.graphs` is backend-agnostic. The graph-mode
+//! forward passes use CUDA-specific kernel APIs (device-ptr seq_len,
+//! kv_insert kernel), so this impl block is CUDA-only. Another runtime with
+//! graph support gets a parallel impl block over its own graph-mode ops.
 
-#[cfg(feature = "cuda")]
+#![cfg(feature = "cuda")]
+
 use anyhow::{anyhow, Result};
-
-#[cfg(feature = "cuda")]
 use async_stream::stream;
 
-#[cfg(feature = "cuda")]
+use boostr::autograd::Var;
+use boostr::inference::decode_graph::{DecodeGraph, DeviceScalars, PagedDecodeGraph};
+use boostr::inference::kv_cache::LayeredPagedKvCache;
+use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
+use boostr::tensor::Tensor;
+use boostr::{CudaRuntime, Runtime};
+
 use crate::config::parse_dtype;
 
-#[cfg(feature = "cuda")]
 use super::executor::Executor;
-#[cfg(feature = "cuda")]
 use super::types::{FinishReason, GeneratedToken};
 
-#[cfg(feature = "cuda")]
-impl Executor<boostr::CudaRuntime> {
+impl Executor<CudaRuntime> {
     /// Run greedy decode using compute graph capture+replay (CUDA backend).
     ///
     /// After prompt prefill, captures the single-token decode forward pass as a
     /// compute graph. Replay cost is one graph launch per token instead of
     /// per-kernel dispatch.
     ///
+    /// A `qwen35` model takes the arm in `cuda_graphs_qwen35.rs`, which
+    /// captures `forward_qwen35_graph_mode` with an arena.
+    ///
     /// # Preconditions
-    /// - Model must be Llama (Mamba2/Hybrid graph mode not yet implemented)
+    /// - Model must be Llama or `qwen35` (Mamba2/Hybrid graph mode not yet implemented)
     /// - `gen_config.is_greedy()` must be true (graph replay is deterministic)
     /// - `config.inference.paged_attention` must be false (use `generate_with_graphs_paged` for paged mode)
     pub fn generate_with_graphs<'a>(
@@ -37,18 +41,19 @@ impl Executor<boostr::CudaRuntime> {
         prompt_tokens: &'a [u32],
         gen_config: &'a crate::config::GenerationConfig,
     ) -> impl futures::Stream<Item = Result<GeneratedToken>> + 'a {
-        use boostr::autograd::Var;
-        use boostr::inference::decode_graph::{DecodeGraph, DeviceScalars};
-        use boostr::runtime::cuda::CudaRuntime as CudaRt;
-        use boostr::CudaRuntime;
-        use boostr::Runtime;
-
         stream! {
             if prompt_tokens.is_empty() {
                 return;
             }
             if self.model().needs_gdn_state() {
-                yield Err(super::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
+                if !self.model().supports_gdn_graph_mode() {
+                    yield Err(super::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
+                    return;
+                }
+                let inner = self.generate_with_graphs_qwen35(prompt_tokens, gen_config);
+                for await item in inner {
+                    yield item;
+                }
                 return;
             }
 
@@ -86,7 +91,7 @@ impl Executor<boostr::CudaRuntime> {
             let rope_cos_cache = rope_cos_var.tensor().clone();
             let rope_sin_cache = rope_sin_var.tensor().clone();
 
-            let client = CudaRt::default_client(self.device());
+            let client = CudaRuntime::default_client(self.device());
 
             // ── Stable-address decode inputs (ALL allocated BEFORE graph capture) ──
             let token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?;
@@ -123,7 +128,7 @@ impl Executor<boostr::CudaRuntime> {
                 .map_err(|e| anyhow!("RoPE pre-capture update failed: {}", e))?;
 
             // ── CUDA graph capture ──
-            let graph = CudaRt::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
+            let graph = CudaRuntime::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
                 let logits = self.model().forward_graph_mode(
                     &token_buf, &mut kv_cache, &device_scalars, &cos_slice, &sin_slice,
                 ).map_err(|e| boostr::NumrError::Backend(format!("Capture forward failed: {e}")))?;
@@ -165,7 +170,8 @@ impl Executor<boostr::CudaRuntime> {
                 .map_err(|e| anyhow!("Failed to seed next_token_buf: {}", e))?;
 
             // ── Graph decode loop (event-based sync, no full device sync) ──
-            for i in 0..max_tokens.saturating_sub(1) {
+            let graph_max = max_tokens.saturating_sub(1);
+            for i in 0..graph_max {
                 let t1 = std::time::Instant::now();
 
                 decode_graph.pre_replay_and_launch(&client)
@@ -184,7 +190,6 @@ impl Executor<boostr::CudaRuntime> {
                     break;
                 }
 
-                let graph_max = max_tokens.saturating_sub(1);
                 let is_last = i + 1 == graph_max;
                 let text = self.tokenizer().decode(&[next_token]).unwrap_or_default();
                 yield Ok(GeneratedToken { token_id: next_token, text, logprob: None, top_logprobs: None, finish_reason: if is_last { Some(FinishReason::Length) } else { None } });
@@ -207,15 +212,6 @@ impl Executor<boostr::CudaRuntime> {
         prompt_tokens: &'a [u32],
         gen_config: &'a crate::config::GenerationConfig,
     ) -> impl futures::Stream<Item = Result<GeneratedToken>> + 'a {
-        use boostr::autograd::Var;
-        use boostr::inference::decode_graph::{DeviceScalars, PagedDecodeGraph};
-        use boostr::inference::kv_cache::LayeredPagedKvCache;
-        use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
-        use boostr::runtime::cuda::CudaRuntime as CudaRt;
-        use boostr::tensor::Tensor;
-        use boostr::CudaRuntime;
-        use boostr::Runtime;
-
         stream! {
             if prompt_tokens.is_empty() {
                 return;
@@ -280,7 +276,7 @@ impl Executor<boostr::CudaRuntime> {
             let rope_cos_cache = rope_cos_var.tensor().clone();
             let rope_sin_cache = rope_sin_var.tensor().clone();
 
-            let client = CudaRt::default_client(self.device());
+            let client = CudaRuntime::default_client(self.device());
 
             // ── Stable-address tensors (ALL allocated BEFORE graph capture) ──
             let token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?;
@@ -333,7 +329,7 @@ impl Executor<boostr::CudaRuntime> {
                 .map_err(|e| anyhow!("RoPE pre-capture update failed: {}", e))?;
 
             // ── CUDA graph capture ──
-            let graph = CudaRt::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
+            let graph = CudaRuntime::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
                 let logits = self.model().forward_graph_paged(
                     c, &token_buf, &paged_cache, &slot_mapping, &block_table,
                     &device_scalars, &cos_slice, &sin_slice,
@@ -375,7 +371,8 @@ impl Executor<boostr::CudaRuntime> {
                 .map_err(|e| anyhow!("Failed to seed next_token_buf: {}", e))?;
 
             // ── Graph decode loop ──
-            for i in 0..max_tokens.saturating_sub(1) {
+            let graph_max = max_tokens.saturating_sub(1);
+            for i in 0..graph_max {
                 let t1 = std::time::Instant::now();
 
                 decode_graph.pre_replay_and_launch(&client)
@@ -394,7 +391,6 @@ impl Executor<boostr::CudaRuntime> {
                     break;
                 }
 
-                let graph_max = max_tokens.saturating_sub(1);
                 let is_last = i + 1 == graph_max;
                 let text = self.tokenizer().decode(&[next_token]).unwrap_or_default();
                 yield Ok(GeneratedToken { token_id: next_token, text, logprob: None, top_logprobs: None, finish_reason: if is_last { Some(FinishReason::Length) } else { None } });

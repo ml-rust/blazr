@@ -12,6 +12,15 @@
 //!   --test qwen35_generate -- --nocapture
 //! ```
 //!
+//! `graph_mode_matches_eager_on_cuda` (feature `cuda`) runs the same prompt
+//! through `generate` and `generate_with_graphs` on device 0 for 8 greedy
+//! tokens and requires identical ids:
+//!
+//! ```bash
+//! BOOSTR_BONSAI2_DIR=/path/to/dir cargo test --release -p blazr --features cuda \
+//!   --test qwen35_generate graph_mode_matches_eager_on_cuda -- --nocapture
+//! ```
+//!
 //! # Memory
 //!
 //! The file is 7.2 GB and every dense tensor is decoded to F32, so expect
@@ -29,6 +38,8 @@ const ENV_DIR: &str = "BOOSTR_BONSAI2_DIR";
 const PQ2_0_FILE: &str = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
 const PROMPT: &str = "Hello";
 const NUM_TOKENS: usize = 4;
+#[cfg(feature = "cuda")]
+const GRAPH_TOKENS: usize = 8;
 
 /// The PQ2_0 file, or `None` after one `skip:` line.
 fn require_file() -> Option<PathBuf> {
@@ -92,4 +103,64 @@ async fn generates_four_tokens_greedily_on_cpu() {
         .decode(&ids)
         .unwrap_or_else(|e| panic!("decode {ids:?}: {e}"));
     assert!(!decoded.is_empty(), "decoded text is empty for ids {ids:?}");
+}
+
+/// Collect every token id from `stream`, failing on the first error.
+#[cfg(feature = "cuda")]
+async fn collect_ids<S>(stream: S, path: &str) -> Vec<u32>
+where
+    S: futures::Stream<Item = anyhow::Result<blazr::engine::GeneratedToken>>,
+{
+    let mut stream = std::pin::pin!(stream);
+    let mut ids = Vec::new();
+    while let Some(item) = stream.next().await {
+        let token = item.unwrap_or_else(|e| panic!("{path}: {e}"));
+        ids.push(token.token_id);
+    }
+    ids
+}
+
+#[cfg(feature = "cuda")]
+#[tokio::test]
+async fn graph_mode_matches_eager_on_cuda() {
+    use boostr::{CudaDevice, CudaRuntime};
+
+    let Some(path) = require_file() else {
+        return;
+    };
+    if !boostr::runtime::cuda::is_cuda_available() {
+        println!("skip: no CUDA device");
+        return;
+    }
+    let device = CudaDevice::new(0);
+
+    let (model, config, tokenizer) = load_gguf_with_tokenizer::<CudaRuntime, _>(&path, &device)
+        .unwrap_or_else(|e| panic!("load_gguf_with_tokenizer on {}: {e}", path.display()));
+    assert_eq!(config.model_type(), "qwen35");
+    assert!(model.supports_gdn_graph_mode());
+
+    let executor = Executor::new(model, config, tokenizer, device, 64)
+        .unwrap_or_else(|e| panic!("Executor::new: {e}"));
+
+    let prompt_tokens = executor.tokenizer().encode(PROMPT);
+    assert!(!prompt_tokens.is_empty(), "prompt encoded to no tokens");
+
+    let gen_config = GenerationConfig {
+        max_tokens: GRAPH_TOKENS,
+        temperature: 0.0,
+        repeat_penalty: 1.0,
+        ..GenerationConfig::default()
+    };
+    assert!(gen_config.is_greedy());
+
+    let eager = collect_ids(executor.generate(&prompt_tokens, &gen_config), "generate").await;
+    let graph = collect_ids(
+        executor.generate_with_graphs(&prompt_tokens, &gen_config),
+        "generate_with_graphs",
+    )
+    .await;
+
+    println!("prompt {PROMPT:?} -> eager {eager:?} graph {graph:?}");
+    assert_eq!(eager.len(), GRAPH_TOKENS, "eager produced {eager:?}");
+    assert_eq!(graph, eager, "graph-mode ids diverge from eager");
 }

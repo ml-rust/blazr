@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use async_stream::stream;
 
 use boostr::autograd::Var;
-use boostr::inference::decode_graph::{DecodeGraph, DeviceScalars, PagedDecodeGraph};
+use boostr::inference::decode_graph::{DeviceScalars, PagedDecodeGraph};
 use boostr::inference::kv_cache::LayeredPagedKvCache;
 use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
 use boostr::tensor::Tensor;
@@ -25,16 +25,18 @@ use super::types::{FinishReason, GeneratedToken};
 impl Executor<CudaRuntime> {
     /// Run greedy decode using compute graph capture+replay (CUDA backend).
     ///
-    /// After prompt prefill, captures the single-token decode forward pass as a
-    /// compute graph. Replay cost is one graph launch per token instead of
-    /// per-kernel dispatch.
+    /// The first request at a given capacity captures the single-token decode
+    /// step into `llama_graph_session`. Later requests reset the session's
+    /// KV cache in place, prefill their prompt eagerly, and replay the same
+    /// graph. Replay cost is one graph launch per token instead of
+    /// per-kernel dispatch. The session lock is held for the whole stream.
     ///
     /// A `qwen35` model takes the arm in `cuda_graphs_qwen35.rs`, which
     /// captures `forward_qwen35_graph_mode` with an arena.
     ///
     /// # Preconditions
     /// - Model must be Llama or `qwen35` (Mamba2/Hybrid graph mode not yet implemented)
-    /// - `gen_config.is_greedy()` must be true (graph replay is deterministic)
+    /// - `gen_config.is_greedy()` must be true and `gen_config.has_penalties()` false: the replay reads only the argmax token
     /// - `config.inference.paged_attention` must be false (use `generate_with_graphs_paged` for paged mode)
     pub fn generate_with_graphs<'a>(
         &'a self,
@@ -58,112 +60,41 @@ impl Executor<CudaRuntime> {
             }
 
             let max_seq_len = self.config().max_seq_len();
-            // Graph mode pre-allocates KV cache at fixed capacity.
-            // Use num_ctx (user-specified) capped to model max_seq_len.
+            // Graph mode pre-allocates the KV cache at fixed capacity:
+            // num_ctx capped to the model's max_seq_len.
             let graph_capacity = self.num_ctx().min(max_seq_len);
             let max_tokens = gen_config.max_tokens.min(
                 graph_capacity.saturating_sub(prompt_tokens.len())
             );
 
             let input = self.create_input_tensor(prompt_tokens)?;
-
-            // ── KV cache at full capacity (required for stable device addresses) ──
-            let num_layers = self.model().num_layers();
-            let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
-            let head_dim = self.model().head_dim().unwrap_or(64);
-            let half_dim = head_dim / 2;
-            let kv_dtype = parse_dtype(self.config().dtype())?;
-
-            let mut kv_cache = boostr::inference::LayeredKvCache::new_positional(
-                num_layers, 1, num_kv_heads, graph_capacity, graph_capacity, head_dim, kv_dtype, self.device(),
-            ).map_err(|e| anyhow!("Failed to create full-capacity KV cache: {}", e))?;
-
-            // ── Prefill ──
-            let t0 = std::time::Instant::now();
-            let prefill_logits = self.model().forward_with_kv_cache(&input, &mut kv_cache, 0)
-                .map_err(|e| anyhow!("Prefill forward pass failed: {}", e))?;
-            tracing::info!("Graph-mode prefill: {:?} (seq_len={})", t0.elapsed(), prompt_tokens.len());
-
-            // ── Extract RoPE tables from model ──
-            let (rope_cos_var, rope_sin_var) = self.model()
-                .rope_caches()
-                .ok_or_else(|| anyhow!("Model has no RoPE cache — cannot use CUDA graph mode"))?;
-            let rope_cos_cache = rope_cos_var.tensor().clone();
-            let rope_sin_cache = rope_sin_var.tensor().clone();
-
             let client = CudaRuntime::default_client(self.device());
 
-            // ── Stable-address decode inputs (ALL allocated BEFORE graph capture) ──
-            let token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?;
-
-            let cos_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
-            let sin_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
-            let cos_slice = Var::new(cos_slice_t, false);
-            let sin_slice = Var::new(sin_slice_t, false);
-
-            let device_scalars = DeviceScalars::new(kv_cache.seq_len(), self.device())?;
-
-            let next_token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device())?;
-
-            // ── Warmup pass: JIT all kernels, do NOT capture yet ──
-            device_scalars.update(&client, kv_cache.seq_len())
-                .map_err(|e| anyhow!("DeviceScalars warmup update failed: {}", e))?;
-            let warmup_logits = self.model().forward_graph_mode(
-                &token_buf, &mut kv_cache, &device_scalars, &cos_slice, &sin_slice,
-            ).map_err(|e| anyhow!("Graph-mode warmup forward failed: {}", e))?;
-            boostr::inference::decode_graph::argmax_to_buf(&client, &warmup_logits, &next_token_buf)
-                .map_err(|e| anyhow!("Warmup argmax_to_buf failed: {}", e))?;
-
-            // Re-prefill with a fresh KV cache so capture starts from the correct state
-            let mut kv_cache = boostr::inference::LayeredKvCache::new_positional(
-                num_layers, 1, num_kv_heads, graph_capacity, graph_capacity, head_dim, kv_dtype, self.device(),
-            ).map_err(|e| anyhow!("Failed to re-create KV cache for capture: {}", e))?;
-            let _ = self.model().forward_with_kv_cache(&input, &mut kv_cache, 0)
-                .map_err(|e| anyhow!("Re-prefill for capture failed: {}", e))?;
-
-            let capture_seq_len = kv_cache.seq_len();
-            device_scalars.update(&client, capture_seq_len)
-                .map_err(|e| anyhow!("DeviceScalars pre-capture update failed: {}", e))?;
-            device_scalars.update_rope_slices(&client, &rope_cos_cache, &rope_sin_cache, &cos_slice, &sin_slice, capture_seq_len, half_dim)
-                .map_err(|e| anyhow!("RoPE pre-capture update failed: {}", e))?;
-
-            // ── CUDA graph capture ──
-            let graph = CudaRuntime::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
-                let logits = self.model().forward_graph_mode(
-                    &token_buf, &mut kv_cache, &device_scalars, &cos_slice, &sin_slice,
-                ).map_err(|e| boostr::NumrError::Backend(format!("Capture forward failed: {e}")))?;
-                boostr::inference::decode_graph::argmax_to_buf(c, &logits, &next_token_buf)
-                    .map_err(|e| boostr::NumrError::Backend(format!("Capture argmax_to_buf failed: {e}")))
-            }).map_err(|e| anyhow!("CUDA graph capture failed: {}", e))?;
-
-            tracing::info!("CUDA graph captured (seq_len={})", kv_cache.seq_len());
-
-            // Build DecodeGraph with all stable-address state
-            let mut decode_graph = DecodeGraph {
-                graph,
-                device_scalars,
-                token_buf,
-                cos_slice: cos_slice.tensor().clone(),
-                sin_slice: sin_slice.tensor().clone(),
-                rope_cos_cache,
-                rope_sin_cache,
-                next_token_buf,
-                head_dim: half_dim, // DecodeGraph stores half_dim in head_dim field
-                seq_len: kv_cache.seq_len(),
+            // One captured graph per executor: the guard is held for the
+            // whole request, so graph-mode requests run one at a time.
+            let mut guard = self.llama_graph_session.lock().await;
+            let reuse = guard.as_ref().is_some_and(|s| s.capacity == graph_capacity);
+            let (session, prefill_logits) = if reuse {
+                let session = guard.as_mut()
+                    .ok_or_else(|| anyhow!("Llama graph session missing after reuse check"))?;
+                let logits = self.llama_session_prefill(session, &input)?;
+                (session, logits)
+            } else {
+                *guard = None;
+                let (session, logits) = self.llama_build_session(&input, graph_capacity)?;
+                (guard.insert(session), logits)
             };
+            let decode_graph = &mut session.decode;
 
             // ── First token from prefill logits ──
-            let first_token_gpu = self.argmax_on_gpu(&prefill_logits)?;
-            let first_event = first_token_gpu.record_event()
-                .map_err(|e| anyhow!("Record event failed: {}", e))?;
-            let first_token = Self::read_token_id(&first_token_gpu, first_event)?;
+            let first_token = self.first_token_from_logits(&prefill_logits)?;
+            drop(prefill_logits);
 
             if self.tokenizer().is_eos(first_token) {
-                yield Ok(GeneratedToken { token_id: first_token, text: String::new(), logprob: None, top_logprobs: None, finish_reason: Some(FinishReason::Eos) });
+                yield Ok(Self::eos_token(first_token));
                 return;
             }
-            let text = self.tokenizer().decode(&[first_token]).unwrap_or_default();
-            yield Ok(GeneratedToken { token_id: first_token, text, logprob: None, top_logprobs: None, finish_reason: None });
+            yield Ok(self.text_token(first_token, None));
 
             // Seed next_token_buf with the first token
             decode_graph.seed_next_token(&client, first_token as i64)
@@ -186,13 +117,13 @@ impl Executor<CudaRuntime> {
                 tracing::info!("Graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
 
                 if self.tokenizer().is_eos(next_token) {
-                    yield Ok(GeneratedToken { token_id: next_token, text: String::new(), logprob: None, top_logprobs: None, finish_reason: Some(FinishReason::Eos) });
+                    yield Ok(Self::eos_token(next_token));
                     break;
                 }
 
                 let is_last = i + 1 == graph_max;
-                let text = self.tokenizer().decode(&[next_token]).unwrap_or_default();
-                yield Ok(GeneratedToken { token_id: next_token, text, logprob: None, top_logprobs: None, finish_reason: if is_last { Some(FinishReason::Length) } else { None } });
+                let finish_reason = if is_last { Some(FinishReason::Length) } else { None };
+                yield Ok(self.text_token(next_token, finish_reason));
             }
         }
     }
@@ -205,7 +136,7 @@ impl Executor<CudaRuntime> {
     ///
     /// # Preconditions
     /// - Model must be Llama
-    /// - `gen_config.is_greedy()` must be true
+    /// - `gen_config.is_greedy()` must be true and `gen_config.has_penalties()` false
     /// - `config.inference.paged_attention` must be true
     pub fn generate_with_graphs_paged<'a>(
         &'a self,
@@ -280,8 +211,8 @@ impl Executor<CudaRuntime> {
 
             // ── Stable-address tensors (ALL allocated BEFORE graph capture) ──
             let token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?;
-            let cos_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
-            let sin_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], boostr::DType::F32, self.device())?;
+            let cos_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], rope_cos_cache.dtype(), self.device())?;
+            let sin_slice_t = boostr::Tensor::<CudaRuntime>::zeros(&[1, half_dim], rope_sin_cache.dtype(), self.device())?;
             let cos_slice = Var::new(cos_slice_t, false);
             let sin_slice = Var::new(sin_slice_t, false);
 
@@ -361,11 +292,10 @@ impl Executor<CudaRuntime> {
             let first_token = Self::read_token_id(&first_token_gpu, first_event)?;
 
             if self.tokenizer().is_eos(first_token) {
-                yield Ok(GeneratedToken { token_id: first_token, text: String::new(), logprob: None, top_logprobs: None, finish_reason: Some(FinishReason::Eos) });
+                yield Ok(Self::eos_token(first_token));
                 return;
             }
-            let text = self.tokenizer().decode(&[first_token]).unwrap_or_default();
-            yield Ok(GeneratedToken { token_id: first_token, text, logprob: None, top_logprobs: None, finish_reason: None });
+            yield Ok(self.text_token(first_token, None));
 
             decode_graph.seed_next_token(&client, first_token as i64)
                 .map_err(|e| anyhow!("Failed to seed next_token_buf: {}", e))?;
@@ -387,13 +317,13 @@ impl Executor<CudaRuntime> {
                 tracing::info!("Paged graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
 
                 if self.tokenizer().is_eos(next_token) {
-                    yield Ok(GeneratedToken { token_id: next_token, text: String::new(), logprob: None, top_logprobs: None, finish_reason: Some(FinishReason::Eos) });
+                    yield Ok(Self::eos_token(next_token));
                     break;
                 }
 
                 let is_last = i + 1 == graph_max;
-                let text = self.tokenizer().decode(&[next_token]).unwrap_or_default();
-                yield Ok(GeneratedToken { token_id: next_token, text, logprob: None, top_logprobs: None, finish_reason: if is_last { Some(FinishReason::Length) } else { None } });
+                let finish_reason = if is_last { Some(FinishReason::Length) } else { None };
+                yield Ok(self.text_token(next_token, finish_reason));
             }
         }
     }

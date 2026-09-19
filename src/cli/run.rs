@@ -141,7 +141,18 @@ async fn run_cuda(
     // If prompt provided, generate once
     if let Some(prompt) = prompt {
         let prompt_tokens = executor.tokenizer().encode(&prompt);
-        if graphs && gen_config.is_greedy() {
+        // Graph replay reads only the argmax token, so it decodes greedily
+        // and applies no penalties. Any other sampling config runs eagerly.
+        let graph_eligible = gen_config.is_greedy() && !gen_config.has_penalties();
+        if graphs && !graph_eligible {
+            tracing::warn!(
+                "CUDA graph mode needs temperature 0 and no repeat/frequency/presence \
+                 penalty (got temperature={}, repeat_penalty={}); decoding eagerly",
+                gen_config.temperature,
+                gen_config.repeat_penalty
+            );
+        }
+        if graphs && graph_eligible {
             if paged_attention {
                 print_generation_stream(
                     executor.generate_with_graphs_paged(&prompt_tokens, &gen_config),

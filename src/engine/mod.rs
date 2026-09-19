@@ -24,6 +24,7 @@ mod generate_text;
 pub mod grammar;
 pub(crate) mod grammar_json;
 pub(crate) mod grammar_parser;
+mod graph_session;
 pub mod lora;
 pub(crate) mod mirostat;
 pub mod moe_offload;
@@ -41,6 +42,8 @@ mod warmup;
 pub use batch_engine::BatchEngine;
 pub use data_parallel::DataParallelGroup;
 pub use executor::Executor;
+#[cfg(feature = "cuda")]
+pub use graph_session::{LlamaGraphSession, Qwen35GraphSession};
 pub use lora::{load_lora_adapter, LoraAdapter, LoraAdapterRegistry};
 pub use request_scheduler::RequestScheduler;
 pub use scheduler::{parse_keep_alive, AvailableModelInfo, Scheduler};

@@ -12,9 +12,10 @@
 //!   --test qwen35_generate -- --nocapture
 //! ```
 //!
-//! `graph_mode_matches_eager_on_cuda` (feature `cuda`) runs the same prompt
+//! `graph_mode_matches_eager_on_cuda` (feature `cuda`) runs two prompts
 //! through `generate` and `generate_with_graphs` on device 0 for 8 greedy
-//! tokens and requires identical ids:
+//! tokens each, requires identical ids per prompt, and requires the second
+//! graph-mode request to reuse the session captured by the first:
 //!
 //! ```bash
 //! BOOSTR_BONSAI2_DIR=/path/to/dir cargo test --release -p blazr --features cuda \
@@ -37,6 +38,8 @@ use boostr::{CpuDevice, CpuRuntime};
 const ENV_DIR: &str = "BOOSTR_BONSAI2_DIR";
 const PQ2_0_FILE: &str = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
 const PROMPT: &str = "Hello";
+#[cfg(feature = "cuda")]
+const PROMPT_B: &str = "The capital of France is";
 const NUM_TOKENS: usize = 4;
 #[cfg(feature = "cuda")]
 const GRAPH_TOKENS: usize = 8;
@@ -142,9 +145,6 @@ async fn graph_mode_matches_eager_on_cuda() {
     let executor = Executor::new(model, config, tokenizer, device, 64)
         .unwrap_or_else(|e| panic!("Executor::new: {e}"));
 
-    let prompt_tokens = executor.tokenizer().encode(PROMPT);
-    assert!(!prompt_tokens.is_empty(), "prompt encoded to no tokens");
-
     let gen_config = GenerationConfig {
         max_tokens: GRAPH_TOKENS,
         temperature: 0.0,
@@ -152,15 +152,39 @@ async fn graph_mode_matches_eager_on_cuda() {
         ..GenerationConfig::default()
     };
     assert!(gen_config.is_greedy());
+    assert_eq!(executor.graph_captures(), 0);
 
-    let eager = collect_ids(executor.generate(&prompt_tokens, &gen_config), "generate").await;
-    let graph = collect_ids(
-        executor.generate_with_graphs(&prompt_tokens, &gen_config),
-        "generate_with_graphs",
-    )
-    .await;
+    let mut captures_after_first = 0;
+    for (i, prompt) in [PROMPT, PROMPT_B].into_iter().enumerate() {
+        let prompt_tokens = executor.tokenizer().encode(prompt);
+        assert!(
+            !prompt_tokens.is_empty(),
+            "prompt {prompt:?} encoded to no tokens"
+        );
 
-    println!("prompt {PROMPT:?} -> eager {eager:?} graph {graph:?}");
-    assert_eq!(eager.len(), GRAPH_TOKENS, "eager produced {eager:?}");
-    assert_eq!(graph, eager, "graph-mode ids diverge from eager");
+        let eager = collect_ids(executor.generate(&prompt_tokens, &gen_config), "generate").await;
+        let graph = collect_ids(
+            executor.generate_with_graphs(&prompt_tokens, &gen_config),
+            "generate_with_graphs",
+        )
+        .await;
+
+        println!("prompt {prompt:?} -> eager {eager:?} graph {graph:?}");
+        assert_eq!(eager.len(), GRAPH_TOKENS, "eager produced {eager:?}");
+        assert_eq!(
+            graph, eager,
+            "graph-mode ids diverge from eager for {prompt:?}"
+        );
+
+        let captures = executor.graph_captures();
+        if i == 0 {
+            assert!(captures >= 1, "first graph-mode request did not capture");
+            captures_after_first = captures;
+        } else {
+            assert_eq!(
+                captures, captures_after_first,
+                "second graph-mode request recaptured"
+            );
+        }
+    }
 }

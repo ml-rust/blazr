@@ -63,6 +63,18 @@ pub struct Executor<R: Runtime<DType = DType>> {
     #[cfg(feature = "cuda")]
     pub(crate) gpu_prefix_cache:
         Option<std::sync::Mutex<boostr::inference::prefix_cache::GpuPrefixCache>>,
+    /// Captured Llama decode graph and its caches, reused across requests.
+    /// Held for a whole graph-mode request, so such requests run one at a time.
+    #[cfg(feature = "cuda")]
+    pub(crate) llama_graph_session:
+        tokio::sync::Mutex<Option<super::graph_session::LlamaGraphSession>>,
+    /// Captured `qwen35` decode graph and its caches, reused across requests.
+    #[cfg(feature = "cuda")]
+    pub(crate) qwen35_graph_session:
+        tokio::sync::Mutex<Option<super::graph_session::Qwen35GraphSession>>,
+    /// Graph captures on this executor, across both arms.
+    #[cfg(feature = "cuda")]
+    pub(crate) graph_captures: std::sync::atomic::AtomicUsize,
 }
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -232,6 +244,12 @@ where
             tp_state: None,
             #[cfg(feature = "cuda")]
             gpu_prefix_cache,
+            #[cfg(feature = "cuda")]
+            llama_graph_session: tokio::sync::Mutex::new(None),
+            #[cfg(feature = "cuda")]
+            qwen35_graph_session: tokio::sync::Mutex::new(None),
+            #[cfg(feature = "cuda")]
+            graph_captures: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 

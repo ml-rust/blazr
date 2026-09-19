@@ -145,6 +145,7 @@ impl Default for BlazrConfig {
                 gdn: None,
                 qwen35_attention: None,
                 hadamard: None,
+                quant_formats: Vec::new(),
             },
             inference: InferenceConfig::default(),
             server: None,
@@ -402,6 +403,7 @@ generation:
             gdn: None,
             qwen35_attention: None,
             hadamard: None,
+            quant_formats: Vec::new(),
         };
         let config = BlazrConfig::from_universal(universal);
         assert_eq!(config.model_type(), "llama");
@@ -428,6 +430,7 @@ generation:
                 gdn: None,
                 qwen35_attention: None,
                 hadamard: None,
+                quant_formats: Vec::new(),
             },
             "f16",
         );

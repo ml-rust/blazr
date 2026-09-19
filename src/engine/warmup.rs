@@ -7,6 +7,7 @@ use boostr::inference::memory::{BlockAllocator, CpuBlockAllocator};
 use boostr::inference::{LayeredKvCache, LayeredSsmState};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
+use boostr::quant::ScheduleTuning;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
     Tensor, TypeConversionOps, UnaryOps,
@@ -39,6 +40,13 @@ where
     pub fn warmup(&self) -> Result<()> {
         tracing::debug!("Warming up model kernels...");
         let start = std::time::Instant::now();
+
+        // Fill the per-device MMQ schedule-tuning cache before any forward
+        // pass below. A `tuned()` lookup made later inside a CUDA graph
+        // capture refuses to probe, so an unwarmed key would silently keep
+        // the one-part fallback instead of this device's measured pick.
+        // No-op on any backend but CUDA.
+        R::default_client(self.device()).warm_schedule_tuning(self.model().quant_formats());
 
         // Create a single-token input
         let warmup_input = Tensor::from_slice(&[1i64], &[1, 1], self.device())?;

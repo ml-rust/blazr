@@ -251,6 +251,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         gdn: None,
         qwen35_attention: None,
         hadamard: None,
+        quant_formats: Vec::new(),
     };
 
     Ok(BlazrConfig::from_universal_with_dtype(model_config, "f32"))

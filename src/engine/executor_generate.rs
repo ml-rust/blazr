@@ -1,6 +1,5 @@
 //! `generate()` method for the inference executor.
 //!
-//! Extracted into its own file to keep executor.rs under the file size limit.
 //! This is a separate `impl` block for `Executor<R>` — the struct and all other
 //! methods remain in `executor.rs`.
 

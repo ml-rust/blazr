@@ -1,8 +1,8 @@
 //! `qwen35` arm of [`Executor::generate`]: KV cache for the attention
 //! layers plus `LayeredGdnState` for the Gated DeltaNet layers.
 //!
-//! Split from `executor_generate.rs` for the file size cap. The sampling,
-//! grammar, stop and streaming steps mirror the contiguous KV branch there.
+//! The sampling, grammar, stop and streaming steps mirror the contiguous
+//! KV branch in `executor_generate.rs`.
 
 use anyhow::{anyhow, Result};
 use async_stream::stream;

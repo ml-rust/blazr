@@ -1,6 +1,5 @@
 //! Batched decode step for continuous batching
 //!
-//! Extracted from `batch_engine` to keep file sizes within limits.
 //! Contains the core logic for batched single-token decoding.
 
 use anyhow::{anyhow, Result};

@@ -34,7 +34,7 @@ where
     /// Warm up the model by running a dummy forward pass
     ///
     /// This pre-loads all CUDA PTX modules and triggers JIT compilation,
-    /// eliminating the ~90ms first-run overhead from TTFT.
+    /// eliminating the first-run JIT overhead from TTFT.
     /// Call this after model loading, before the first generation.
     pub fn warmup(&self) -> Result<()> {
         tracing::debug!("Warming up model kernels...");

@@ -25,7 +25,8 @@ impl Executor<boostr::CudaRuntime> {
     /// Run greedy decode using compute graph capture+replay (CUDA backend).
     ///
     /// After prompt prefill, captures the single-token decode forward pass as a
-    /// compute graph. Replay cost is ~5µs per token instead of ~13ms kernel dispatch.
+    /// compute graph. Replay cost is one graph launch per token instead of
+    /// per-kernel dispatch.
     ///
     /// # Preconditions
     /// - Model must be Llama (Mamba2/Hybrid graph mode not yet implemented)

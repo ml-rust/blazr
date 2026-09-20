@@ -78,7 +78,8 @@ impl Executor<CudaRuntime> {
             .map_err(|e| anyhow!("qwen35 graph-mode prefill failed: {}", e))
     }
 
-    /// Write both scalar buffers for `seq_len`.
+    /// Write both scalar buffers for `seq_len`: a text-only context, so the
+    /// rope position equals the KV slot.
     fn qwen35_write_scalars(
         client: &CudaClient,
         device_scalars: &DeviceScalars,
@@ -159,6 +160,8 @@ impl Executor<CudaRuntime> {
         )?;
         let seq_len = session.kv_cache.seq_len();
         session.decode.seq_len = seq_len;
+        // Text-only prompt: the rope position is the KV slot.
+        session.decode.rope_pos = seq_len;
         Self::qwen35_write_scalars(
             client,
             &session.decode.device_scalars,
@@ -267,6 +270,7 @@ impl Executor<CudaRuntime> {
             token_buf,
             next_token_buf,
             seq_len: kv_cache.seq_len(),
+            rope_pos: kv_cache.seq_len(),
         };
         let session = Qwen35GraphSession {
             decode,

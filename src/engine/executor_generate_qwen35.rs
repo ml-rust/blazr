@@ -97,7 +97,8 @@ where
     }
 
     /// Prefill then greedy/sampled decode through `forward_qwen35`.
-    /// `position` is `kv_cache.seq_len()` on every decode step.
+    /// Text-only, so the rope position of every decode step is
+    /// `kv_cache.seq_len()`.
     pub(super) fn generate_qwen35<'a>(
         &'a self,
         prompt_tokens: &'a [u32],
@@ -134,8 +135,8 @@ where
                     .map_err(|e| anyhow!("Record event failed: {}", e))?;
 
                 let next_input = token_gpu.reshape(&[1, 1])?;
-                let position = kv_cache.seq_len();
-                let next_logits = self.model.forward_qwen35(&next_input, &mut kv_cache, &mut gdn_state, position)
+                let rope_pos = kv_cache.seq_len();
+                let next_logits = self.model.forward_qwen35(&next_input, &mut kv_cache, &mut gdn_state, rope_pos)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 let fwd_time = t1.elapsed();
 

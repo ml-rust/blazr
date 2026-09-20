@@ -6,7 +6,9 @@
 //! The first request at a capacity builds the session: eager prefill, an
 //! uncaptured warmup pass of the graph-mode forward, a reset plus re-prefill
 //! into the same caches, then capture. Later requests reset the caches in
-//! place, prefill their prompt, and replay. One `qwen35` decode step records
+//! place, prefill their prompt, and replay. An image prompt prefills its
+//! [`Qwen35PromptPlan`] instead of its ids and starts the replay at the rope
+//! position the plan leaves, behind the KV slot. One `qwen35` decode step records
 //! on the order of a thousand intermediate allocations, so capture goes
 //! through the arena variant; the arena is sized generously first and
 //! tightened from the reported footprint when the first guess is more than
@@ -21,6 +23,7 @@ use boostr::inference::decode_graph::{
     argmax_to_buf, DeviceScalars, MropeScalars, Qwen35DecodeGraph,
 };
 use boostr::inference::{LayeredGdnState, LayeredKvCache};
+use boostr::model::qwen35::Qwen35PromptPlan;
 use boostr::runtime::cuda::CudaRuntime as CudaRt;
 use boostr::{CudaClient, CudaRuntime, Runtime, Tensor};
 
@@ -61,11 +64,14 @@ impl Executor<CudaRuntime> {
         padded.div_ceil(ARENA_ROUND_BYTES).max(1) * ARENA_ROUND_BYTES
     }
 
-    /// Reset both caches in place and eager-prefill `input` at position 0.
+    /// Reset both caches in place and eager-prefill at position 0: `plan`
+    /// through the embeddings forward, else `input` through the token
+    /// forward.
     fn qwen35_reset_and_prefill(
         &self,
         client: &CudaClient,
         input: &Tensor<CudaRuntime>,
+        plan: Option<&Qwen35PromptPlan<CudaRuntime>>,
         kv_cache: &mut LayeredKvCache<CudaRuntime>,
         gdn_state: &mut LayeredGdnState<CudaRuntime>,
     ) -> Result<Tensor<CudaRuntime>> {
@@ -73,24 +79,25 @@ impl Executor<CudaRuntime> {
         gdn_state
             .reset(client)
             .map_err(|e| anyhow!("qwen35 GDN state reset failed: {}", e))?;
-        self.model()
-            .forward_qwen35(input, kv_cache, gdn_state, 0)
+        self.qwen35_prefill(input, plan, kv_cache, gdn_state)
             .map_err(|e| anyhow!("qwen35 graph-mode prefill failed: {}", e))
     }
 
-    /// Write both scalar buffers for `seq_len`: a text-only context, so the
-    /// rope position equals the KV slot.
+    /// Write both scalar buffers: the KV slot `seq_len` and the rope
+    /// position `rope_pos` of the next token. Equal for a text-only
+    /// context; `rope_pos` lags after an image.
     fn qwen35_write_scalars(
         client: &CudaClient,
         device_scalars: &DeviceScalars,
         mrope: &MropeScalars,
         seq_len: usize,
+        rope_pos: usize,
     ) -> Result<()> {
         device_scalars
             .update(client, seq_len)
             .map_err(|e| anyhow!("DeviceScalars update failed: {}", e))?;
         mrope
-            .update(client, seq_len)
+            .update(client, rope_pos)
             .map_err(|e| anyhow!("MropeScalars update failed: {}", e))?;
         Ok(())
     }
@@ -103,6 +110,7 @@ impl Executor<CudaRuntime> {
         inputs: &Qwen35GraphInputs,
         kv_cache: &LayeredKvCache<CudaRuntime>,
         gdn_state: &LayeredGdnState<CudaRuntime>,
+        rope_pos: usize,
         arena_bytes: usize,
     ) -> Result<boostr::runtime::CapturedGraph<CudaRuntime>> {
         Self::qwen35_write_scalars(
@@ -110,6 +118,7 @@ impl Executor<CudaRuntime> {
             &inputs.device_scalars,
             &inputs.mrope,
             kv_cache.seq_len(),
+            rope_pos,
         )?;
         let graph = CudaRt::capture_graph_into_with_arena(
             client,
@@ -144,29 +153,33 @@ impl Executor<CudaRuntime> {
         Ok(graph)
     }
 
-    /// Reset the session caches, prefill `input`, and set the decode position
-    /// and scalars for the first replay. Returns the prefill logits.
+    /// Reset the session caches, prefill `input` or `plan`, and set the
+    /// decode position and scalars for the first replay. Returns the prefill
+    /// logits.
     fn qwen35_session_prefill(
         &self,
         client: &CudaClient,
         session: &mut Qwen35GraphSession,
         input: &Tensor<CudaRuntime>,
+        plan: Option<&Qwen35PromptPlan<CudaRuntime>>,
     ) -> Result<Tensor<CudaRuntime>> {
         let logits = self.qwen35_reset_and_prefill(
             client,
             input,
+            plan,
             &mut session.kv_cache,
             &mut session.gdn_state,
         )?;
         let seq_len = session.kv_cache.seq_len();
+        let rope_pos = Self::qwen35_first_rope_pos(plan, &session.kv_cache);
         session.decode.seq_len = seq_len;
-        // Text-only prompt: the rope position is the KV slot.
-        session.decode.rope_pos = seq_len;
+        session.decode.rope_pos = rope_pos;
         Self::qwen35_write_scalars(
             client,
             &session.decode.device_scalars,
             &session.decode.mrope,
             seq_len,
+            rope_pos,
         )?;
         Ok(logits)
     }
@@ -180,14 +193,14 @@ impl Executor<CudaRuntime> {
         &self,
         client: &CudaClient,
         input: &Tensor<CudaRuntime>,
+        plan: Option<&Qwen35PromptPlan<CudaRuntime>>,
         capacity: usize,
     ) -> Result<(Qwen35GraphSession, Tensor<CudaRuntime>)> {
         let (mut kv_cache, mut gdn_state) = self.qwen35_caches(capacity, capacity)?;
 
         let t0 = std::time::Instant::now();
         let warm_logits = self
-            .model()
-            .forward_qwen35(input, &mut kv_cache, &mut gdn_state, 0)
+            .qwen35_prefill(input, plan, &mut kv_cache, &mut gdn_state)
             .map_err(|e| anyhow!("qwen35 graph-mode prefill failed: {}", e))?;
         tracing::info!(
             "qwen35 graph-mode prefill: {:?} (seq_len={})",
@@ -196,13 +209,14 @@ impl Executor<CudaRuntime> {
         );
         drop(warm_logits);
         let capture_seq_len = kv_cache.seq_len();
+        let capture_rope_pos = Self::qwen35_first_rope_pos(plan, &kv_cache);
 
         // Stable-address decode inputs, all allocated before capture.
         let inputs = Qwen35GraphInputs {
             token_buf: Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?,
             next_token_buf: Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device())?,
             device_scalars: DeviceScalars::new(capture_seq_len, self.device())?,
-            mrope: MropeScalars::new(capture_seq_len, self.device())?,
+            mrope: MropeScalars::new(capture_rope_pos, self.device())?,
         };
 
         // Warmup pass: JIT kernels and probe the tuner, not captured.
@@ -211,6 +225,7 @@ impl Executor<CudaRuntime> {
             &inputs.device_scalars,
             &inputs.mrope,
             capture_seq_len,
+            capture_rope_pos,
         )?;
         let warmup_logits = self
             .model()
@@ -231,11 +246,18 @@ impl Executor<CudaRuntime> {
         // and prefill again so capture starts from the prompt state at the
         // same addresses.
         let prefill_logits =
-            self.qwen35_reset_and_prefill(client, input, &mut kv_cache, &mut gdn_state)?;
+            self.qwen35_reset_and_prefill(client, input, plan, &mut kv_cache, &mut gdn_state)?;
 
         // First capture with a generous arena.
         let first_arena = self.qwen35_first_arena_bytes()?;
-        let mut graph = self.qwen35_capture(client, &inputs, &kv_cache, &gdn_state, first_arena)?;
+        let mut graph = self.qwen35_capture(
+            client,
+            &inputs,
+            &kv_cache,
+            &gdn_state,
+            capture_rope_pos,
+            first_arena,
+        )?;
         let used = graph.arena_bytes_used().unwrap_or(first_arena);
         tracing::info!(
             "qwen35 CUDA graph captured (arena={} used={})",
@@ -249,7 +271,14 @@ impl Executor<CudaRuntime> {
         if used < first_arena / 2 {
             let tight_arena = Self::qwen35_tight_arena_bytes(used);
             drop(graph);
-            graph = self.qwen35_capture(client, &inputs, &kv_cache, &gdn_state, tight_arena)?;
+            graph = self.qwen35_capture(
+                client,
+                &inputs,
+                &kv_cache,
+                &gdn_state,
+                capture_rope_pos,
+                tight_arena,
+            )?;
             tracing::info!(
                 "qwen35 CUDA graph recaptured (arena={} used={:?})",
                 tight_arena,
@@ -270,7 +299,7 @@ impl Executor<CudaRuntime> {
             token_buf,
             next_token_buf,
             seq_len: kv_cache.seq_len(),
-            rope_pos: kv_cache.seq_len(),
+            rope_pos: capture_rope_pos,
         };
         let session = Qwen35GraphSession {
             decode,
@@ -281,7 +310,9 @@ impl Executor<CudaRuntime> {
         Ok((session, prefill_logits))
     }
 
-    /// Greedy graph-mode decode for a `qwen35` model.
+    /// Greedy graph-mode decode for a `qwen35` model. `images` holds the
+    /// encoded bytes of one image per `<|image_pad|>` in `prompt_tokens`;
+    /// empty for a text prompt.
     ///
     /// The session lock is held for the whole stream, so graph-mode requests
     /// on one executor run one at a time.
@@ -292,13 +323,26 @@ impl Executor<CudaRuntime> {
     pub(super) fn generate_with_graphs_qwen35<'a>(
         &'a self,
         prompt_tokens: &'a [u32],
+        images: &'a [Vec<u8>],
         gen_config: &'a crate::config::GenerationConfig,
     ) -> impl futures::Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             let max_seq_len = self.config().max_seq_len();
             let graph_capacity = self.num_ctx().min(max_seq_len);
+            let plan = if images.is_empty() {
+                None
+            } else {
+                Some(self.qwen35_image_plan(prompt_tokens, images)?)
+            };
+            let prompt_rows = plan.as_ref().map_or(prompt_tokens.len(), Qwen35PromptPlan::seq_len);
+            if prompt_rows > graph_capacity {
+                yield Err(anyhow!(
+                    "prompt of {prompt_rows} rows exceeds the graph capacity of {graph_capacity}"
+                ));
+                return;
+            }
             let max_tokens = gen_config.max_tokens.min(
-                graph_capacity.saturating_sub(prompt_tokens.len())
+                graph_capacity.saturating_sub(prompt_rows)
             );
 
             let input = self.create_input_tensor(prompt_tokens)?;
@@ -309,13 +353,15 @@ impl Executor<CudaRuntime> {
             let (session, prefill_logits) = if reuse {
                 let session = guard.as_mut()
                     .ok_or_else(|| anyhow!("qwen35 graph session missing after reuse check"))?;
-                let logits = self.qwen35_session_prefill(&client, session, &input)?;
+                let logits = self.qwen35_session_prefill(&client, session, &input, plan.as_ref())?;
                 (session, logits)
             } else {
                 *guard = None;
-                let (session, logits) = self.qwen35_build_session(&client, &input, graph_capacity)?;
+                let (session, logits) =
+                    self.qwen35_build_session(&client, &input, plan.as_ref(), graph_capacity)?;
                 (guard.insert(session), logits)
             };
+            drop(plan);
             let decode_graph = &mut session.decode;
 
             // ── First token from prefill logits ──

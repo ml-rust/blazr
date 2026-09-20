@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use splintr::{AnyTokenizer, PolicyError, SpecialMode};
+use splintr::{AnyTokenizer, FxHashSet, PolicyError, SpecialMode};
 
 use super::builtin::NO_MARKERS;
 use super::jinja::{RenderOptions, TemplateError};
@@ -65,16 +65,47 @@ pub fn encode_chat_prompt(
     context_prefix: &str,
     options: &RenderOptions,
 ) -> Result<(String, Vec<u32>), ChatPromptError> {
+    encode_chat_prompt_with_markers(
+        template,
+        tokenizer,
+        messages,
+        context_prefix,
+        options,
+        &NO_MARKERS,
+    )
+}
+
+/// [`encode_chat_prompt`] for messages the server itself wrote control
+/// tokens into: the image markers a vision tower expands. `server_markers`
+/// joins the allow-list of the per-message check and of the final encode.
+///
+/// The check no longer tells a marker the server inserted from one the
+/// caller spelled, so the caller counts them against the images it holds
+/// after this returns.
+pub fn encode_chat_prompt_with_markers(
+    template: &ChatTemplate,
+    tokenizer: &AnyTokenizer,
+    messages: &[ChatMessage],
+    context_prefix: &str,
+    options: &RenderOptions,
+    server_markers: &FxHashSet<String>,
+) -> Result<(String, Vec<u32>), ChatPromptError> {
     for msg in messages {
-        tokenizer.encode_with(&msg.content, &SpecialMode::Allow(&NO_MARKERS))?;
+        tokenizer.encode_with(&msg.content, &SpecialMode::Allow(server_markers))?;
         if let Some(reasoning) = &msg.reasoning_content {
-            tokenizer.encode_with(reasoning, &SpecialMode::Allow(&NO_MARKERS))?;
+            tokenizer.encode_with(reasoning, &SpecialMode::Allow(server_markers))?;
         }
     }
 
     let mut prompt = String::from(context_prefix);
     prompt.push_str(&template.apply_with(messages, options)?);
-    let ids = tokenizer.encode_with(&prompt, &SpecialMode::Allow(template.allowed_special()))?;
+    let ids = if server_markers.is_empty() {
+        tokenizer.encode_with(&prompt, &SpecialMode::Allow(template.allowed_special()))?
+    } else {
+        let mut allowed = template.allowed_special().clone();
+        allowed.extend(server_markers.iter().cloned());
+        tokenizer.encode_with(&prompt, &SpecialMode::Allow(&allowed))?
+    };
     Ok((prompt, ids))
 }
 
@@ -160,6 +191,35 @@ mod tests {
         let err = encode(&ChatTemplate::Llama3, &tokenizer("llama3"), &messages)
             .expect_err("a control token no denylist named must still be refused");
         assert_eq!(refused_token(err), "<|python_tag|>");
+    }
+
+    /// A marker the server wrote into a message passes the per-message check
+    /// and reaches the ids as its control id, on top of the template's own
+    /// allow-list; without it on the list the same content is refused.
+    #[test]
+    fn test_server_markers_join_the_allow_list() {
+        let tok = tokenizer("llama3");
+        let marker = "<|python_tag|>";
+        let messages = msgs(&[("user", "Look: <|python_tag|> here")]);
+        let err = encode(&ChatTemplate::Llama3, &tok, &messages)
+            .expect_err("without the marker on the list the content is refused");
+        assert_eq!(refused_token(err), marker);
+
+        let mut markers = FxHashSet::default();
+        markers.insert(marker.to_string());
+        let (_prompt, ids) = encode_chat_prompt_with_markers(
+            &ChatTemplate::Llama3,
+            &tok,
+            &messages,
+            "",
+            &RenderOptions::default(),
+            &markers,
+        )
+        .expect("a server marker encodes");
+        let marker_id = tok.special_token_id(marker).expect("llama3 names it");
+        let eot = tok.special_token_id("<|eot_id|>").expect("llama3 names it");
+        assert_eq!(ids.iter().filter(|&&id| id == marker_id).count(), 1);
+        assert_eq!(ids.iter().filter(|&&id| id == eot).count(), 1);
     }
 
     /// A Jinja template's allow-list is the markers it spells that the

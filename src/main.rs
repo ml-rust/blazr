@@ -28,7 +28,15 @@ async fn main() -> Result<()> {
         } => {
             let mut gen_config = sampling.into_gen_config();
             gen_config.verbose_prompt = verbose;
-            blazr::cli::run(model, prompt, chat_template, gen_config, runtime).await?;
+            blazr::cli::run(
+                model,
+                prompt,
+                chat_template,
+                gen_config,
+                runtime,
+                Vec::new(),
+            )
+            .await?;
         }
         Commands::Serve {
             model,
@@ -46,6 +54,7 @@ async fn main() -> Result<()> {
             tts_models,
             voice_dir,
             reasoning_format,
+            vision,
         } => {
             blazr::cli::serve(
                 model,
@@ -63,6 +72,7 @@ async fn main() -> Result<()> {
                 tts_models,
                 voice_dir,
                 reasoning_format,
+                vision.into_overrides(),
             )
             .await?;
         }
@@ -81,10 +91,11 @@ async fn main() -> Result<()> {
             sampling,
             runtime,
             verbose_prompt,
+            images,
         } => {
             let mut gen_config = sampling.into_gen_config();
             gen_config.verbose_prompt = verbose_prompt;
-            blazr::cli::run(model, Some(prompt), None, gen_config, runtime).await?;
+            blazr::cli::run(model, Some(prompt), None, gen_config, runtime, images).await?;
         }
         Commands::Chat {
             model,
@@ -95,6 +106,7 @@ async fn main() -> Result<()> {
             top_p,
             num_ctx,
             verbose,
+            vision,
         } => {
             blazr::cli::chat(
                 model,
@@ -105,6 +117,7 @@ async fn main() -> Result<()> {
                 top_p,
                 num_ctx,
                 verbose,
+                vision.into_overrides(),
             )
             .await?;
         }

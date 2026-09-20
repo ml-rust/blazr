@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::chat_template::ChatMessage;
 
-use super::multimodal::MessageContent;
+use super::multimodal::{ContentPart, MessageContent};
 
 /// Tool definition in the request
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -115,13 +115,19 @@ fn content_text(content: &Option<MessageContent>) -> String {
 /// a Jinja template takes tool calls and tool results as fields, a built-in
 /// format takes them flattened into the content text.
 ///
-/// Images and audio are placeholders in the text on both paths; the decoded
-/// media travels beside the prompt.
-pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage, structured: bool) -> ChatMessage {
+/// `image_marker` is what a loaded vision tower expands: with `Some`, every
+/// image part becomes that text at its own position among the parts. With
+/// `None` an image is a `[image]` note in front of the text. The decoded
+/// media travels beside the prompt on both paths.
+pub fn request_msg_to_chat_msg(
+    msg: &ChatRequestMessage,
+    structured: bool,
+    image_marker: Option<&str>,
+) -> ChatMessage {
     if structured {
         return ChatMessage {
             role: msg.role.clone(),
-            content: media_marked_text(msg),
+            content: media_marked_text(msg, image_marker),
             name: msg.name.clone(),
             tool_calls: msg.tool_calls.as_ref().map(|calls| {
                 calls
@@ -156,18 +162,22 @@ pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage, structured: bool) -> Ch
             }
             parts.join("\n")
         }
-        _ => media_marked_text(msg),
+        _ => media_marked_text(msg, image_marker),
     };
 
     ChatMessage::new(msg.role.clone(), content)
 }
 
-/// The message text, with an `[image]` marker in front when it carries images.
-fn media_marked_text(msg: &ChatRequestMessage) -> String {
+/// The message text with its images marked: each image part as
+/// `image_marker` in place, or one `[image]` note in front of the text.
+fn media_marked_text(msg: &ChatRequestMessage, image_marker: Option<&str>) -> String {
     let text = content_text(&msg.content);
     let Some(mc) = msg.content.as_ref().filter(|mc| mc.has_images()) else {
         return text;
     };
+    if let Some(marker) = image_marker {
+        return marked_parts(mc, marker);
+    }
     let image_count = mc.image_urls().len();
     let marker = if image_count == 1 {
         "[image]".to_string()
@@ -178,6 +188,23 @@ fn media_marked_text(msg: &ChatRequestMessage) -> String {
         marker
     } else {
         format!("{}\n{}", marker, text)
+    }
+}
+
+/// The parts in order, joined by newlines like [`MessageContent::text`]:
+/// text as is, an image as `marker`, audio dropped.
+fn marked_parts(content: &MessageContent, marker: &str) -> String {
+    match content {
+        MessageContent::Text(s) => s.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::ImageUrl { .. } => Some(marker),
+                ContentPart::InputAudio { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -201,13 +228,13 @@ mod tests {
         let mut msg = message("tool", "{\"temp\": 20}");
         msg.tool_call_id = Some("call_abc".to_string());
         msg.name = Some("get_weather".to_string());
-        let chat_msg = request_msg_to_chat_msg(&msg, false);
+        let chat_msg = request_msg_to_chat_msg(&msg, false, None);
         assert_eq!(chat_msg.role, "tool");
         assert!(chat_msg.content.contains("[Tool Result: get_weather]"));
         assert!(chat_msg.content.contains("{\"temp\": 20}"));
         assert!(chat_msg.name.is_none());
 
-        let structured = request_msg_to_chat_msg(&msg, true);
+        let structured = request_msg_to_chat_msg(&msg, true, None);
         assert_eq!(structured.content, "{\"temp\": 20}");
         assert_eq!(structured.name.as_deref(), Some("get_weather"));
     }
@@ -223,13 +250,13 @@ mod tests {
                 arguments: "{\"city\": \"Paris\"}".to_string(),
             },
         }]);
-        let flat = request_msg_to_chat_msg(&msg, false);
+        let flat = request_msg_to_chat_msg(&msg, false, None);
         assert!(flat
             .content
             .starts_with("<tool_call>{\"name\": \"get_weather\""));
         assert!(flat.tool_calls.is_none());
 
-        let structured = request_msg_to_chat_msg(&msg, true);
+        let structured = request_msg_to_chat_msg(&msg, true, None);
         assert_eq!(structured.content, "");
         let calls = structured.tool_calls.expect("kept as fields");
         assert_eq!(calls[0]["function"]["name"], "get_weather");
@@ -239,7 +266,7 @@ mod tests {
     #[test]
     fn test_request_msg_to_chat_msg_user() {
         let msg = message("user", "Hello");
-        let chat_msg = request_msg_to_chat_msg(&msg, false);
+        let chat_msg = request_msg_to_chat_msg(&msg, false, None);
         assert_eq!(chat_msg.role, "user");
         assert_eq!(chat_msg.content, "Hello");
     }
@@ -265,10 +292,53 @@ mod tests {
             reasoning_content: None,
         };
         for structured in [false, true] {
-            let chat_msg = request_msg_to_chat_msg(&msg, structured);
+            let chat_msg = request_msg_to_chat_msg(&msg, structured, None);
             assert_eq!(chat_msg.role, "user");
             assert!(chat_msg.content.contains("[image]"));
             assert!(chat_msg.content.contains("What is this?"));
+        }
+    }
+
+    /// With a marker, each image sits at its own place among the parts:
+    /// two images give two marker groups in message order.
+    #[test]
+    fn test_request_msg_to_chat_msg_two_images_marked_in_order() {
+        use super::super::multimodal::{ContentPart, ImageUrl};
+        let image = |url: &str| ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: url.to_string(),
+                detail: "auto".to_string(),
+            },
+        };
+        let msg = ChatRequestMessage {
+            role: "user".to_string(),
+            content: Some(MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "First:".to_string(),
+                },
+                image("a.png"),
+                ContentPart::Text {
+                    text: "Second:".to_string(),
+                },
+                image("b.png"),
+                ContentPart::Text {
+                    text: "Compare them.".to_string(),
+                },
+            ])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        };
+        let marker = crate::engine::vision_tower::IMAGE_MARKER_TEXT;
+        for structured in [false, true] {
+            let chat_msg = request_msg_to_chat_msg(&msg, structured, Some(marker));
+            assert_eq!(
+                chat_msg.content,
+                format!("First:\n{marker}\nSecond:\n{marker}\nCompare them.")
+            );
+            assert_eq!(chat_msg.content.matches(marker).count(), 2);
+            assert!(!chat_msg.content.contains("[image]"));
         }
     }
 }

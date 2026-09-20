@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use super::args::{RuntimeArgs, SamplingArgs};
+use super::args::{RuntimeArgs, SamplingArgs, VisionArgs};
 
 /// Blazr - Blazing-fast inference server for LLMs
 #[derive(Parser)]
@@ -121,6 +121,9 @@ pub enum Commands {
         /// `none` returns raw output. A request's `reasoning_format` overrides.
         #[arg(long, value_enum, default_value = "deepseek")]
         reasoning_format: crate::config::ReasoningFormat,
+
+        #[command(flatten)]
+        vision: VisionArgs,
     },
 
     /// List available models
@@ -169,6 +172,10 @@ pub enum Commands {
         /// Print prompt tokens before generation (like llama-cli --verbose-prompt)
         #[arg(long)]
         verbose_prompt: bool,
+
+        /// Image file to place before the prompt; needs --mmproj. May be repeated.
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<std::path::PathBuf>,
     },
 
     /// Interactive multi-turn chat with a model
@@ -205,6 +212,9 @@ pub enum Commands {
         /// Show debug info (token IDs, timing breakdown)
         #[arg(long, short)]
         verbose: bool,
+
+        #[command(flatten)]
+        vision: VisionArgs,
     },
 
     /// Benchmark model performance (tok/s, TTFT, ITL)

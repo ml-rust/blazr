@@ -193,6 +193,8 @@ blazr pull      Download a model from HuggingFace Hub
 | `--top-k`       | 40       | Top-k sampling                                  |
 | `--vocab`       | auto     | Tokenizer vocabulary (auto-detected from model) |
 | `--cpu`         | false    | Force CPU inference                             |
+| `--mmproj`      | none     | Qwen3-VL mmproj GGUF for image inputs (`qwen35` models only) |
+| `--image`       | none     | Image file placed before the prompt; needs `--mmproj`; repeatable |
 
 ### Server Options
 
@@ -203,6 +205,16 @@ blazr pull      Download a model from HuggingFace Hub
 | `--host`  | 0.0.0.0  | Host to bind to                    |
 | `--cpu`   | false    | Force CPU inference                |
 | `--chat-template` | model's own | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file |
+| `--mmproj` | none | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model; enables `image_url` parts in `/v1/chat/completions` |
+| `--image-min-tokens` / `--image-max-tokens` | mmproj values | Token range every image is resized into |
+
+## Image Inputs
+
+With `--mmproj`, a `/v1/chat/completions` message can carry `image_url`
+parts (data URI, `http(s)` URL, or base64) beside its text. Each image takes
+the place of its part in the prompt; the reply describes it. Without
+`--mmproj` such a request gets a 400 naming the flag. `blazr chat` attaches
+an image to the next turn with `/image <path>`.
 
 ## Chat Templates
 

@@ -12,6 +12,7 @@ mod audio_decode;
 mod audio_transcribe;
 mod chat;
 mod chat_types;
+mod chat_vision;
 mod completions;
 mod config_watch;
 mod embeddings;

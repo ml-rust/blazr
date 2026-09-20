@@ -34,6 +34,33 @@ pub struct SamplingArgs {
     pub repeat_last_n: usize,
 }
 
+/// Vision tower flags shared by `run`, `generate`, `chat` and `serve`.
+#[derive(Parser, Debug, Clone, Default)]
+pub struct VisionArgs {
+    /// Qwen3-VL mmproj GGUF to load beside a qwen35 model for image inputs
+    #[arg(long, value_name = "PATH")]
+    pub mmproj: Option<std::path::PathBuf>,
+
+    /// Fewest tokens an image resizes to (default: the mmproj value)
+    #[arg(long, value_name = "N")]
+    pub image_min_tokens: Option<usize>,
+
+    /// Most tokens an image resizes to (default: the mmproj value)
+    #[arg(long, value_name = "N")]
+    pub image_max_tokens: Option<usize>,
+}
+
+impl VisionArgs {
+    /// The set flags as config overrides.
+    pub fn into_overrides(self) -> crate::config::VisionOverrides {
+        crate::config::VisionOverrides {
+            mmproj: self.mmproj,
+            image_min_tokens: self.image_min_tokens,
+            image_max_tokens: self.image_max_tokens,
+        }
+    }
+}
+
 /// Shared runtime/device parameters
 #[derive(Parser, Debug, Clone)]
 pub struct RuntimeArgs {
@@ -59,6 +86,9 @@ pub struct RuntimeArgs {
     /// Use compute graph capture for greedy decode (requires --temperature 0)
     #[arg(long)]
     pub graphs: bool,
+
+    #[command(flatten)]
+    pub vision: VisionArgs,
 }
 
 impl SamplingArgs {

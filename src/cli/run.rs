@@ -1,16 +1,16 @@
 //! Interactive generation command
 
-use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use colored::Colorize;
-use futures::StreamExt;
+use anyhow::{anyhow, Result};
 
 #[cfg(feature = "cuda")]
 use boostr::CudaRuntime;
 
+use super::run_repl::{interactive_repl, print_generation_stream};
 use super::RuntimeArgs;
 use crate::config::GenerationConfig;
+use crate::engine::vision_tower::{VisionTower, IMAGE_MARKER_TEXT};
 use crate::engine::Executor;
 #[cfg(feature = "cuda")]
 use crate::loader::OffloadingOptions;
@@ -19,20 +19,23 @@ use crate::model::chat_template::ChatTemplate;
 use crate::tokenizer::from_vocab_size;
 use boostr::{CpuRuntime, DType, Runtime};
 
-/// Run interactive generation
+/// Run interactive generation. `images` are files placed before `prompt`,
+/// one marker group each; they need `--mmproj`.
 pub async fn run(
     model: String,
     prompt: Option<String>,
     chat_template: Option<String>,
     gen_config: GenerationConfig,
     runtime: RuntimeArgs,
+    images: Vec<PathBuf>,
 ) -> Result<()> {
+    let images = read_images(&images)?;
     if runtime.cpu {
-        run_cpu(model, prompt, chat_template, gen_config, runtime.num_ctx).await
+        run_cpu(model, prompt, chat_template, gen_config, runtime, images).await
     } else {
         #[cfg(feature = "cuda")]
         {
-            run_cuda(model, prompt, chat_template, gen_config, runtime).await
+            run_cuda(model, prompt, chat_template, gen_config, runtime, images).await
         }
         #[cfg(not(feature = "cuda"))]
         {
@@ -50,12 +53,14 @@ async fn run_cuda(
     chat_template: Option<String>,
     gen_config: GenerationConfig,
     runtime: RuntimeArgs,
+    images: Vec<Vec<u8>>,
 ) -> Result<()> {
     let RuntimeArgs {
         gpu_layers,
         num_ctx,
         paged_attention,
         graphs,
+        vision,
         ..
     } = runtime;
     // Initialize device
@@ -64,7 +69,7 @@ async fn run_cuda(
     tracing::info!("Loading model: {}", model);
 
     // Detect format to decide tokenizer strategy
-    let source = detect_model_source(std::path::Path::new(&model))?;
+    let source = detect_model_source(Path::new(&model))?;
 
     // Load model with appropriate tokenizer based on format
     let (loaded_model, mut config, tokenizer) = match source.format {
@@ -114,6 +119,7 @@ async fn run_cuda(
         config.inference.graphs = true;
         tracing::info!("CUDA graph mode enabled");
     }
+    vision.into_overrides().apply(&mut config.inference);
 
     // Pre-load all CUDA PTX modules to avoid JIT compilation on first use
     {
@@ -126,12 +132,13 @@ async fn run_cuda(
 
     // Create executor with num_ctx for KV cache initial capacity
     let template = ChatTemplate::detect(
-        std::path::Path::new(&model),
+        Path::new(&model),
         config.model_type(),
         chat_template.as_deref(),
     )?;
     let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
-        .with_chat_template(template);
+        .with_chat_template(template)
+        .with_configured_vision_tower()?;
 
     // Warm up kernels to avoid first-run latency
     executor.warmup()?;
@@ -139,7 +146,12 @@ async fn run_cuda(
 
     // If prompt provided, generate once
     if let Some(prompt) = prompt {
-        let prompt_tokens = executor.tokenizer().encode(&prompt);
+        let prompt_tokens = image_prompt_ids(
+            executor.tokenizer(),
+            executor.vision_tower().map(|t| &**t),
+            &prompt,
+            images.len(),
+        )?;
         // Graph replay reads only the argmax token, so it decodes greedily
         // and applies no penalties. Any other sampling config runs eagerly.
         let graph_eligible = gen_config.is_greedy() && !gen_config.has_penalties();
@@ -152,6 +164,11 @@ async fn run_cuda(
             );
         }
         if graphs && graph_eligible {
+            if paged_attention && !images.is_empty() {
+                return Err(anyhow!(
+                    "--image needs graph mode without --paged-attention"
+                ));
+            }
             if paged_attention {
                 print_generation_stream(
                     executor.generate_with_graphs_paged(&prompt_tokens, &gen_config),
@@ -160,15 +177,24 @@ async fn run_cuda(
                 .await?;
             } else {
                 print_generation_stream(
-                    executor.generate_with_graphs(&prompt_tokens, &gen_config),
+                    executor.generate_with_graphs_images(&prompt_tokens, &images, &gen_config),
                     "CUDA graph mode",
                 )
                 .await?;
             }
         } else {
-            print_generation_stream(executor.generate(&prompt_tokens, &gen_config), "").await?;
+            print_generation_stream(
+                executor.generate_with_images(&prompt_tokens, &images, &gen_config),
+                "",
+            )
+            .await?;
         }
         return Ok(());
+    }
+    if !images.is_empty() {
+        return Err(anyhow!(
+            "--image needs --prompt; the interactive session takes text only"
+        ));
     }
 
     // Interactive REPL (graph mode uses standard generate in REPL for simplicity)
@@ -180,9 +206,12 @@ async fn run_cpu(
     prompt: Option<String>,
     chat_template: Option<String>,
     gen_config: GenerationConfig,
-    num_ctx: usize,
+    runtime: RuntimeArgs,
+    images: Vec<Vec<u8>>,
 ) -> Result<()> {
-    use std::path::Path;
+    let RuntimeArgs {
+        num_ctx, vision, ..
+    } = runtime;
 
     // Initialize CPU device
     let device = boostr::CpuDevice::new();
@@ -192,7 +221,7 @@ async fn run_cpu(
     // Detect format and load appropriately
     let source = detect_model_source(Path::new(&model))?;
 
-    let (loaded_model, config, tokenizer) = match source.format {
+    let (loaded_model, mut config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
             // Load GGUF with embedded tokenizer
             let loaded = loader::load_gguf_with_tokenizer::<CpuRuntime, _>(&model, &device)?;
@@ -206,13 +235,15 @@ async fn run_cpu(
             (loaded_model, config, tokenizer)
         }
     };
+    vision.into_overrides().apply(&mut config.inference);
     let template = ChatTemplate::detect(
         Path::new(&model),
         config.model_type(),
         chat_template.as_deref(),
     )?;
     let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
-        .with_chat_template(template);
+        .with_chat_template(template)
+        .with_configured_vision_tower()?;
 
     // Warm up model (less important for CPU, but good for consistency)
     executor.warmup()?;
@@ -220,157 +251,59 @@ async fn run_cpu(
 
     // If prompt provided, generate once
     if let Some(prompt) = prompt {
-        let prompt_tokens = executor.tokenizer().encode(&prompt);
-        print_generation_stream(executor.generate(&prompt_tokens, &gen_config), "").await?;
+        let prompt_tokens = image_prompt_ids(
+            executor.tokenizer(),
+            executor.vision_tower().map(|t| &**t),
+            &prompt,
+            images.len(),
+        )?;
+        print_generation_stream(
+            executor.generate_with_images(&prompt_tokens, &images, &gen_config),
+            "",
+        )
+        .await?;
         return Ok(());
+    }
+    if !images.is_empty() {
+        return Err(anyhow!(
+            "--image needs --prompt; the interactive session takes text only"
+        ));
     }
 
     // Interactive REPL
     interactive_repl(&executor, &gen_config, &model, false).await
 }
 
-/// Interactive multi-turn REPL with arrow key history and slash commands
-async fn interactive_repl<R>(
-    executor: &Executor<R>,
-    gen_config: &GenerationConfig,
-    model_name: &str,
-    _graphs: bool,
-) -> Result<()>
-where
-    R: Runtime<DType = DType>,
-    R::Client: boostr::ops::TensorOps<R>
-        + boostr::ScalarOps<R>
-        + boostr::ConvOps<R>
-        + boostr::NormalizationOps<R>
-        + boostr::UnaryOps<R>
-        + boostr::ActivationOps<R>
-        + boostr::BinaryOps<R>
-        + boostr::TypeConversionOps<R>
-        + boostr::SamplingOps<R>
-        + boostr::GrammarDfaOps<R>
-        + boostr::model::ModelClient<R>
-        + boostr::quant::traits::DequantOps<R>,
-{
-    eprintln!("{} - Interactive generation", "blazr run".bold().cyan());
-    eprintln!("Model: {}", model_name.bold());
-    eprintln!();
-    eprintln!(
-        "Commands: {} {} {}",
-        "/clear".dimmed(),
-        "/history".dimmed(),
-        "/exit".dimmed(),
-    );
-    eprintln!("Use arrow keys for history navigation.\n");
-
-    let history_path = dirs::data_dir()
-        .map(|d| d.join("blazr").join("run_history.txt"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".blazr_history"));
-
-    // Ensure parent directory exists
-    if let Some(parent) = history_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let mut rl = rustyline::DefaultEditor::new()?;
-    let _ = rl.load_history(&history_path);
-
-    let mut turn_count = 0u32;
-
-    loop {
-        let readline = rl.readline("> ");
-        let input = match readline {
-            Ok(line) => line,
-            Err(
-                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
-            ) => break,
-            Err(e) => {
-                eprintln!("Input error: {}", e);
-                break;
-            }
-        };
-
-        let input = input.trim().to_string();
-        if input.is_empty() {
-            continue;
-        }
-
-        rl.add_history_entry(&input)?;
-
-        // Slash commands
-        if input.starts_with('/') {
-            match input.as_str() {
-                "/exit" | "/quit" => break,
-                "/clear" => {
-                    turn_count = 0;
-                    eprintln!("Session cleared.");
-                    continue;
-                }
-                "/history" => {
-                    eprintln!("{} turns in this session", turn_count);
-                    continue;
-                }
-                _ => {
-                    eprintln!("Unknown command. Use /clear, /history, or /exit");
-                    continue;
-                }
-            }
-        }
-
-        turn_count += 1;
-        let prompt_tokens = executor.tokenizer().encode(&input);
-        print_generation_stream(executor.generate(&prompt_tokens, gen_config), "").await?;
-        println!();
-    }
-
-    let _ = rl.save_history(&history_path);
-    Ok(())
+/// Read every `--image` file.
+fn read_images(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>> {
+    paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).map_err(|e| anyhow!("image {} did not read: {e}", path.display()))
+        })
+        .collect()
 }
 
-/// Print tokens from a generation stream, showing timing stats when done.
-async fn print_generation_stream(
-    stream: impl futures::Stream<Item = Result<crate::engine::GeneratedToken>>,
-    mode: &str,
-) -> Result<()> {
-    println!();
-
-    let start = std::time::Instant::now();
-    let mut token_count = 0usize;
-    let mut stream = std::pin::pin!(stream);
-
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(token) => {
-                print!("{}", token.text);
-                io::stdout().flush()?;
-                token_count += 1;
-            }
-            Err(e) => {
-                eprintln!("\nError during generation: {}", e);
-                break;
-            }
-        }
+/// Encode `prompt` behind `n_images` marker groups. With no images this
+/// is the plain prompt encode.
+fn image_prompt_ids<R>(
+    tokenizer: &splintr::AnyTokenizer,
+    tower: Option<&VisionTower<R>>,
+    prompt: &str,
+    n_images: usize,
+) -> Result<Vec<u32>>
+where
+    R: Runtime<DType = DType>,
+    R::Client: boostr::model::ModelClient<R>,
+{
+    if n_images == 0 {
+        return Ok(tokenizer.encode(prompt));
     }
-
-    let elapsed = start.elapsed();
-    let tok_per_sec = token_count as f64 / elapsed.as_secs_f64();
-
-    println!();
-    let stats = if mode.is_empty() {
-        format!(
-            "[{} tokens, {:.1} tok/s, {:.2}s]",
-            token_count,
-            tok_per_sec,
-            elapsed.as_secs_f64()
-        )
-    } else {
-        format!(
-            "[{} tokens, {:.1} tok/s, {:.2}s, {}]",
-            token_count,
-            tok_per_sec,
-            elapsed.as_secs_f64(),
-            mode
-        )
-    };
-    eprintln!("{}", stats.dimmed());
-    Ok(())
+    let tower = tower.ok_or_else(|| anyhow!("--image needs --mmproj"))?;
+    let text = format!("{}{prompt}", IMAGE_MARKER_TEXT.repeat(n_images));
+    let ids = tokenizer.encode(&text);
+    tower
+        .check_marker_counts(&ids, n_images)
+        .map_err(|message| anyhow!("{message}"))?;
+    Ok(ids)
 }

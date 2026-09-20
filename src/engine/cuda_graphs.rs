@@ -52,7 +52,7 @@ impl Executor<CudaRuntime> {
                     yield Err(super::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
                     return;
                 }
-                let inner = self.generate_with_graphs_qwen35(prompt_tokens, gen_config);
+                let inner = self.generate_with_graphs_qwen35(prompt_tokens, &[], gen_config);
                 for await item in inner {
                     yield item;
                 }
@@ -124,6 +124,50 @@ impl Executor<CudaRuntime> {
                 let is_last = i + 1 == graph_max;
                 let finish_reason = if is_last { Some(FinishReason::Length) } else { None };
                 yield Ok(self.text_token(next_token, finish_reason));
+            }
+        }
+    }
+
+    /// Graph-mode form of [`Executor::generate_with_images`]: the prompt
+    /// plan prefills the session caches, then the captured step replays with
+    /// the rope position the plan left. Empty `images` is
+    /// [`Executor::generate_with_graphs`].
+    ///
+    /// # Preconditions
+    /// - Model must be `qwen35` with graph mode support
+    /// - `gen_config.is_greedy()` must be true and `gen_config.has_penalties()` false
+    pub fn generate_with_graphs_images<'a>(
+        &'a self,
+        prompt_tokens: &'a [u32],
+        images: &'a [Vec<u8>],
+        gen_config: &'a crate::config::GenerationConfig,
+    ) -> impl futures::Stream<Item = Result<GeneratedToken>> + 'a {
+        stream! {
+            if images.is_empty() {
+                let inner = self.generate_with_graphs(prompt_tokens, gen_config);
+                for await item in inner {
+                    yield item;
+                }
+                return;
+            }
+            if prompt_tokens.is_empty() {
+                yield Err(anyhow!("image prompt has no ids: the markers alone are missing"));
+                return;
+            }
+            if !self.model().needs_gdn_state() {
+                yield Err(anyhow!(
+                    "image input needs a qwen35 model; the loaded model is {}",
+                    self.model().model_type()
+                ));
+                return;
+            }
+            if !self.model().supports_gdn_graph_mode() {
+                yield Err(super::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
+                return;
+            }
+            let inner = self.generate_with_graphs_qwen35(prompt_tokens, images, gen_config);
+            for await item in inner {
+                yield item;
             }
         }
     }

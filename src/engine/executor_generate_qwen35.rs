@@ -2,13 +2,16 @@
 //! layers plus `LayeredGdnState` for the Gated DeltaNet layers.
 //!
 //! The sampling, grammar, stop and streaming steps mirror the contiguous
-//! KV branch in `executor_generate.rs`.
+//! KV branch in `executor_generate.rs`. A prompt with images arrives as a
+//! [`Qwen35PromptPlan`] and prefills through the embeddings forward; the
+//! decode loop is the same either way.
 
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use futures::Stream;
 
 use boostr::inference::{LayeredGdnState, LayeredKvCache, LayeredKvCacheConfig};
+use boostr::model::qwen35::Qwen35PromptPlan;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -23,17 +26,24 @@ use super::grammar::GrammarDfa;
 use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
 
+/// Sampling state one request carries through its decode loop.
+pub(super) struct SamplerState<R: Runtime<DType = DType>> {
+    /// Prompt ids, extended with each sampled id for repetition penalty.
+    pub token_history: Vec<u32>,
+    pub mirostat: Option<MirostatState>,
+    pub grammar_dfa: Option<GrammarDfa>,
+    pub device_grammar: Option<boostr::DeviceGrammarDfa<R>>,
+}
+
 /// Per-request state `generate` builds before it picks a decode arm.
 pub(super) struct DecodeSetup<R: Runtime<DType = DType>> {
     /// Prompt ids as a `[1, prompt_len]` tensor on the executor device.
     pub input: Tensor<R>,
     /// Decode steps, already capped to the context window.
     pub max_tokens: usize,
-    /// Prompt ids, extended with each sampled id for repetition penalty.
-    pub token_history: Vec<u32>,
-    pub mirostat: Option<MirostatState>,
-    pub grammar_dfa: Option<GrammarDfa>,
-    pub device_grammar: Option<boostr::DeviceGrammarDfa<R>>,
+    pub sampler: SamplerState<R>,
+    /// The prompt expanded around image rows; `None` prefills `input`.
+    pub plan: Option<Qwen35PromptPlan<R>>,
 }
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -96,9 +106,41 @@ where
         Ok((kv_cache, gdn_state))
     }
 
+    /// Prefill at rope position 0: `plan` through the embeddings forward,
+    /// else `input` through the token forward. Returns the prefill logits.
+    pub(super) fn qwen35_prefill(
+        &self,
+        input: &Tensor<R>,
+        plan: Option<&Qwen35PromptPlan<R>>,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+    ) -> Result<Tensor<R>> {
+        match plan {
+            Some(plan) => self
+                .model
+                .forward_qwen35_embeds(&plan.embeds, &plan.positions, kv_cache, gdn_state)
+                .map_err(|e| anyhow!("qwen35 image prefill failed: {}", e)),
+            None => self
+                .model
+                .forward_qwen35(input, kv_cache, gdn_state, 0)
+                .map_err(|e| anyhow!("Forward pass failed: {}", e)),
+        }
+    }
+
+    /// Rope position of the first decode token after a prefill: the plan's
+    /// next position, or the KV slot for a text-only prompt.
+    pub(super) fn qwen35_first_rope_pos(
+        plan: Option<&Qwen35PromptPlan<R>>,
+        kv_cache: &LayeredKvCache<R>,
+    ) -> usize {
+        plan.map_or(kv_cache.seq_len(), Qwen35PromptPlan::next_rope_pos)
+    }
+
     /// Prefill then greedy/sampled decode through `forward_qwen35`.
-    /// Text-only, so the rope position of every decode step is
-    /// `kv_cache.seq_len()`.
+    ///
+    /// The rope position of a decode step is the KV slot minus the lag the
+    /// prefill left: zero for text, `sum(n_i - max(nx_i, ny_i))` after
+    /// images.
     pub(super) fn generate_qwen35<'a>(
         &'a self,
         prompt_tokens: &'a [u32],
@@ -109,21 +151,27 @@ where
             let DecodeSetup {
                 input,
                 max_tokens,
+                sampler,
+                plan,
+            } = setup;
+            let SamplerState {
                 mut token_history,
                 mut mirostat,
                 mut grammar_dfa,
                 mut device_grammar,
-            } = setup;
+            } = sampler;
 
+            let prompt_rows = plan.as_ref().map_or(prompt_tokens.len(), Qwen35PromptPlan::seq_len);
             let max_seq_len = self.config.max_seq_len();
-            let initial_capacity = (prompt_tokens.len() + max_tokens).min(max_seq_len);
+            let initial_capacity = (prompt_rows + max_tokens).min(max_seq_len);
             let (mut kv_cache, mut gdn_state) = self.qwen35_caches(initial_capacity, max_seq_len)?;
 
-            tracing::info!(phase = "prefill_start", backend = "qwen35", prompt_tokens = prompt_tokens.len());
+            tracing::info!(phase = "prefill_start", backend = "qwen35", prompt_tokens = prompt_tokens.len(), prompt_rows = prompt_rows);
             let t0 = std::time::Instant::now();
-            let mut logits = self.model.forward_qwen35(&input, &mut kv_cache, &mut gdn_state, 0)
-                .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
-            tracing::info!("Prefill: {:?} (seq_len={}, kv={})", t0.elapsed(), prompt_tokens.len(), kv_cache.seq_len());
+            let mut logits = self.qwen35_prefill(&input, plan.as_ref(), &mut kv_cache, &mut gdn_state)?;
+            let rope_lag = kv_cache.seq_len() - Self::qwen35_first_rope_pos(plan.as_ref(), &kv_cache);
+            drop(plan);
+            tracing::info!("Prefill: {:?} (seq_len={}, kv={})", t0.elapsed(), prompt_rows, kv_cache.seq_len());
             tracing::info!(phase = "prefill_end", backend = "qwen35");
             tracing::info!(phase = "decode_start", backend = "qwen35", max_tokens = max_tokens);
             for i in 0..max_tokens {
@@ -135,7 +183,7 @@ where
                     .map_err(|e| anyhow!("Record event failed: {}", e))?;
 
                 let next_input = token_gpu.reshape(&[1, 1])?;
-                let rope_pos = kv_cache.seq_len();
+                let rope_pos = kv_cache.seq_len() - rope_lag;
                 let next_logits = self.model.forward_qwen35(&next_input, &mut kv_cache, &mut gdn_state, rope_pos)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 let fwd_time = t1.elapsed();

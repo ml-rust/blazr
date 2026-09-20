@@ -153,65 +153,78 @@ where
         prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
-        let prompt_token_count = prompt_tokens.len();
+        let stream = self.generate(prompt_tokens, gen_config);
+        collect_generation(stream, prompt_tokens.len(), gen_config).await
+    }
+}
 
-        let mut result = String::new();
-        let mut completion_tokens = 0usize;
-        let mut finish_reason = FinishReason::Length;
-        let mut stream = std::pin::pin!(self.generate(prompt_tokens, gen_config));
-        let prefill_start = std::time::Instant::now();
-        let mut prompt_eval_duration_ms = 0u64;
-        let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
+/// Drain a token stream into one `GenerationResult`: stop sequences cut the
+/// text and finish with `Stop`, logprobs are kept when asked for, and the
+/// prompt eval time is the time to the first token.
+pub(super) async fn collect_generation<S>(
+    stream: S,
+    prompt_token_count: usize,
+    gen_config: &GenerationConfig,
+) -> Result<GenerationResult>
+where
+    S: futures::Stream<Item = Result<GeneratedToken>>,
+{
+    let mut result = String::new();
+    let mut completion_tokens = 0usize;
+    let mut finish_reason = FinishReason::Length;
+    let mut stream = std::pin::pin!(stream);
+    let prefill_start = std::time::Instant::now();
+    let mut prompt_eval_duration_ms = 0u64;
+    let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
 
-        while let Some(token_result) = stream.next().await {
-            let token = token_result?;
-            completion_tokens += 1;
+    while let Some(token_result) = stream.next().await {
+        let token = token_result?;
+        completion_tokens += 1;
 
-            if completion_tokens == 1 {
-                prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
-            }
-
-            result.push_str(&token.text);
-
-            if let Some(reason) = token.finish_reason {
-                finish_reason = reason;
-            }
-
-            if gen_config.logprobs {
-                token_logprobs.push(token);
-            }
-
-            // Check stop sequences
-            for stop in &gen_config.stop_sequences {
-                if result.ends_with(stop) {
-                    result.truncate(result.len() - stop.len());
-                    return Ok(GenerationResult {
-                        text: result,
-                        prompt_tokens: prompt_token_count,
-                        completion_tokens,
-                        finish_reason: FinishReason::Stop,
-                        prompt_eval_duration_ms,
-                        token_logprobs: if gen_config.logprobs {
-                            Some(token_logprobs)
-                        } else {
-                            None
-                        },
-                    });
-                }
-            }
+        if completion_tokens == 1 {
+            prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
         }
 
-        Ok(GenerationResult {
-            text: result,
-            prompt_tokens: prompt_token_count,
-            completion_tokens,
-            finish_reason,
-            prompt_eval_duration_ms,
-            token_logprobs: if gen_config.logprobs {
-                Some(token_logprobs)
-            } else {
-                None
-            },
-        })
+        result.push_str(&token.text);
+
+        if let Some(reason) = token.finish_reason {
+            finish_reason = reason;
+        }
+
+        if gen_config.logprobs {
+            token_logprobs.push(token);
+        }
+
+        // Check stop sequences
+        for stop in &gen_config.stop_sequences {
+            if result.ends_with(stop) {
+                result.truncate(result.len() - stop.len());
+                return Ok(GenerationResult {
+                    text: result,
+                    prompt_tokens: prompt_token_count,
+                    completion_tokens,
+                    finish_reason: FinishReason::Stop,
+                    prompt_eval_duration_ms,
+                    token_logprobs: if gen_config.logprobs {
+                        Some(token_logprobs)
+                    } else {
+                        None
+                    },
+                });
+            }
+        }
     }
+
+    Ok(GenerationResult {
+        text: result,
+        prompt_tokens: prompt_token_count,
+        completion_tokens,
+        finish_reason,
+        prompt_eval_duration_ms,
+        token_logprobs: if gen_config.logprobs {
+            Some(token_logprobs)
+        } else {
+            None
+        },
+    })
 }

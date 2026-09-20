@@ -16,6 +16,7 @@ mod list;
 mod ps;
 mod pull;
 mod run;
+mod run_repl;
 mod serve;
 #[cfg(feature = "distributed")]
 mod swarm;
@@ -23,7 +24,7 @@ mod swarm;
 mod swarm_forward;
 mod util;
 
-pub use args::{RuntimeArgs, SamplingArgs};
+pub use args::{RuntimeArgs, SamplingArgs, VisionArgs};
 pub use bench::bench;
 pub use chat::chat;
 pub use commands::{Cli, Commands};

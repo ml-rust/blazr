@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::config::{ReasoningFormat, ServerConfig};
+use crate::config::{ReasoningFormat, ServerConfig, VisionOverrides};
 use crate::engine::{BatchEngine, RequestScheduler, Scheduler};
 use crate::server;
 
@@ -31,6 +31,7 @@ pub async fn serve(
     #[cfg(feature = "audio")] tts_models: Vec<String>,
     voice_dir: Option<PathBuf>,
     reasoning_format: ReasoningFormat,
+    vision: VisionOverrides,
 ) -> Result<()> {
     // Get model directory
     let model_dir = std::env::var("BLAZR_MODEL_DIR")
@@ -59,7 +60,8 @@ pub async fn serve(
     // Create scheduler
     let scheduler = Arc::new(
         Scheduler::<ServerRuntime>::new(model_dir, device.clone())
-            .with_chat_template(chat_template),
+            .with_chat_template(chat_template)
+            .with_vision(vision),
     );
 
     // Pre-load and warm up model if specified
@@ -108,6 +110,14 @@ pub async fn serve(
             executor.chat_template().describe(),
             vram_str,
         );
+        if let Some(tower) = executor.vision_tower() {
+            eprintln!(
+                "  {} vision tower (image tokens {}..={})",
+                "Loaded".green(),
+                tower.config().image_min_tokens,
+                tower.config().image_max_tokens,
+            );
+        }
     }
 
     // Server config

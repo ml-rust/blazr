@@ -44,7 +44,7 @@ pub async fn apply_template(
     let msgs: Vec<ChatMessage> = request
         .messages
         .iter()
-        .map(|m| request_msg_to_chat_msg(m, native_tools))
+        .map(|m| request_msg_to_chat_msg(m, native_tools, None))
         .collect();
     let mut options = RenderOptions {
         add_generation_prompt: request.add_generation_prompt,

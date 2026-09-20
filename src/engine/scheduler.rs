@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
+use crate::config::VisionOverrides;
 use crate::model::chat_template::ChatTemplate;
 use tokio::sync::RwLock;
 
@@ -96,6 +97,9 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     /// `--chat-template`: a built-in name or a template file, applied to
     /// every model this scheduler loads.
     chat_template: Option<String>,
+    /// `--mmproj` and the image token limits, applied to every model this
+    /// scheduler loads.
+    vision: VisionOverrides,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -122,7 +126,15 @@ where
             device,
             num_ctx: DEFAULT_NUM_CTX,
             chat_template: None,
+            vision: VisionOverrides::default(),
         }
+    }
+
+    /// Load the vision tower `overrides` names beside every model, with its
+    /// image token limits.
+    pub fn with_vision(mut self, overrides: VisionOverrides) -> Self {
+        self.vision = overrides;
+        self
     }
 
     /// Override every loaded model's chat template with a built-in name or a
@@ -223,7 +235,7 @@ where
             // A GGUF carries its own vocabulary; a checkpoint directory is
             // matched to a bundled one by size.
             let source = loader::detect_model_source(&model_path)?;
-            let (model, config, tokenizer) = match source.format {
+            let (model, mut config, tokenizer) = match source.format {
                 loader::ModelFormat::Gguf => {
                     loader::load_gguf_with_tokenizer::<R, _>(&model_path, &self.device)?
                 }
@@ -233,6 +245,7 @@ where
                     (model, config, tokenizer)
                 }
             };
+            self.vision.apply(&mut config.inference);
             let chat_template = ChatTemplate::detect(
                 &model_path,
                 config.model_type(),
@@ -250,7 +263,8 @@ where
             Arc::new(
                 Executor::new(model, config, tokenizer, self.device.clone(), self.num_ctx)?
                     .with_chat_template(chat_template)
-                    .with_model_dir(self.model_dir.clone()),
+                    .with_model_dir(self.model_dir.clone())
+                    .with_configured_vision_tower()?,
             )
         };
 

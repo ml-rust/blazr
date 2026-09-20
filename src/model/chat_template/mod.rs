@@ -11,7 +11,7 @@ pub mod message;
 pub mod source;
 pub mod template;
 
-pub use encode::{encode_chat_prompt, ChatPromptError};
+pub use encode::{encode_chat_prompt, encode_chat_prompt_with_markers, ChatPromptError};
 pub use jinja::{JinjaTemplate, RenderOptions, TemplateError, TemplateOrigin};
 pub use message::ChatMessage;
 pub use source::ModelTemplate;

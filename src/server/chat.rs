@@ -10,11 +10,13 @@ use axum::{
 };
 
 use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
+use super::chat_vision::{decode_request_media, image_route, ImageRoute};
 use super::generation::{
     apply_keep_alive, chat_prompt_error_response, convert_logprobs, decode_context_prefix,
     error_response, generate_via_scheduler, overloaded_response, policy_error_response,
-    record_generation_metrics, stream_multimodal_with_stop_sequences, stream_with_stop_sequences,
-    validate_generation_params, HasSamplingFields, Usage,
+    record_generation_metrics, stream_images_with_stop_sequences,
+    stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
+    HasSamplingFields, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
@@ -22,7 +24,7 @@ use super::reasoning::{split_reasoning_for_format, ReasoningParser};
 use super::streaming::{create_chat_stream, StreamToken};
 use super::tool_calls::extract_tool_calls;
 use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg};
-use crate::model::chat_template::{encode_chat_prompt, ChatMessage, ChatTemplate};
+use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, ChatTemplate};
 
 /// The built-in format a request's `template` field names, or the message
 /// for a name blazr does not know.
@@ -100,53 +102,24 @@ pub async fn chat_completions(
         request.tools.as_deref().and_then(build_tools_system_prompt)
     };
 
-    // Check for multimodal content (images/audio) and extract media data
-    let has_multimodal = request.messages.iter().any(|m| {
-        m.content
-            .as_ref()
-            .is_some_and(|c| c.has_images() || c.has_audio())
-    });
-
-    // Decode images from all messages
-    let mut decoded_images: Vec<Vec<u8>> = Vec::new();
-    let mut decoded_audio: Vec<Vec<f32>> = Vec::new();
-    if has_multimodal {
-        for msg in &request.messages {
-            if let Some(ref content) = msg.content {
-                // Decode images
-                for img_url in content.image_urls() {
-                    match super::multimodal::decode_image(&img_url.url).await {
-                        Ok(decoded) => decoded_images.push(decoded.data),
-                        Err(e) => {
-                            return error_response(
-                                StatusCode::BAD_REQUEST,
-                                &format!("Failed to decode image: {}", e),
-                                "invalid_request_error",
-                            );
-                        }
-                    }
-                }
-                // Decode audio
-                for audio_input in content.audio_inputs() {
-                    match super::multimodal::decode_audio(audio_input) {
-                        Ok(samples) => {
-                            decoded_audio.push(samples);
-                        }
-                        Err(e) => {
-                            return error_response(
-                                StatusCode::BAD_REQUEST,
-                                &format!("Failed to decode audio: {}", e),
-                                "invalid_request_error",
-                            );
-                        }
-                    }
-                }
-            }
+    // Decode the media parts, then pick the path that serves them: the
+    // vision tower, the model's own encoders, or a 400.
+    let media = match decode_request_media(&request.messages).await {
+        Ok(media) => media,
+        Err(response) => return *response,
+    };
+    let multimodal_model = matches!(executor.model(), boostr::model::LoadedModel::Multimodal(_));
+    let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
+        Ok(route) => route,
+        Err(message) => {
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
         }
-        tracing::info!(
-            images = decoded_images.len(),
-            audio_segments = decoded_audio.len(),
-            "Multimodal content extracted from request"
+    };
+    if route == ImageRoute::Tower && request.raw.unwrap_or(false) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "raw mode renders no image markers; send images without `raw`",
+            "invalid_request_error",
         );
     }
 
@@ -189,20 +162,28 @@ pub async fn chat_completions(
             request
                 .messages
                 .iter()
-                .map(|m| request_msg_to_chat_msg(m, native_tools)),
+                .map(|m| request_msg_to_chat_msg(m, native_tools, route.image_marker())),
         );
         let options = request.render_options(native_tools);
-        match encode_chat_prompt(
+        match encode_chat_prompt_with_markers(
             template,
             executor.tokenizer(),
             &msgs,
             &context_prefix,
             &options,
+            &route.server_markers(),
         ) {
             Ok(encoded) => encoded,
             Err(e) => return chat_prompt_error_response(&e),
         }
     };
+    // The marker allow-list let the caller's text spell a marker too: each
+    // one must appear exactly once per image.
+    if let (ImageRoute::Tower, Some(tower)) = (route, executor.vision_tower()) {
+        if let Err(message) = tower.check_marker_counts(&prompt_tokens, media.images.len()) {
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+        }
+    }
 
     let gen_config = request.sampling_params().into_gen_config();
     let reasoning_format = request.reasoning_format.unwrap_or(state.reasoning_format);
@@ -221,27 +202,36 @@ pub async fn chat_completions(
         let budget = estimated_tokens;
 
         metrics::adjust_decode_slots(1.0);
-        if has_multimodal {
-            tokio::spawn(async move {
-                stream_multimodal_with_stop_sequences(
-                    executor,
-                    prompt_tokens,
-                    decoded_images,
-                    decoded_audio,
-                    gen_config,
-                    tx,
-                )
-                .await;
-                state_clone.release(budget);
-                metrics::adjust_decode_slots(-1.0);
-            });
-        } else {
-            tokio::spawn(async move {
-                stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
-                state_clone.release(budget);
-                metrics::adjust_decode_slots(-1.0);
-            });
-        }
+        tokio::spawn(async move {
+            match route {
+                ImageRoute::Tower => {
+                    stream_images_with_stop_sequences(
+                        executor,
+                        prompt_tokens,
+                        media.images,
+                        gen_config,
+                        tx,
+                    )
+                    .await
+                }
+                ImageRoute::Multimodal => {
+                    stream_multimodal_with_stop_sequences(
+                        executor,
+                        prompt_tokens,
+                        media.images,
+                        media.audio,
+                        gen_config,
+                        tx,
+                    )
+                    .await
+                }
+                ImageRoute::Text => {
+                    stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await
+                }
+            }
+            state_clone.release(budget);
+            metrics::adjust_decode_slots(-1.0);
+        });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let parser = ReasoningParser::for_output(reasoning_format, &prompt);
@@ -265,13 +255,18 @@ pub async fn chat_completions(
                 iter_config.seed = Some(s.wrapping_add(i as u64));
             }
 
-            // Use multimodal generation if images/audio present, else standard path
-            let gen_result = if has_multimodal {
+            // The media route picks the generator; text may go through the
+            // batching scheduler.
+            let gen_result = if route == ImageRoute::Tower {
+                executor
+                    .generate_images_text(&prompt_tokens, &media.images, &iter_config)
+                    .await
+            } else if route == ImageRoute::Multimodal {
                 executor
                     .generate_multimodal_text(
                         &prompt_tokens,
-                        &decoded_images,
-                        &decoded_audio,
+                        &media.images,
+                        &media.audio,
                         &iter_config,
                     )
                     .await

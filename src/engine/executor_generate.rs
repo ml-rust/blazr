@@ -24,7 +24,7 @@ use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
 
 use super::executor::Executor;
-use super::executor_generate_qwen35::DecodeSetup;
+use super::executor_generate_qwen35::{DecodeSetup, SamplerState};
 
 /// Clone the shared block allocator, confining the lock guard to this frame.
 ///
@@ -100,6 +100,60 @@ where
         }
     }
 
+    /// Repetition history, mirostat state and grammar DFAs for one request.
+    pub(super) fn sampler_state(
+        &self,
+        prompt_tokens: &[u32],
+        gen_config: &GenerationConfig,
+    ) -> Result<SamplerState<R>> {
+        // Token history for repetition penalty
+        let token_history: Vec<u32> = prompt_tokens.to_vec();
+
+        // Mirostat state (if enabled)
+        let mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
+            Some(MirostatState::new(
+                gen_config.mirostat_tau,
+                gen_config.mirostat_eta,
+                gen_config.seed,
+            ))
+        } else {
+            None
+        };
+
+        // Grammar DFA (if enabled) — compile to CPU DFA for state tracking,
+        // and build a DeviceGrammarDfa for on-device logit masking
+        let mut grammar_dfa: Option<super::grammar::GrammarDfa> = None;
+        let mut device_grammar: Option<boostr::DeviceGrammarDfa<R>> = None;
+        if let Some(ref grammar) = gen_config.grammar {
+            match super::grammar::compile_grammar_to_dfa(grammar) {
+                Ok(dfa) => {
+                    tracing::info!("Grammar DFA compiled: {} states", dfa.num_states());
+                    // Build vocab byte representations for the device DFA
+                    let vocab_size = self.vocab_size();
+                    let vocab_bytes: Vec<Vec<u8>> = (0..vocab_size)
+                        .map(|i| {
+                            self.tokenizer()
+                                .decode(&[i as u32])
+                                .unwrap_or_default()
+                                .into_bytes()
+                        })
+                        .collect();
+                    device_grammar = Some(dfa.to_device::<R>(&vocab_bytes, &self.device)?);
+                    grammar_dfa = Some(dfa);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to compile grammar DFA: {}", e);
+                }
+            }
+        }
+        Ok(SamplerState {
+            token_history,
+            mirostat,
+            grammar_dfa,
+            device_grammar,
+        })
+    }
+
     /// Generate from already-encoded prompt ids.
     ///
     /// The ids are the caller's — the handler that validated them against its
@@ -145,42 +199,12 @@ where
 
             let input = self.create_input_tensor(prompt_tokens)?;
 
-            // Token history for repetition penalty
-            let mut token_history: Vec<u32> = prompt_tokens.to_vec();
-
-            // Mirostat state (if enabled)
-            let mut mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
-                Some(MirostatState::new(gen_config.mirostat_tau, gen_config.mirostat_eta, gen_config.seed))
-            } else {
-                None
-            };
-
-            // Grammar DFA (if enabled) — compile to CPU DFA for state tracking,
-            // and build a DeviceGrammarDfa for on-device logit masking
-            let mut grammar_dfa: Option<super::grammar::GrammarDfa> = None;
-            let mut device_grammar: Option<boostr::DeviceGrammarDfa<R>> = None;
-            if let Some(ref grammar) = gen_config.grammar {
-                match super::grammar::compile_grammar_to_dfa(grammar) {
-                    Ok(dfa) => {
-                        tracing::info!("Grammar DFA compiled: {} states", dfa.num_states());
-                        // Build vocab byte representations for the device DFA
-                        let vocab_size = self.vocab_size();
-                        let vocab_bytes: Vec<Vec<u8>> = (0..vocab_size)
-                            .map(|i| {
-                                self.tokenizer()
-                                    .decode(&[i as u32])
-                                    .unwrap_or_default()
-                                    .into_bytes()
-                            })
-                            .collect();
-                        device_grammar = Some(dfa.to_device::<R>(&vocab_bytes, &self.device)?);
-                        grammar_dfa = Some(dfa);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to compile grammar DFA: {}", e);
-                    }
-                }
-            }
+            let SamplerState {
+                mut token_history,
+                mut mirostat,
+                mut grammar_dfa,
+                mut device_grammar,
+            } = self.sampler_state(prompt_tokens, gen_config)?;
 
             if self.model.needs_gdn_state() {
                 // ── qwen35 path: KV cache (attention layers) + GDN state ──
@@ -189,10 +213,13 @@ where
                 let setup = DecodeSetup {
                     input,
                     max_tokens,
-                    token_history,
-                    mirostat,
-                    grammar_dfa,
-                    device_grammar,
+                    sampler: SamplerState {
+                        token_history,
+                        mirostat,
+                        grammar_dfa,
+                        device_grammar,
+                    },
+                    plan: None,
                 };
                 let inner = self.generate_qwen35(prompt_tokens, gen_config, setup);
                 for await item in inner {

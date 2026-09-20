@@ -8,9 +8,11 @@ mod generation;
 mod inference;
 mod server;
 mod user;
+mod vision;
 
 pub use blazr::{parse_dtype, BlazrConfig};
 pub use generation::GenerationConfig;
 pub use inference::{DeviceConfig, InferenceConfig};
 pub use server::{LatencySlo, ReasoningFormat, ServerConfig};
 pub use user::UserConfig;
+pub use vision::VisionOverrides;

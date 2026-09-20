@@ -172,6 +172,18 @@ pub struct InferenceConfig {
     /// does not support graph capture (`Runtime::supports_graph_capture()`).
     #[serde(default)]
     pub graphs: bool,
+
+    /// Qwen3-VL mmproj GGUF loaded beside a `qwen35` model for image inputs.
+    #[serde(default)]
+    pub mmproj: Option<PathBuf>,
+
+    /// Fewest output tokens an image resizes to. `None` keeps the mmproj value.
+    #[serde(default)]
+    pub image_min_tokens: Option<usize>,
+
+    /// Most output tokens an image resizes to. `None` keeps the mmproj value.
+    #[serde(default)]
+    pub image_max_tokens: Option<usize>,
 }
 
 fn default_dtype() -> String {
@@ -243,6 +255,9 @@ impl Default for InferenceConfig {
             moe_offload: None,
             moe_gpu_experts: 0,
             graphs: false,
+            mmproj: None,
+            image_min_tokens: None,
+            image_max_tokens: None,
         }
     }
 }

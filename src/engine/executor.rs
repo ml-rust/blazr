@@ -24,6 +24,7 @@ use crate::model::chat_template::ChatTemplate;
 
 use super::lora::{load_lora_adapter, LoraAdapterRegistry};
 use super::moe_offload::{LayerExpertPlacement, MoeOffloadConfig, MoeOffloadManager};
+use super::vision_tower::{ImageTokenLimits, VisionTower};
 
 /// Inference executor
 ///
@@ -56,6 +57,8 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) expert_placements: Arc<std::sync::RwLock<Option<Vec<LayerExpertPlacement>>>>,
     /// LoRA adapter registry — holds all named adapters loaded for this model instance
     pub(crate) lora_registry: Arc<LoraAdapterRegistry<R>>,
+    /// Vision tower for image inputs, loaded from `inference.mmproj`.
+    pub(crate) vision_tower: Option<Arc<VisionTower<R>>>,
     /// Tensor parallelism state (CUDA only; present when tp_size > 1)
     #[cfg(feature = "cuda")]
     pub(crate) tp_state: Option<super::tensor_parallel::TensorParallelState>,
@@ -240,6 +243,7 @@ where
             moe_offload,
             expert_placements: Arc::new(std::sync::RwLock::new(None)),
             lora_registry: Arc::new(LoraAdapterRegistry::new()),
+            vision_tower: None,
             #[cfg(feature = "cuda")]
             tp_state: None,
             #[cfg(feature = "cuda")]
@@ -284,6 +288,49 @@ where
     pub fn with_model_dir(mut self, dir: PathBuf) -> Self {
         self.model_dir = Some(dir);
         self
+    }
+
+    /// Load the vision tower `config.inference.mmproj` names, with the
+    /// `image_min_tokens` / `image_max_tokens` limits, onto this executor's
+    /// device. No `mmproj` set: returns `self` unchanged.
+    ///
+    /// # Errors
+    ///
+    /// The loaded model is not `qwen35`, or the tower does not load.
+    pub fn with_configured_vision_tower(self) -> Result<Self> {
+        let Some(mmproj) = self.config.inference.mmproj.clone() else {
+            return Ok(self);
+        };
+        if !matches!(&*self.model, LoadedModel::Qwen35(_)) {
+            return Err(anyhow!(
+                "--mmproj needs a qwen35 model; the loaded model is {}",
+                self.model.model_type()
+            ));
+        }
+        let limits = ImageTokenLimits {
+            min_tokens: self.config.inference.image_min_tokens,
+            max_tokens: self.config.inference.image_max_tokens,
+        };
+        let tower = VisionTower::load(&mmproj, &self.device, &self.tokenizer, limits)?;
+        tracing::info!(
+            mmproj = %mmproj.display(),
+            image_min_tokens = tower.config().image_min_tokens,
+            image_max_tokens = tower.config().image_max_tokens,
+            "vision tower loaded"
+        );
+        Ok(self.with_vision_tower(tower))
+    }
+
+    /// Attach a loaded vision tower. The tower must sit on this executor's
+    /// device and carry the marker ids of its tokenizer.
+    pub fn with_vision_tower(mut self, tower: VisionTower<R>) -> Self {
+        self.vision_tower = Some(Arc::new(tower));
+        self
+    }
+
+    /// The vision tower, when `mmproj` was configured.
+    pub fn vision_tower(&self) -> Option<&Arc<VisionTower<R>>> {
+        self.vision_tower.as_ref()
     }
 
     /// Get or lazily load the draft model for speculative decoding.

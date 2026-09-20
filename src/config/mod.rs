@@ -12,5 +12,5 @@ mod user;
 pub use blazr::{parse_dtype, BlazrConfig};
 pub use generation::GenerationConfig;
 pub use inference::{DeviceConfig, InferenceConfig};
-pub use server::{LatencySlo, ServerConfig};
+pub use server::{LatencySlo, ReasoningFormat, ServerConfig};
 pub use user::UserConfig;

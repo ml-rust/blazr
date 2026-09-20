@@ -3,6 +3,7 @@
 //! Provides OpenAI-compatible REST API.
 
 mod anthropic;
+mod anthropic_types;
 #[cfg(feature = "audio")]
 mod audio;
 #[cfg(feature = "audio")]
@@ -24,15 +25,22 @@ mod management;
 pub mod metrics;
 pub mod multimodal;
 mod pooling;
+mod reasoning;
 mod rerank;
 mod responses;
+mod responses_types;
 mod routes;
 pub mod slo;
 mod startup;
 mod streaming;
+mod tool_calls;
 mod tools;
 
 pub use handlers::AppState;
+pub use reasoning::{
+    prompt_opens_reasoning, split_reasoning, split_reasoning_for_format, ReasoningParser,
+    ReasoningTags,
+};
 pub use routes::api_routes;
 pub use startup::{start, start_with_batch};
 pub use streaming::{create_chat_stream, create_completion_stream, StreamToken};

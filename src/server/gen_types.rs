@@ -127,6 +127,18 @@ pub fn policy_error_response(err: &splintr::PolicyError) -> Response {
     )
 }
 
+/// Build the error response for a chat prompt that did not assemble.
+///
+/// A template that refuses the conversation (`raise_exception`) or text that
+/// spells a control token is a request error: 400, with the reason.
+pub fn chat_prompt_error_response(err: &crate::model::chat_template::ChatPromptError) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("Rejected input: {}", err),
+        "invalid_request_error",
+    )
+}
+
 /// Encode caller text that no chat template wraps, under an explicit
 /// special-token policy.
 ///

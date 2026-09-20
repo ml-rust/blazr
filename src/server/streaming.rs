@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::convert::Infallible;
 use std::pin::Pin;
 
+use super::reasoning::ReasoningParser;
 use crate::engine::FinishReason;
 
 /// Token with optional finish reason, sent through the streaming channel
@@ -106,6 +107,8 @@ pub struct ChatStreamDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -125,15 +128,20 @@ pub struct ChatStreamChunk {
     pub choices: Vec<ChatStreamChoice>,
 }
 
-/// Create SSE stream for chat completions (true streaming, no buffering)
+/// Create SSE stream for chat completions (true streaming, no buffering).
+///
+/// With `reasoning` set, each token is split into `delta.reasoning_content`
+/// and `delta.content`; without it, every token is `delta.content`.
 pub fn create_chat_stream(
     id: String,
     model: String,
     tokens: Pin<Box<dyn Stream<Item = StreamToken> + Send>>,
+    reasoning: Option<ReasoningParser>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = async_stream::stream! {
         let created = chrono::Utc::now().timestamp();
         let mut tokens = tokens;
+        let mut reasoning = reasoning;
 
         // First chunk with role
         let first_chunk = ChatStreamChunk {
@@ -146,6 +154,7 @@ pub fn create_chat_stream(
                 delta: ChatStreamDelta {
                     role: Some("assistant".to_string()),
                     content: None,
+                    reasoning_content: None,
                 },
                 finish_reason: None,
             }],
@@ -167,6 +176,23 @@ pub fn create_chat_stream(
             let is_final = token.finish_reason.is_some();
             let finish_str = token.finish_reason.map(|r| r.as_str().to_string());
 
+            let (reasoning_text, content_text) = match reasoning.as_mut() {
+                Some(parser) => {
+                    let (mut r, mut c) = parser.feed(&token.text);
+                    if is_final {
+                        let (tail_r, tail_c) = parser.finish();
+                        r.push_str(&tail_r);
+                        c.push_str(&tail_c);
+                    }
+                    (r, c)
+                }
+                None => (String::new(), token.text),
+            };
+            let held_back = reasoning_text.is_empty() && content_text.is_empty();
+            if !is_final && held_back && reasoning.is_some() {
+                continue;
+            }
+
             let chunk = ChatStreamChunk {
                 id: id.clone(),
                 object: "chat.completion.chunk".to_string(),
@@ -176,7 +202,12 @@ pub fn create_chat_stream(
                     index: 0,
                     delta: ChatStreamDelta {
                         role: None,
-                        content: if token.text.is_empty() { None } else { Some(token.text) },
+                        content: if content_text.is_empty() { None } else { Some(content_text) },
+                        reasoning_content: if reasoning_text.is_empty() {
+                            None
+                        } else {
+                            Some(reasoning_text)
+                        },
                     },
                     finish_reason: finish_str,
                 }],

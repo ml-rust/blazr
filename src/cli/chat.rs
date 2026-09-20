@@ -9,7 +9,7 @@ use futures::StreamExt;
 use crate::config::GenerationConfig;
 use crate::engine::Executor;
 use crate::loader::{self, detect_model_source, ModelFormat};
-use crate::model::chat_template::{ChatMessage, ChatTemplate};
+use crate::model::chat_template::{encode_chat_prompt, ChatMessage, ChatTemplate, RenderOptions};
 use crate::tokenizer::from_vocab_size;
 
 #[cfg(feature = "cuda")]
@@ -22,6 +22,7 @@ type ChatRuntime = boostr::CpuRuntime;
 pub async fn chat(
     model: String,
     system: Option<String>,
+    chat_template: Option<String>,
     max_tokens: usize,
     temperature: f32,
     top_p: f32,
@@ -43,7 +44,12 @@ pub async fn chat(
 
     // Detect chat template
     let model_path = std::path::Path::new(&model);
-    let chat_template = ChatTemplate::detect(model_path, executor.config().model_type());
+    let template = ChatTemplate::detect(
+        model_path,
+        executor.config().model_type(),
+        chat_template.as_deref(),
+    )?;
+    let executor = executor.with_chat_template(template);
 
     // Warmup with spinner
     let spinner = super::util::spinner("Warming up model...");
@@ -55,7 +61,7 @@ pub async fn chat(
         "blazr chat".bold().cyan()
     );
     eprintln!("Model: {}", model.bold());
-    eprintln!("Template: {:?}", chat_template);
+    eprintln!("Template: {}", executor.chat_template().describe());
     eprintln!();
     eprintln!(
         "Commands: {} {} {}",
@@ -69,10 +75,7 @@ pub async fn chat(
 
     // Add system message if provided
     if let Some(ref sys) = system {
-        history.push(ChatMessage {
-            role: "system".to_string(),
-            content: sys.clone(),
-        });
+        history.push(ChatMessage::new("system", sys.clone()));
     }
 
     // Set up rustyline
@@ -114,10 +117,7 @@ pub async fn chat(
                 "/clear" => {
                     history.clear();
                     if let Some(ref sys) = system {
-                        history.push(ChatMessage {
-                            role: "system".to_string(),
-                            content: sys.clone(),
-                        });
+                        history.push(ChatMessage::new("system", sys.clone()));
                     }
                     eprintln!("Conversation cleared.");
                     continue;
@@ -127,13 +127,7 @@ pub async fn chat(
                     if let Some(msg) = history.iter_mut().find(|m| m.role == "system") {
                         msg.content.clone_from(&new_system);
                     } else {
-                        history.insert(
-                            0,
-                            ChatMessage {
-                                role: "system".to_string(),
-                                content: new_system.clone(),
-                            },
-                        );
+                        history.insert(0, ChatMessage::new("system", new_system.clone()));
                     }
                     eprintln!("System prompt updated: {}", new_system);
                     continue;
@@ -146,17 +140,26 @@ pub async fn chat(
         }
 
         // Add user message to history
-        history.push(ChatMessage {
-            role: "user".to_string(),
-            content: input,
-        });
+        history.push(ChatMessage::new("user", input));
 
-        // Format with chat template
-        let prompt = chat_template.apply(&history);
+        // Render and encode under the template's own special-token rule.
+        let prompt_tokens = match encode_chat_prompt(
+            executor.chat_template(),
+            executor.tokenizer(),
+            &history,
+            "",
+            &RenderOptions::default(),
+        ) {
+            Ok((_prompt, ids)) => ids,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                history.pop();
+                continue;
+            }
+        };
 
         // Stream generation
         let start = std::time::Instant::now();
-        let prompt_tokens = executor.tokenizer().encode(&prompt);
         let stream = executor.generate(&prompt_tokens, &gen_config);
         let mut stream = std::pin::pin!(stream);
         let mut response_text = String::new();
@@ -199,10 +202,7 @@ pub async fn chat(
 
         // Add assistant response to history
         if !response_text.is_empty() {
-            history.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: response_text,
-            });
+            history.push(ChatMessage::new("assistant", response_text));
         }
     }
 

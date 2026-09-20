@@ -93,6 +93,9 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     device: R::Device,
     /// Default context size for KV cache
     num_ctx: usize,
+    /// `--chat-template`: a built-in name or a template file, applied to
+    /// every model this scheduler loads.
+    chat_template: Option<String>,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -118,7 +121,15 @@ where
             model_dir,
             device,
             num_ctx: DEFAULT_NUM_CTX,
+            chat_template: None,
         }
+    }
+
+    /// Override every loaded model's chat template with a built-in name or a
+    /// template file.
+    pub fn with_chat_template(mut self, chat_template: Option<String>) -> Self {
+        self.chat_template = chat_template;
+        self
     }
 
     /// Set the context size for KV cache (like Ollama's num_ctx)
@@ -174,7 +185,11 @@ where
                 let (model, config) =
                     loader::load_model_tp::<R, _>(&model_path, &self.device, comm)?;
                 let tokenizer = from_vocab_size(config.vocab_size())?;
-                let chat_template = ChatTemplate::detect(&model_path, config.model_type());
+                let chat_template = ChatTemplate::detect(
+                    &model_path,
+                    config.model_type(),
+                    self.chat_template.as_deref(),
+                )?;
                 if let Some(ref moe_config) =
                     super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)
                 {
@@ -205,9 +220,24 @@ where
                 ));
             }
         } else {
-            let (model, config) = loader::load_model::<R, _>(&model_path, &self.device)?;
-            let tokenizer = from_vocab_size(config.vocab_size())?;
-            let chat_template = ChatTemplate::detect(&model_path, config.model_type());
+            // A GGUF carries its own vocabulary; a checkpoint directory is
+            // matched to a bundled one by size.
+            let source = loader::detect_model_source(&model_path)?;
+            let (model, config, tokenizer) = match source.format {
+                loader::ModelFormat::Gguf => {
+                    loader::load_gguf_with_tokenizer::<R, _>(&model_path, &self.device)?
+                }
+                loader::ModelFormat::SafeTensors => {
+                    let (model, config) = loader::load_model::<R, _>(&model_path, &self.device)?;
+                    let tokenizer = from_vocab_size(config.vocab_size())?;
+                    (model, config, tokenizer)
+                }
+            };
+            let chat_template = ChatTemplate::detect(
+                &model_path,
+                config.model_type(),
+                self.chat_template.as_deref(),
+            )?;
             if let Some(ref moe_config) =
                 super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)
             {

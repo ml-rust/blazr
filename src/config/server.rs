@@ -4,6 +4,17 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// How a chat response returns the model's reasoning block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningFormat {
+    /// Reasoning goes to `reasoning_content`, the answer to `content`.
+    #[default]
+    Deepseek,
+    /// Raw model output in `content`, tags included.
+    None,
+}
+
 /// HTTP server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -56,6 +67,10 @@ pub struct ServerConfig {
     /// and exposes `blazr_slo_violations_total` counter in Prometheus metrics.
     #[serde(default)]
     pub slo: Option<LatencySlo>,
+
+    /// Default `reasoning_format` for chat requests that do not set one.
+    #[serde(default)]
+    pub reasoning_format: ReasoningFormat,
 }
 
 /// Latency SLO (Service Level Objective) thresholds in milliseconds.
@@ -124,6 +139,7 @@ impl Default for ServerConfig {
             tls_key: None,
             max_inflight_tokens: 0,
             slo: None,
+            reasoning_format: ReasoningFormat::Deepseek,
         }
     }
 }

@@ -58,8 +58,26 @@ tower-http = { version = "0.6", features = [
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: a tool schema rendered into a chat prompt keeps the key
+# order the client sent, the order the model saw in training.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde-saphyr = "0.0"
+
+# Chat templates: the model's own Jinja template, rendered with the Python
+# behaviours Hugging Face templates rely on.
+minijinja = { version = "2.23", default-features = false, features = [
+  "builtins",
+  "macros",
+  "adjacent_loop_items",
+  "loop_controls",
+  "json",
+  "serde",
+  "std_collections",
+  "preserve_order",
+] }
+minijinja-contrib = { version = "2.23", default-features = false, features = [
+  "pycompat",
+] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

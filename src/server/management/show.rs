@@ -30,7 +30,7 @@ pub async fn show_model(
     };
 
     let config = executor.config();
-    let template_name = format!("{:?}", executor.chat_template());
+    let template_name = executor.chat_template().describe();
 
     let response = ShowResponse {
         modelfile: String::new(),

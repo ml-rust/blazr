@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 
 use crate::loader::{detect_model_source, get_gguf_info, ModelFormat};
+use crate::model::chat_template::ChatTemplate;
 
 /// Show model information
 pub async fn info(model: String) -> Result<()> {
@@ -16,16 +17,41 @@ pub async fn info(model: String) -> Result<()> {
 
     let source = detect_model_source(&model_path)?;
 
-    match source.format {
-        ModelFormat::SafeTensors => {
-            print_safetensors_info(&model_path)?;
-        }
-        ModelFormat::Gguf => {
-            print_gguf_info(&model_path)?;
-        }
-    }
+    let model_type = match source.format {
+        ModelFormat::SafeTensors => print_safetensors_info(&model_path)?,
+        ModelFormat::Gguf => print_gguf_info(&model_path)?,
+    };
+    print_chat_template(&model_path, &model_type);
 
     Ok(())
+}
+
+/// The template `blazr chat` and `blazr serve` will render with, and where
+/// it comes from: the model's own Jinja template, or a built-in format.
+fn print_chat_template(path: &std::path::Path, model_type: &str) {
+    match ChatTemplate::from_model(path) {
+        Ok(Some(shipped)) => {
+            let status = match shipped.compile() {
+                Ok(_) => "renders".green(),
+                Err(e) => format!("does not render: {e}").red(),
+            };
+            eprintln!(
+                "\n  {}: {} ({} bytes, bos={:?}, eos={:?}) {}",
+                "Chat template".dimmed(),
+                shipped.origin.label(),
+                shipped.source.len(),
+                shipped.bos_token,
+                shipped.eos_token,
+                status,
+            );
+        }
+        Ok(None) => eprintln!(
+            "\n  {}: {}",
+            "Chat template".dimmed(),
+            ChatTemplate::from_model_type(model_type).describe(),
+        ),
+        Err(e) => eprintln!("\n  {}: unreadable: {e}", "Chat template".dimmed()),
+    }
 }
 
 fn find_model_path(model: &str) -> Result<PathBuf> {
@@ -93,8 +119,10 @@ fn format_params(count: u64) -> String {
     }
 }
 
-fn print_safetensors_info(path: &std::path::Path) -> Result<()> {
+/// Prints the checkpoint summary and returns its `model_type`.
+fn print_safetensors_info(path: &std::path::Path) -> Result<String> {
     eprintln!("{}: {}", "Format".bold(), "SafeTensors".green());
+    let mut model_type = String::new();
 
     // Try to read config.json
     let config_path = if path.is_dir() {
@@ -110,8 +138,9 @@ fn print_safetensors_info(path: &std::path::Path) -> Result<()> {
         let config: serde_json::Value = serde_json::from_str(&content)?;
 
         eprintln!();
-        if let Some(model_type) = config.get("model_type").and_then(|v| v.as_str()) {
-            eprintln!("  {}: {}", "Architecture".dimmed(), model_type);
+        if let Some(found) = config.get("model_type").and_then(|v| v.as_str()) {
+            eprintln!("  {}: {}", "Architecture".dimmed(), found);
+            model_type = found.to_string();
         }
         if let Some(params) = estimate_params(&config) {
             eprintln!("  {}: ~{}", "Parameters".dimmed(), format_params(params));
@@ -198,10 +227,11 @@ fn print_safetensors_info(path: &std::path::Path) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(model_type)
 }
 
-fn print_gguf_info(path: &std::path::Path) -> Result<()> {
+/// Prints the file summary and returns its architecture.
+fn print_gguf_info(path: &std::path::Path) -> Result<String> {
     eprintln!("{}: {}", "Format".bold(), "GGUF".green());
 
     let info = get_gguf_info(path)?;
@@ -255,5 +285,5 @@ fn print_gguf_info(path: &std::path::Path) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(info.architecture)
 }

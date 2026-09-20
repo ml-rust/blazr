@@ -199,6 +199,7 @@ pub async fn start_with_batch(
         .map_err(|e| anyhow::anyhow!("Failed to install Prometheus metrics recorder: {}", e))?;
     let mut app_state = AppState::new(scheduler, metrics_handle)
         .with_max_inflight_tokens(config.max_inflight_tokens)
+        .with_reasoning_format(config.reasoning_format)
         .with_voice_dir(voice_dir);
     if let Some(rs) = request_scheduler {
         app_state = app_state.with_request_scheduler(rs);

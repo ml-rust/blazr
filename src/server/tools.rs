@@ -57,6 +57,10 @@ pub struct ChatRequestMessage {
     /// Function name (for role=tool messages)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reasoning the assistant produced before `content`, handed back by a
+    /// client on a later turn. A Jinja template decides how to render it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// Response message that can contain tool_calls
@@ -65,6 +69,9 @@ pub struct ChatResponseMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Reasoning the model produced before `content`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
@@ -94,118 +101,6 @@ pub fn build_tools_system_prompt(tools: &[Tool]) -> Option<String> {
     Some(prompt)
 }
 
-/// Extract tool calls from model-generated text.
-///
-/// Models typically output tool calls as JSON in specific patterns.
-/// Supports common formats:
-/// 1. `<tool_call>{"name": "fn", "arguments": {...}}</tool_call>`
-/// 2. `{"name": "fn", "arguments": {...}}` (bare JSON object with name+arguments keys)
-pub fn extract_tool_calls(text: &str) -> (Option<String>, Option<Vec<ToolCall>>) {
-    // Pattern 1: <tool_call>...</tool_call> tags
-    let mut calls = Vec::new();
-    let tag_start = "<tool_call>";
-    let tag_end = "</tool_call>";
-
-    if text.contains(tag_start) {
-        let mut search = text;
-        while let Some(start) = search.find(tag_start) {
-            let after_tag = &search[start + tag_start.len()..];
-            if let Some(end) = after_tag.find(tag_end) {
-                let json_str = after_tag[..end].trim();
-                if let Some(call) = parse_tool_call_json(json_str) {
-                    calls.push(call);
-                }
-                search = &after_tag[end + tag_end.len()..];
-            } else {
-                break;
-            }
-        }
-        if !calls.is_empty() {
-            // Remove tool_call tags from content
-            let remaining = text
-                .split(tag_start)
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let content = if remaining.is_empty() {
-                None
-            } else {
-                Some(remaining)
-            };
-            return (content, Some(calls));
-        }
-    }
-
-    // Pattern 2: Try to find a bare JSON object with "name" and "arguments" keys.
-    // Scan backwards for each '{' and try parsing as a tool call.
-    let mut search_from = text.len();
-    while search_from > 0 {
-        let prefix = &text[..search_from];
-        let Some(start) = prefix.rfind('{') else {
-            break;
-        };
-        let candidate = &text[start..];
-        // Find matching closing brace
-        let mut depth = 0;
-        let mut end_pos = None;
-        for (i, ch) in candidate.char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end_pos = Some(i + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(end) = end_pos {
-            let json_str = &candidate[..end];
-            if let Some(call) = parse_tool_call_json(json_str) {
-                let content_before = text[..start].trim();
-                let content = if content_before.is_empty() {
-                    None
-                } else {
-                    Some(content_before.to_string())
-                };
-                return (content, Some(vec![call]));
-            }
-        }
-        search_from = start;
-    }
-
-    (Some(text.to_string()), None)
-}
-
-/// Parse a JSON string as a tool call
-fn parse_tool_call_json(json_str: &str) -> Option<ToolCall> {
-    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let obj = v.as_object()?;
-    let name = obj.get("name")?.as_str()?;
-    let arguments = obj.get("arguments")?;
-
-    let args_str = if let Some(s) = arguments.as_str() {
-        s.to_string()
-    } else {
-        serde_json::to_string(arguments).ok()?
-    };
-
-    Some(ToolCall {
-        id: format!(
-            "call_{}",
-            &uuid::Uuid::new_v4().to_string().replace('-', "")[..24]
-        ),
-        r#type: "function".to_string(),
-        function: ToolCallFunction {
-            name: name.to_string(),
-            arguments: args_str,
-        },
-    })
-}
-
 /// Extract text from a MessageContent (for chat template formatting).
 fn content_text(content: &Option<MessageContent>) -> String {
     match content {
@@ -214,12 +109,29 @@ fn content_text(content: &Option<MessageContent>) -> String {
     }
 }
 
-/// Convert ChatRequestMessage to ChatMessage for template formatting.
+/// Convert a request message into the shape a chat template renders.
 ///
-/// Multimodal content (images, audio) is currently represented as placeholder
-/// text in the template. When vision models are supported, images will be
-/// processed separately and injected as image tokens.
-pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage) -> ChatMessage {
+/// `structured` is [`ChatTemplate::renders_tools_natively`](crate::model::chat_template::ChatTemplate::renders_tools_natively):
+/// a Jinja template takes tool calls and tool results as fields, a built-in
+/// format takes them flattened into the content text.
+///
+/// Images and audio are placeholders in the text on both paths; the decoded
+/// media travels beside the prompt.
+pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage, structured: bool) -> ChatMessage {
+    if structured {
+        return ChatMessage {
+            role: msg.role.clone(),
+            content: media_marked_text(msg),
+            name: msg.name.clone(),
+            tool_calls: msg.tool_calls.as_ref().map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|c| serde_json::to_value(c).ok())
+                    .collect()
+            }),
+            reasoning_content: msg.reasoning_content.clone(),
+        };
+    }
     let content = match msg.role.as_str() {
         "tool" => {
             // Format tool result: include the function name and result
@@ -244,34 +156,28 @@ pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage) -> ChatMessage {
             }
             parts.join("\n")
         }
-        _ => {
-            let text = content_text(&msg.content);
-            // If the message has images, add placeholder markers
-            if let Some(ref mc) = msg.content {
-                if mc.has_images() {
-                    let image_count = mc.image_urls().len();
-                    let marker = if image_count == 1 {
-                        "[image]".to_string()
-                    } else {
-                        format!("[{} images]", image_count)
-                    };
-                    if text.is_empty() {
-                        marker
-                    } else {
-                        format!("{}\n{}", marker, text)
-                    }
-                } else {
-                    text
-                }
-            } else {
-                text
-            }
-        }
+        _ => media_marked_text(msg),
     };
 
-    ChatMessage {
-        role: msg.role.clone(),
-        content,
+    ChatMessage::new(msg.role.clone(), content)
+}
+
+/// The message text, with an `[image]` marker in front when it carries images.
+fn media_marked_text(msg: &ChatRequestMessage) -> String {
+    let text = content_text(&msg.content);
+    let Some(mc) = msg.content.as_ref().filter(|mc| mc.has_images()) else {
+        return text;
+    };
+    let image_count = mc.image_urls().len();
+    let marker = if image_count == 1 {
+        "[image]".to_string()
+    } else {
+        format!("[{} images]", image_count)
+    };
+    if text.is_empty() {
+        marker
+    } else {
+        format!("{}\n{}", marker, text)
     }
 }
 
@@ -279,85 +185,61 @@ pub fn request_msg_to_chat_msg(msg: &ChatRequestMessage) -> ChatMessage {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_extract_tool_calls_tagged() {
-        let text = r#"I'll look that up for you.
-<tool_call>{"name": "get_weather", "arguments": {"city": "London"}}</tool_call>"#;
-        let (content, calls) = extract_tool_calls(text);
-        assert_eq!(content.as_deref(), Some("I'll look that up for you."));
-        let calls = calls.unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(calls[0].r#type, "function");
-        assert!(calls[0].function.arguments.contains("London"));
-    }
-
-    #[test]
-    fn test_extract_tool_calls_multiple_tags() {
-        let text = r#"<tool_call>{"name": "fn_a", "arguments": {}}</tool_call>
-<tool_call>{"name": "fn_b", "arguments": {"x": 1}}</tool_call>"#;
-        let (content, calls) = extract_tool_calls(text);
-        let calls = calls.unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].function.name, "fn_a");
-        assert_eq!(calls[1].function.name, "fn_b");
-        // Content before first tag is empty
-        assert!(content.is_none() || content.as_deref() == Some(""));
-    }
-
-    #[test]
-    fn test_extract_tool_calls_bare_json() {
-        let text = r#"Sure, let me check.
-{"name": "search", "arguments": {"query": "rust lang"}}"#;
-        let (content, calls) = extract_tool_calls(text);
-        assert_eq!(content.as_deref(), Some("Sure, let me check."));
-        let calls = calls.unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "search");
-    }
-
-    #[test]
-    fn test_extract_tool_calls_no_tools() {
-        let text = "Just a regular response with no tool calls.";
-        let (content, calls) = extract_tool_calls(text);
-        assert_eq!(content.as_deref(), Some(text));
-        assert!(calls.is_none());
-    }
-
-    #[test]
-    fn test_extract_tool_calls_invalid_json_ignored() {
-        let text = r#"<tool_call>not valid json</tool_call>"#;
-        let (content, calls) = extract_tool_calls(text);
-        // Invalid JSON in tags → no calls extracted, falls through
-        assert!(calls.is_none());
-        assert!(content.is_some());
+    fn message(role: &str, content: &str) -> ChatRequestMessage {
+        ChatRequestMessage {
+            role: role.to_string(),
+            content: Some(MessageContent::Text(content.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        }
     }
 
     #[test]
     fn test_request_msg_to_chat_msg_tool_role() {
-        let msg = ChatRequestMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text("{\"temp\": 20}".to_string())),
-            tool_calls: None,
-            tool_call_id: Some("call_abc".to_string()),
-            name: Some("get_weather".to_string()),
-        };
-        let chat_msg = request_msg_to_chat_msg(&msg);
+        let mut msg = message("tool", "{\"temp\": 20}");
+        msg.tool_call_id = Some("call_abc".to_string());
+        msg.name = Some("get_weather".to_string());
+        let chat_msg = request_msg_to_chat_msg(&msg, false);
         assert_eq!(chat_msg.role, "tool");
         assert!(chat_msg.content.contains("[Tool Result: get_weather]"));
         assert!(chat_msg.content.contains("{\"temp\": 20}"));
+        assert!(chat_msg.name.is_none());
+
+        let structured = request_msg_to_chat_msg(&msg, true);
+        assert_eq!(structured.content, "{\"temp\": 20}");
+        assert_eq!(structured.name.as_deref(), Some("get_weather"));
+    }
+
+    #[test]
+    fn test_request_msg_to_chat_msg_assistant_tool_calls() {
+        let mut msg = message("assistant", "");
+        msg.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            r#type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "get_weather".to_string(),
+                arguments: "{\"city\": \"Paris\"}".to_string(),
+            },
+        }]);
+        let flat = request_msg_to_chat_msg(&msg, false);
+        assert!(flat
+            .content
+            .starts_with("<tool_call>{\"name\": \"get_weather\""));
+        assert!(flat.tool_calls.is_none());
+
+        let structured = request_msg_to_chat_msg(&msg, true);
+        assert_eq!(structured.content, "");
+        let calls = structured.tool_calls.expect("kept as fields");
+        assert_eq!(calls[0]["function"]["name"], "get_weather");
+        assert_eq!(calls[0]["id"], "call_1");
     }
 
     #[test]
     fn test_request_msg_to_chat_msg_user() {
-        let msg = ChatRequestMessage {
-            role: "user".to_string(),
-            content: Some(MessageContent::Text("Hello".to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        };
-        let chat_msg = request_msg_to_chat_msg(&msg);
+        let msg = message("user", "Hello");
+        let chat_msg = request_msg_to_chat_msg(&msg, false);
         assert_eq!(chat_msg.role, "user");
         assert_eq!(chat_msg.content, "Hello");
     }
@@ -380,10 +262,13 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         };
-        let chat_msg = request_msg_to_chat_msg(&msg);
-        assert_eq!(chat_msg.role, "user");
-        assert!(chat_msg.content.contains("[image]"));
-        assert!(chat_msg.content.contains("What is this?"));
+        for structured in [false, true] {
+            let chat_msg = request_msg_to_chat_msg(&msg, structured);
+            assert_eq!(chat_msg.role, "user");
+            assert!(chat_msg.content.contains("[image]"));
+            assert!(chat_msg.content.contains("What is this?"));
+        }
     }
 }

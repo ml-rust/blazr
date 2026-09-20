@@ -15,9 +15,9 @@ use crate::engine::FinishReason;
 
 // Re-export types and utilities from gen_types so callers import from one place.
 pub use super::gen_types::{
-    apply_keep_alive, convert_logprobs, encode_with_allowed_special, error_response,
-    overloaded_response, policy_error_response, validate_generation_params, LogprobResult,
-    ResponseFormat, Usage,
+    apply_keep_alive, chat_prompt_error_response, convert_logprobs, encode_with_allowed_special,
+    error_response, overloaded_response, policy_error_response, validate_generation_params,
+    LogprobResult, ResponseFormat, Usage,
 };
 
 #[cfg(feature = "cuda")]

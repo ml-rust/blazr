@@ -2,6 +2,7 @@
 //!
 //! Provides ollama-like CLI interface for blazr.
 
+mod args;
 mod bench;
 mod chat;
 mod commands;
@@ -22,9 +23,10 @@ mod swarm;
 mod swarm_forward;
 mod util;
 
+pub use args::{RuntimeArgs, SamplingArgs};
 pub use bench::bench;
 pub use chat::chat;
-pub use commands::{Cli, Commands, RuntimeArgs, SamplingArgs};
+pub use commands::{Cli, Commands};
 pub use convert::convert;
 #[cfg(feature = "distributed")]
 pub use disaggregated::{run_disagg_decode_worker, run_disagg_prefill_worker, run_disagg_router};

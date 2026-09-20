@@ -5,7 +5,6 @@
 pub mod chat_template;
 mod config;
 pub mod detect;
-pub mod think;
 
 pub use chat_template::{ChatMessage, ChatTemplate};
 pub use config::Config;

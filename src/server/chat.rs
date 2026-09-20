@@ -11,16 +11,29 @@ use axum::{
 
 use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
 use super::generation::{
-    apply_keep_alive, convert_logprobs, decode_context_prefix, error_response,
-    generate_via_scheduler, overloaded_response, policy_error_response, record_generation_metrics,
-    stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
-    HasSamplingFields, Usage,
+    apply_keep_alive, chat_prompt_error_response, convert_logprobs, decode_context_prefix,
+    error_response, generate_via_scheduler, overloaded_response, policy_error_response,
+    record_generation_metrics, stream_multimodal_with_stop_sequences, stream_with_stop_sequences,
+    validate_generation_params, HasSamplingFields, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
+use super::reasoning::{split_reasoning_for_format, ReasoningParser};
 use super::streaming::{create_chat_stream, StreamToken};
-use super::tools::{build_tools_system_prompt, extract_tool_calls, request_msg_to_chat_msg};
-use crate::model::chat_template::encode_chat_prompt;
+use super::tool_calls::extract_tool_calls;
+use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg};
+use crate::model::chat_template::{encode_chat_prompt, ChatMessage, ChatTemplate};
+
+/// The built-in format a request's `template` field names, or the message
+/// for a name blazr does not know.
+pub fn named_template(name: &str) -> Result<ChatTemplate, String> {
+    ChatTemplate::builtin(name).ok_or_else(|| {
+        format!(
+            "unknown chat template {name:?}; built-in names: {}",
+            crate::model::chat_template::BUILTIN_NAMES.join(", ")
+        )
+    })
+}
 
 /// Chat completion endpoint
 pub async fn chat_completions(
@@ -65,8 +78,27 @@ pub async fn chat_completions(
         }
     };
 
-    let tools_system_prompt = request.tools.as_deref().and_then(build_tools_system_prompt);
     let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
+
+    // The request may name a built-in format; otherwise the model's template.
+    let override_template = match request.template.as_deref().map(named_template) {
+        Some(Ok(template)) => Some(template),
+        Some(Err(message)) => {
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+        }
+        None => None,
+    };
+    let template = override_template
+        .as_ref()
+        .unwrap_or_else(|| executor.chat_template());
+    // A Jinja template takes the tools and the structured turns itself; a
+    // built-in format takes a tool description as a system turn.
+    let native_tools = template.renders_tools_natively();
+    let tools_system_prompt = if native_tools {
+        None
+    } else {
+        request.tools.as_deref().and_then(build_tools_system_prompt)
+    };
 
     // Check for multimodal content (images/audio) and extract media data
     let has_multimodal = request.messages.iter().any(|m| {
@@ -121,7 +153,7 @@ pub async fn chat_completions(
     // The prompt is encoded here, once, under an explicit special-token policy:
     // whatever the server itself inserts is allowed and everything else in the
     // caller's text is refused. The ids double as the token-budget count.
-    let (_prompt, prompt_tokens) = if request.raw.unwrap_or(false) {
+    let (prompt, prompt_tokens) = if request.raw.unwrap_or(false) {
         // Raw mode inserts no delimiters of its own, so nothing in the caller's
         // text may become a control token.
         let raw_prompt = format!(
@@ -142,38 +174,38 @@ pub async fn chat_completions(
             Err(e) => return policy_error_response(&e),
         }
     } else {
-        let mut msgs: Vec<crate::model::chat_template::ChatMessage> = Vec::new();
+        let mut msgs: Vec<ChatMessage> = Vec::new();
         if let Some(ref sys) = request.system {
             let has_system = request.messages.iter().any(|m| m.role == "system");
             if !has_system {
-                msgs.push(crate::model::chat_template::ChatMessage {
-                    role: "system".to_string(),
-                    content: sys.clone(),
-                });
+                msgs.push(ChatMessage::new("system", sys.clone()));
             }
         }
         // Inject tools system prompt
         if let Some(ref tools_prompt) = tools_system_prompt {
-            msgs.push(crate::model::chat_template::ChatMessage {
-                role: "system".to_string(),
-                content: tools_prompt.clone(),
-            });
+            msgs.push(ChatMessage::new("system", tools_prompt.clone()));
         }
-        msgs.extend(request.messages.iter().map(request_msg_to_chat_msg));
-        let override_template = request
-            .template
-            .as_deref()
-            .map(crate::model::chat_template::ChatTemplate::from_name);
-        let template = override_template
-            .as_ref()
-            .unwrap_or_else(|| executor.chat_template());
-        match encode_chat_prompt(template, executor.tokenizer(), &msgs, &context_prefix) {
+        msgs.extend(
+            request
+                .messages
+                .iter()
+                .map(|m| request_msg_to_chat_msg(m, native_tools)),
+        );
+        let options = request.render_options(native_tools);
+        match encode_chat_prompt(
+            template,
+            executor.tokenizer(),
+            &msgs,
+            &context_prefix,
+            &options,
+        ) {
             Ok(encoded) => encoded,
-            Err(e) => return policy_error_response(&e),
+            Err(e) => return chat_prompt_error_response(&e),
         }
     };
 
     let gen_config = request.sampling_params().into_gen_config();
+    let reasoning_format = request.reasoning_format.unwrap_or(state.reasoning_format);
 
     // Token budget admission control
     let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
@@ -212,7 +244,8 @@ pub async fn chat_completions(
         }
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        create_chat_stream(id, model_name, Box::pin(rx_stream)).into_response()
+        let parser = ReasoningParser::for_output(reasoning_format, &prompt);
+        create_chat_stream(id, model_name, Box::pin(rx_stream), parser).into_response()
     } else {
         metrics::adjust_decode_slots(1.0);
         let start = Instant::now();
@@ -266,19 +299,10 @@ pub async fn chat_completions(
                     }
                     total_completion_tokens += result.completion_tokens;
 
-                    let (content, think_content) = if think_enabled {
-                        let extracted = crate::model::think::extract_thinking(&result.text);
-                        let t = if extracted.thinking.is_empty() {
-                            None
-                        } else {
-                            Some(extracted.thinking.join("\n\n"))
-                        };
-                        (extracted.content, t)
-                    } else {
-                        (result.text, None)
-                    };
-                    if i == 0 {
-                        thinking = think_content;
+                    let (reasoning_content, content) =
+                        split_reasoning_for_format(reasoning_format, &prompt, result.text);
+                    if i == 0 && think_enabled {
+                        thinking = reasoning_content.clone();
                     }
 
                     let logprobs = result
@@ -304,6 +328,7 @@ pub async fn chat_completions(
                         message: super::tools::ChatResponseMessage {
                             role: "assistant".to_string(),
                             content: final_content,
+                            reasoning_content,
                             tool_calls,
                         },
                         finish_reason: finish,

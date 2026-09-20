@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::config::ServerConfig;
+use crate::config::{ReasoningFormat, ServerConfig};
 use crate::engine::{BatchEngine, RequestScheduler, Scheduler};
 use crate::server;
 
@@ -19,6 +19,7 @@ type ServerRuntime = boostr::CpuRuntime;
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
     model: Option<String>,
+    chat_template: Option<String>,
     port: u16,
     host: String,
     api_key: Option<String>,
@@ -29,6 +30,7 @@ pub async fn serve(
     #[cfg(feature = "audio")] asr_models: Vec<String>,
     #[cfg(feature = "audio")] tts_models: Vec<String>,
     voice_dir: Option<PathBuf>,
+    reasoning_format: ReasoningFormat,
 ) -> Result<()> {
     // Get model directory
     let model_dir = std::env::var("BLAZR_MODEL_DIR")
@@ -55,7 +57,10 @@ pub async fn serve(
     }
 
     // Create scheduler
-    let scheduler = Arc::new(Scheduler::<ServerRuntime>::new(model_dir, device.clone()));
+    let scheduler = Arc::new(
+        Scheduler::<ServerRuntime>::new(model_dir, device.clone())
+            .with_chat_template(chat_template),
+    );
 
     // Pre-load and warm up model if specified
     if let Some(ref model_name) = model {
@@ -94,12 +99,13 @@ pub async fn serve(
         let vram_str = String::new();
 
         eprintln!(
-            "  {} {} in {:.1}s (vocab={}, ctx={}{})",
+            "  {} {} in {:.1}s (vocab={}, ctx={}, template={}{})",
             "Loaded".green(),
             model_name.bold(),
             load_time.as_secs_f64(),
             executor.vocab_size(),
             executor.config().max_seq_len(),
+            executor.chat_template().describe(),
             vram_str,
         );
     }
@@ -110,6 +116,7 @@ pub async fn serve(
         host,
         tls_cert,
         tls_key,
+        reasoning_format,
         ..Default::default()
     };
 

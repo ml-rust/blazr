@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::config::UserConfig;
+use crate::config::{ReasoningFormat, UserConfig};
 use crate::engine::{RequestScheduler, Scheduler, SlotManager};
 use crate::server::metrics;
 
@@ -68,6 +68,8 @@ pub struct AppState {
     /// priority order: `--voice-dir` CLI flag, `$BLAZR_VOICE_DIR`, bundled
     /// `assets/kokoro_voices/` shipped with the binary.
     pub voice_dir: Option<PathBuf>,
+    /// `reasoning_format` for chat requests that do not set one.
+    pub reasoning_format: ReasoningFormat,
 }
 
 impl AppState {
@@ -94,7 +96,14 @@ impl AppState {
             #[cfg(feature = "audio")]
             tts_paths: Arc::new(RwLock::new(HashMap::new())),
             voice_dir: None,
+            reasoning_format: ReasoningFormat::default(),
         }
+    }
+
+    /// Set the default [`ReasoningFormat`] for chat requests.
+    pub fn with_reasoning_format(mut self, format: ReasoningFormat) -> Self {
+        self.reasoning_format = format;
+        self
     }
 
     /// Attach a voice directory (see [`AppState::voice_dir`]). Fluent builder

@@ -21,26 +21,18 @@ async fn main() -> Result<()> {
         Commands::Run {
             model,
             prompt,
+            chat_template,
             verbose,
             sampling,
             runtime,
         } => {
             let mut gen_config = sampling.into_gen_config();
             gen_config.verbose_prompt = verbose;
-            blazr::cli::run(
-                model,
-                prompt,
-                gen_config,
-                runtime.gpu_layers,
-                runtime.cpu,
-                runtime.num_ctx,
-                runtime.paged_attention,
-                runtime.graphs,
-            )
-            .await?;
+            blazr::cli::run(model, prompt, chat_template, gen_config, runtime).await?;
         }
         Commands::Serve {
             model,
+            chat_template,
             port,
             host,
             api_key,
@@ -53,9 +45,11 @@ async fn main() -> Result<()> {
             #[cfg(feature = "audio")]
             tts_models,
             voice_dir,
+            reasoning_format,
         } => {
             blazr::cli::serve(
                 model,
+                chat_template,
                 port,
                 host,
                 api_key,
@@ -68,6 +62,7 @@ async fn main() -> Result<()> {
                 #[cfg(feature = "audio")]
                 tts_models,
                 voice_dir,
+                reasoning_format,
             )
             .await?;
         }
@@ -89,21 +84,12 @@ async fn main() -> Result<()> {
         } => {
             let mut gen_config = sampling.into_gen_config();
             gen_config.verbose_prompt = verbose_prompt;
-            blazr::cli::run(
-                model,
-                Some(prompt),
-                gen_config,
-                runtime.gpu_layers,
-                runtime.cpu,
-                runtime.num_ctx,
-                runtime.paged_attention,
-                runtime.graphs,
-            )
-            .await?;
+            blazr::cli::run(model, Some(prompt), None, gen_config, runtime).await?;
         }
         Commands::Chat {
             model,
             system,
+            chat_template,
             max_tokens,
             temperature,
             top_p,
@@ -113,6 +99,7 @@ async fn main() -> Result<()> {
             blazr::cli::chat(
                 model,
                 system,
+                chat_template,
                 max_tokens,
                 temperature,
                 top_p,

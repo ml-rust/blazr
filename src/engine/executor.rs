@@ -272,8 +272,10 @@ where
         Ok(executor)
     }
 
-    /// Create a new executor with a specific chat template detected from model directory
-    pub fn with_chat_template(mut self, template: ChatTemplate) -> Self {
+    /// Replace the chat template. A Jinja template gets its special-token
+    /// allow-list computed against this executor's tokenizer here.
+    pub fn with_chat_template(mut self, mut template: ChatTemplate) -> Self {
+        template.bind_special_tokens(&self.tokenizer);
         self.chat_template = template;
         self
     }

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::generation::{HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage};
 use super::tools::{ChatRequestMessage, ChatResponseMessage, Tool};
+use crate::config::ReasoningFormat;
+use crate::model::chat_template::RenderOptions;
 
 // ── Request/Response types ──
 
@@ -50,6 +52,16 @@ pub struct ChatRequest {
     pub context: Option<Vec<i64>>,
     #[serde(default)]
     pub think: Option<bool>,
+    /// Template variable `reasoning_effort`, for templates that read one.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Extra template variables, passed through to a Jinja template as is.
+    #[serde(default)]
+    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    /// `deepseek` splits reasoning from the answer, `none` returns raw output.
+    /// Default: the server's `--reasoning-format`.
+    #[serde(default)]
+    pub reasoning_format: Option<ReasoningFormat>,
     #[serde(default)]
     pub n: Option<usize>,
     #[serde(default)]
@@ -90,6 +102,45 @@ pub struct ChatRequest {
     /// The adapter must be loaded beforehand via `POST /v1/lora/load`.
     #[serde(default)]
     pub lora_adapter: Option<String>,
+}
+
+impl ChatRequest {
+    /// Template variables for this request.
+    ///
+    /// `think` sets `enable_thinking`, `reasoning_effort` passes through, and
+    /// `chat_template_kwargs` adds any other variable the template reads.
+    /// Tools reach the template only when it renders them itself.
+    pub fn render_options(&self, native_tools: bool) -> RenderOptions {
+        let mut options = RenderOptions::default();
+        if native_tools {
+            options.tools = self
+                .tools
+                .as_ref()
+                .filter(|tools| !tools.is_empty())
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|t| serde_json::to_value(t).ok())
+                        .collect()
+                });
+        }
+        if let Some(kwargs) = &self.chat_template_kwargs {
+            options
+                .extra
+                .extend(kwargs.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if let Some(think) = self.think {
+            options
+                .extra
+                .insert("enable_thinking".to_string(), think.into());
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            options
+                .extra
+                .insert("reasoning_effort".to_string(), effort.clone().into());
+        }
+        options
+    }
 }
 
 impl HasSamplingFields for ChatRequest {

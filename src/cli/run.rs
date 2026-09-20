@@ -9,45 +9,33 @@ use futures::StreamExt;
 #[cfg(feature = "cuda")]
 use boostr::CudaRuntime;
 
+use super::RuntimeArgs;
 use crate::config::GenerationConfig;
 use crate::engine::Executor;
 #[cfg(feature = "cuda")]
 use crate::loader::OffloadingOptions;
 use crate::loader::{self, detect_model_source, ModelFormat};
+use crate::model::chat_template::ChatTemplate;
 use crate::tokenizer::from_vocab_size;
 use boostr::{CpuRuntime, DType, Runtime};
 
 /// Run interactive generation
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     model: String,
     prompt: Option<String>,
+    chat_template: Option<String>,
     gen_config: GenerationConfig,
-    _gpu_layers: i32,
-    use_cpu: bool,
-    num_ctx: usize,
-    paged_attention: bool,
-    graphs: bool,
+    runtime: RuntimeArgs,
 ) -> Result<()> {
-    if use_cpu {
-        run_cpu(model, prompt, gen_config, num_ctx).await
+    if runtime.cpu {
+        run_cpu(model, prompt, chat_template, gen_config, runtime.num_ctx).await
     } else {
         #[cfg(feature = "cuda")]
         {
-            run_cuda(
-                model,
-                prompt,
-                gen_config,
-                _gpu_layers,
-                num_ctx,
-                paged_attention,
-                graphs,
-            )
-            .await
+            run_cuda(model, prompt, chat_template, gen_config, runtime).await
         }
         #[cfg(not(feature = "cuda"))]
         {
-            let _ = (graphs, paged_attention);
             anyhow::bail!(
                 "CUDA support is not enabled. Rebuild with --features cuda, or use --cpu flag."
             )
@@ -59,12 +47,17 @@ pub async fn run(
 async fn run_cuda(
     model: String,
     prompt: Option<String>,
+    chat_template: Option<String>,
     gen_config: GenerationConfig,
-    gpu_layers: i32,
-    num_ctx: usize,
-    paged_attention: bool,
-    graphs: bool,
+    runtime: RuntimeArgs,
 ) -> Result<()> {
+    let RuntimeArgs {
+        gpu_layers,
+        num_ctx,
+        paged_attention,
+        graphs,
+        ..
+    } = runtime;
     // Initialize device
     let device = boostr::CudaDevice::new(0);
 
@@ -132,7 +125,13 @@ async fn run_cuda(
     }
 
     // Create executor with num_ctx for KV cache initial capacity
-    let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?;
+    let template = ChatTemplate::detect(
+        std::path::Path::new(&model),
+        config.model_type(),
+        chat_template.as_deref(),
+    )?;
+    let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
+        .with_chat_template(template);
 
     // Warm up kernels to avoid first-run latency
     executor.warmup()?;
@@ -179,6 +178,7 @@ async fn run_cuda(
 async fn run_cpu(
     model: String,
     prompt: Option<String>,
+    chat_template: Option<String>,
     gen_config: GenerationConfig,
     num_ctx: usize,
 ) -> Result<()> {
@@ -192,21 +192,27 @@ async fn run_cpu(
     // Detect format and load appropriately
     let source = detect_model_source(Path::new(&model))?;
 
-    let executor = match source.format {
+    let (loaded_model, config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
             // Load GGUF with embedded tokenizer
-            let (loaded_model, config, tokenizer) =
-                loader::load_gguf_with_tokenizer::<CpuRuntime, _>(&model, &device)?;
-            tracing::info!("Using GGUF-embedded tokenizer (SentencePiece)");
-            Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
+            let loaded = loader::load_gguf_with_tokenizer::<CpuRuntime, _>(&model, &device)?;
+            tracing::info!("Using GGUF-embedded tokenizer");
+            loaded
         }
         ModelFormat::SafeTensors => {
             // Load SafeTensors with splintr tokenizer
             let (loaded_model, config) = loader::load_model::<CpuRuntime, _>(&model, &device)?;
             let tokenizer = from_vocab_size(config.vocab_size())?;
-            Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
+            (loaded_model, config, tokenizer)
         }
     };
+    let template = ChatTemplate::detect(
+        Path::new(&model),
+        config.model_type(),
+        chat_template.as_deref(),
+    )?;
+    let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
+        .with_chat_template(template);
 
     // Warm up model (less important for CPU, but good for consistency)
     executor.warmup()?;

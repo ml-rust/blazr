@@ -202,6 +202,23 @@ blazr pull      Download a model from HuggingFace Hub
 | `--port`  | 8080     | Port to listen on                  |
 | `--host`  | 0.0.0.0  | Host to bind to                    |
 | `--cpu`   | false    | Force CPU inference                |
+| `--chat-template` | model's own | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file |
+
+## Chat Templates
+
+`/v1/chat/completions`, `blazr chat` and `/apply-template` render messages
+with the model's own Jinja chat template: GGUF `tokenizer.chat_template`, or
+`chat_template` in `tokenizer_config.json`. A model that ships none gets the
+built-in format for its model type. `--chat-template` overrides both with a
+built-in name or a template file. `blazr info` and `/api/show` report which
+one is in use (`gguf jinja`, `tokenizer_config jinja`, `builtin chatml`).
+
+A Jinja template receives `messages`, `tools`, `add_generation_prompt`,
+`bos_token`, `eos_token`, and per-request variables: `think` sets
+`enable_thinking`, `reasoning_effort` passes through, and
+`chat_template_kwargs` adds any other variable. A template that refuses the
+conversation (`raise_exception`) answers the request with HTTP 400 and the
+template's message.
 
 ## Tokenizer
 

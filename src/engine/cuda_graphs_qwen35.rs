@@ -36,6 +36,10 @@ const ARENA_CAP_BYTES: usize = 1 << 30;
 const ARENA_FREE_DIVISOR: u64 = 4;
 /// Recapture granularity for the tightened arena.
 const ARENA_ROUND_BYTES: usize = 1 << 20;
+/// The one lane a `qwen35` graph session decodes in.
+const GRAPH_LANE: usize = 0;
+/// The sequence id that lane carries; one request at a time per session.
+const GRAPH_SEQ: u64 = 0;
 
 /// Stable-address buffers every replay reads or writes.
 struct Qwen35GraphInputs {
@@ -82,22 +86,26 @@ impl Executor<CudaRuntime> {
             .map_err(|e| anyhow!("qwen35 graph-mode prefill failed: {}", e))
     }
 
-    /// Write both scalar buffers: the KV slot `seq_len` and the rope
+    /// Write the single lane's state: the KV slot `seq_len` and the rope
     /// position `rope_pos` of the next token. Equal for a text-only
     /// context; `rope_pos` lags after an image.
+    ///
+    /// The prefill wrote straight into lane 0 of the session caches, so the
+    /// lane is claimed rather than admitted.
     fn qwen35_write_scalars(
         client: &CudaClient,
         device_scalars: &mut DeviceScalars,
         lanes: &mut LaneTable<CudaRuntime>,
         seq_len: usize,
         rope_pos: usize,
+        capacity: usize,
     ) -> Result<()> {
         device_scalars
-            .update(client, &[seq_len])
-            .map_err(|e| anyhow!("DeviceScalars update failed: {}", e))?;
+            .update_lanes(client, &[seq_len], capacity)
+            .map_err(|e| anyhow!("DeviceScalars update_lanes failed: {}", e))?;
         lanes
-            .set_rope_pos(client, 0, rope_pos)
-            .map_err(|e| anyhow!("LaneTable set_rope_pos failed: {}", e))?;
+            .claim(client, GRAPH_LANE, GRAPH_SEQ, seq_len, rope_pos)
+            .map_err(|e| anyhow!("LaneTable claim failed: {}", e))?;
         Ok(())
     }
 
@@ -121,6 +129,7 @@ impl Executor<CudaRuntime> {
 
     /// Capture one decode step over `kv_cache` and `gdn_state` into an arena
     /// of `arena_bytes`.
+    #[allow(clippy::too_many_arguments)]
     fn qwen35_capture(
         &self,
         client: &CudaClient,
@@ -129,6 +138,7 @@ impl Executor<CudaRuntime> {
         gdn_state: &LayeredGdnState<CudaRuntime>,
         rope_pos: usize,
         arena_bytes: usize,
+        capacity: usize,
     ) -> Result<boostr::runtime::CapturedGraph<CudaRuntime>> {
         Self::qwen35_write_scalars(
             client,
@@ -136,6 +146,7 @@ impl Executor<CudaRuntime> {
             &mut inputs.lanes,
             kv_cache.seq_len(),
             rope_pos,
+            capacity,
         )?;
         let graph = CudaRt::capture_graph_into_with_arena(
             client,
@@ -151,7 +162,7 @@ impl Executor<CudaRuntime> {
                         kv_cache,
                         gdn_state,
                         &inputs.device_scalars,
-                        inputs.lanes.positions(),
+                        &inputs.lanes,
                     )
                     .map_err(|e| {
                         boostr::NumrError::Backend(format!("Capture forward failed: {e}"))
@@ -189,14 +200,13 @@ impl Executor<CudaRuntime> {
         )?;
         let seq_len = session.kv_cache.seq_len();
         let rope_pos = Self::qwen35_first_rope_pos(plan, &session.kv_cache);
-        session.decode.seq_len = seq_len;
-        session.decode.rope_pos = rope_pos;
         Self::qwen35_write_scalars(
             client,
             &mut session.decode.device_scalars,
             &mut session.decode.lanes,
             seq_len,
             rope_pos,
+            session.capacity,
         )?;
         Ok(logits)
     }
@@ -248,6 +258,7 @@ impl Executor<CudaRuntime> {
             &mut inputs.lanes,
             capture_seq_len,
             capture_rope_pos,
+            capacity,
         )?;
         let warmup_logits = self
             .model()
@@ -257,7 +268,7 @@ impl Executor<CudaRuntime> {
                 &kv_cache,
                 &gdn_state,
                 &inputs.device_scalars,
-                inputs.lanes.positions(),
+                &inputs.lanes,
             )
             .map_err(|e| anyhow!("qwen35 graph-mode warmup forward failed: {}", e))?;
         argmax_to_buf(client, &warmup_logits, &inputs.next_token_buf)
@@ -279,6 +290,7 @@ impl Executor<CudaRuntime> {
             &gdn_state,
             capture_rope_pos,
             first_arena,
+            capacity,
         )?;
         let used = graph.arena_bytes_used().unwrap_or(first_arena);
         tracing::info!(
@@ -300,6 +312,7 @@ impl Executor<CudaRuntime> {
                 &gdn_state,
                 capture_rope_pos,
                 tight_arena,
+                capacity,
             )?;
             tracing::info!(
                 "qwen35 CUDA graph recaptured (arena={} used={:?})",
@@ -314,15 +327,15 @@ impl Executor<CudaRuntime> {
             device_scalars,
             lanes,
         } = inputs;
-        let decode = Qwen35DecodeGraph {
+        let decode = Qwen35DecodeGraph::new(
             graph,
             device_scalars,
+            capacity,
             lanes,
             token_buf,
             next_token_buf,
-            seq_len: kv_cache.seq_len(),
-            rope_pos: capture_rope_pos,
-        };
+        )
+        .map_err(|e| anyhow!("qwen35 decode graph binding failed: {}", e))?;
         let session = Qwen35GraphSession {
             decode,
             kv_cache,
@@ -396,7 +409,7 @@ impl Executor<CudaRuntime> {
             }
             yield Ok(self.text_token(first_token, None));
 
-            decode_graph.seed_next_token(&client, first_token as i64)
+            decode_graph.seed_next_token(&client, GRAPH_LANE, first_token as i64)
                 .map_err(|e| anyhow!("Failed to seed next_token_buf: {}", e))?;
 
             // ── Graph decode loop (event-gated readback, no device sync) ──

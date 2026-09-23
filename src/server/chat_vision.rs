@@ -1,17 +1,16 @@
 //! Media in a chat request: the decoded image and audio parts, which
-//! generation path serves them, and the marker check that path needs.
+//! generation path serves them, and the marker layout that path needs. Every
+//! chat route shares these pieces.
 
-use axum::{http::StatusCode, response::Response};
 use splintr::FxHashSet;
 
-use super::generation::error_response;
 use super::tools::ChatRequestMessage;
 use crate::engine::vision_tower::{IMAGE_MARKER_TEXT, MARKER_NAMES, NO_TOWER_ERROR};
 
 /// Decoded media of one request, in message order.
 #[derive(Default)]
 pub(super) struct RequestMedia {
-    /// Encoded image bytes, one entry per `image_url` part.
+    /// Encoded image bytes, one entry per image part.
     pub images: Vec<Vec<u8>>,
     /// PCM samples, one entry per `input_audio` part.
     pub audio: Vec<Vec<f32>>,
@@ -88,40 +87,65 @@ pub(super) fn image_route(
 ///
 /// # Errors
 ///
-/// The 400 response naming the part that did not decode.
+/// The 400 message naming the part that did not decode.
 pub(super) async fn decode_request_media(
     messages: &[ChatRequestMessage],
-) -> Result<RequestMedia, Box<Response>> {
+) -> Result<RequestMedia, String> {
     let mut media = RequestMedia::default();
     for msg in messages {
         let Some(ref content) = msg.content else {
             continue;
         };
         for img_url in content.image_urls() {
-            match super::multimodal::decode_image(&img_url.url).await {
-                Ok(decoded) => media.images.push(decoded.data),
-                Err(e) => {
-                    return Err(Box::new(error_response(
-                        StatusCode::BAD_REQUEST,
-                        &format!("Failed to decode image: {e}"),
-                        "invalid_request_error",
-                    )));
-                }
-            }
+            let decoded = super::multimodal::decode_image(&img_url.url)
+                .await
+                .map_err(|e| format!("Failed to decode image: {e}"))?;
+            media.images.push(decoded.data);
         }
         for audio_input in content.audio_inputs() {
-            match super::multimodal::decode_audio(audio_input) {
-                Ok(samples) => media.audio.push(samples),
-                Err(e) => {
-                    return Err(Box::new(error_response(
-                        StatusCode::BAD_REQUEST,
-                        &format!("Failed to decode audio: {e}"),
-                        "invalid_request_error",
-                    )));
-                }
-            }
+            let samples = super::multimodal_audio::decode_audio(audio_input)
+                .map_err(|e| format!("Failed to decode audio: {e}"))?;
+            media.audio.push(samples);
         }
     }
+    log_media(&media);
+    Ok(media)
+}
+
+/// Where one image part's bytes come from.
+#[derive(Debug)]
+pub(super) enum ImageSource<'a> {
+    /// An OpenAI-style `image_url`: a data URL, an `http(s)` URL, or base64.
+    Url(&'a str),
+    /// An Anthropic-style `source`: the declared media type and base64 bytes.
+    Base64 { media_type: &'a str, data: &'a str },
+}
+
+/// Decode `sources` in order, for a route whose messages carry images only.
+///
+/// # Errors
+///
+/// The 400 message naming the 1-based part that did not decode.
+pub(super) async fn decode_image_sources(
+    sources: &[ImageSource<'_>],
+) -> Result<RequestMedia, String> {
+    let mut media = RequestMedia::default();
+    for (index, source) in sources.iter().enumerate() {
+        let decoded = match source {
+            ImageSource::Url(url) => super::multimodal::decode_image(url).await,
+            ImageSource::Base64 { media_type, data } => {
+                super::multimodal::decode_image_source(media_type, data)
+            }
+        };
+        let decoded =
+            decoded.map_err(|e| format!("Failed to decode image part {}: {e}", index + 1))?;
+        media.images.push(decoded.data);
+    }
+    log_media(&media);
+    Ok(media)
+}
+
+fn log_media(media: &RequestMedia) {
     if !media.is_empty() {
         tracing::info!(
             images = media.images.len(),
@@ -129,7 +153,61 @@ pub(super) async fn decode_request_media(
             "Multimodal content extracted from request"
         );
     }
-    Ok(media)
+}
+
+/// One part of a message as the marker helper reads it.
+#[derive(Debug)]
+pub(super) enum MediaPart<'a> {
+    Text(&'a str),
+    Image,
+    /// A part the prompt carries nothing for.
+    Dropped,
+}
+
+/// `parts` as message text with its images marked, the one layout every chat
+/// route renders.
+///
+/// With `Some(marker)` each image becomes that text at its own position among
+/// the parts, joined by newlines. With `None` the images become a single
+/// `[image]` or `[N images]` note in front of the text. A `Dropped` part
+/// contributes nothing either way.
+pub(super) fn marked_text(parts: &[MediaPart<'_>], image_marker: Option<&str>) -> String {
+    if let Some(marker) = image_marker {
+        return parts
+            .iter()
+            .filter_map(|p| match p {
+                MediaPart::Text(text) => Some(*text),
+                MediaPart::Image => Some(marker),
+                MediaPart::Dropped => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let text = parts
+        .iter()
+        .filter_map(|p| match p {
+            MediaPart::Text(text) => Some(*text),
+            MediaPart::Image | MediaPart::Dropped => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let images = parts
+        .iter()
+        .filter(|p| matches!(p, MediaPart::Image))
+        .count();
+    if images == 0 {
+        return text;
+    }
+    let note = if images == 1 {
+        "[image]".to_string()
+    } else {
+        format!("[{images} images]")
+    };
+    if text.is_empty() {
+        note
+    } else {
+        format!("{note}\n{text}")
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +267,55 @@ mod tests {
             assert!(markers.contains(name), "{name}");
         }
         assert_eq!(ImageRoute::Tower.image_marker(), Some(IMAGE_MARKER_TEXT));
+    }
+
+    /// With a marker, two images give two marker groups in message order and
+    /// the text keeps its order around them.
+    #[test]
+    fn marked_text_keeps_part_order_with_one_marker_per_image() {
+        let parts = [
+            MediaPart::Text("First:"),
+            MediaPart::Image,
+            MediaPart::Text("Second:"),
+            MediaPart::Image,
+            MediaPart::Text("Compare them."),
+        ];
+        let rendered = marked_text(&parts, Some(IMAGE_MARKER_TEXT));
+        assert_eq!(
+            rendered,
+            format!("First:\n{IMAGE_MARKER_TEXT}\nSecond:\n{IMAGE_MARKER_TEXT}\nCompare them.")
+        );
+        assert_eq!(rendered.matches(IMAGE_MARKER_TEXT).count(), 2);
+    }
+
+    #[test]
+    fn marked_text_without_a_marker_notes_the_image_count() {
+        let one = [MediaPart::Text("What is this?"), MediaPart::Image];
+        assert_eq!(marked_text(&one, None), "[image]\nWhat is this?");
+        let two = [MediaPart::Image, MediaPart::Image, MediaPart::Text("Both?")];
+        assert_eq!(marked_text(&two, None), "[2 images]\nBoth?");
+        let bare = [MediaPart::Image];
+        assert_eq!(marked_text(&bare, None), "[image]");
+    }
+
+    #[test]
+    fn marked_text_drops_parts_the_prompt_carries_nothing_for() {
+        let parts = [
+            MediaPart::Text("Listen:"),
+            MediaPart::Dropped,
+            MediaPart::Text("and answer."),
+        ];
+        assert_eq!(marked_text(&parts, None), "Listen:\nand answer.");
+        assert_eq!(
+            marked_text(&parts, Some(IMAGE_MARKER_TEXT)),
+            "Listen:\nand answer."
+        );
+    }
+
+    #[test]
+    fn marked_text_of_plain_text_is_that_text() {
+        let parts = [MediaPart::Text("Hello")];
+        assert_eq!(marked_text(&parts, None), "Hello");
+        assert_eq!(marked_text(&parts, Some(IMAGE_MARKER_TEXT)), "Hello");
     }
 }

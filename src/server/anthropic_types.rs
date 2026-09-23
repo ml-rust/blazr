@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::anthropic_media::AnthropicImageSource;
 use super::generation::{HasSamplingFields, SamplingParams};
 use super::reasoning::split_reasoning_for_format;
 use crate::config::ReasoningFormat;
@@ -79,33 +80,14 @@ pub enum AnthropicContent {
     Blocks(Vec<AnthropicContentBlock>),
 }
 
-impl AnthropicContent {
-    pub(super) fn text(&self) -> String {
-        match self {
-            AnthropicContent::Text(s) => s.clone(),
-            AnthropicContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| match b {
-                    AnthropicContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        }
-    }
-}
-
 /// Anthropic content block
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "image")]
-    Image {
-        #[allow(dead_code)]
-        source: serde_json::Value,
-    },
+    Image { source: AnthropicImageSource },
 }
 
 impl HasSamplingFields for AnthropicRequest {
@@ -195,19 +177,20 @@ pub struct TokenCountResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::chat_vision::marked_text;
 
     #[test]
     fn test_anthropic_content_text() {
         let json = r#""hello world""#;
         let content: AnthropicContent = serde_json::from_str(json).unwrap();
-        assert_eq!(content.text(), "hello world");
+        assert_eq!(marked_text(&content.media_parts(), None), "hello world");
     }
 
     #[test]
     fn test_anthropic_content_blocks() {
-        let json = r#"[{"type": "text", "text": "hello "}, {"type": "text", "text": "world"}]"#;
+        let json = r#"[{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}]"#;
         let content: AnthropicContent = serde_json::from_str(json).unwrap();
-        assert_eq!(content.text(), "hello world");
+        assert_eq!(marked_text(&content.media_parts(), None), "hello\nworld");
     }
 
     #[test]
@@ -237,7 +220,10 @@ mod tests {
         assert_eq!(req.model, "test");
         assert_eq!(req.max_tokens, 100);
         assert_eq!(req.messages.len(), 1);
-        assert_eq!(req.messages[0].content.text(), "Hello");
+        assert_eq!(
+            marked_text(&req.messages[0].content.media_parts(), None),
+            "Hello"
+        );
     }
 
     #[test]
@@ -260,11 +246,14 @@ mod tests {
             "model": "test",
             "max_tokens": 100,
             "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": " World"}]}
+                {"role": "user", "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": "World"}]}
             ]
         }"#;
         let req: AnthropicRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.messages[0].content.text(), "Hello World");
+        assert_eq!(
+            marked_text(&req.messages[0].content.media_parts(), None),
+            "Hello\nWorld"
+        );
     }
 
     #[test]

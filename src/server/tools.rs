@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::chat_template::ChatMessage;
 
+use super::chat_vision::{marked_text, MediaPart};
 use super::multimodal::{ContentPart, MessageContent};
 
 /// Tool definition in the request
@@ -168,43 +169,28 @@ pub fn request_msg_to_chat_msg(
     ChatMessage::new(msg.role.clone(), content)
 }
 
-/// The message text with its images marked: each image part as
-/// `image_marker` in place, or one `[image]` note in front of the text.
+/// The message text with its images marked, through the helper every chat
+/// route shares.
 fn media_marked_text(msg: &ChatRequestMessage, image_marker: Option<&str>) -> String {
-    let text = content_text(&msg.content);
-    let Some(mc) = msg.content.as_ref().filter(|mc| mc.has_images()) else {
-        return text;
+    let Some(mc) = msg.content.as_ref() else {
+        return String::new();
     };
-    if let Some(marker) = image_marker {
-        return marked_parts(mc, marker);
-    }
-    let image_count = mc.image_urls().len();
-    let marker = if image_count == 1 {
-        "[image]".to_string()
-    } else {
-        format!("[{} images]", image_count)
-    };
-    if text.is_empty() {
-        marker
-    } else {
-        format!("{}\n{}", marker, text)
-    }
+    marked_text(&media_parts(mc), image_marker)
 }
 
-/// The parts in order, joined by newlines like [`MessageContent::text`]:
-/// text as is, an image as `marker`, audio dropped.
-fn marked_parts(content: &MessageContent, marker: &str) -> String {
+/// The content as the marker helper reads it: text as is, an image part as an
+/// image, audio dropped.
+fn media_parts(content: &MessageContent) -> Vec<MediaPart<'_>> {
     match content {
-        MessageContent::Text(s) => s.clone(),
+        MessageContent::Text(s) => vec![MediaPart::Text(s.as_str())],
         MessageContent::Parts(parts) => parts
             .iter()
-            .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
-                ContentPart::ImageUrl { .. } => Some(marker),
-                ContentPart::InputAudio { .. } => None,
+            .map(|p| match p {
+                ContentPart::Text { text } => MediaPart::Text(text.as_str()),
+                ContentPart::ImageUrl { .. } => MediaPart::Image,
+                ContentPart::InputAudio { .. } => MediaPart::Dropped,
             })
-            .collect::<Vec<_>>()
-            .join("\n"),
+            .collect(),
     }
 }
 

@@ -106,7 +106,9 @@ pub async fn chat_completions(
     // vision tower, the model's own encoders, or a 400.
     let media = match decode_request_media(&request.messages).await {
         Ok(media) => media,
-        Err(response) => return *response,
+        Err(message) => {
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+        }
     };
     let multimodal_model = matches!(executor.model(), boostr::model::LoadedModel::Multimodal(_));
     let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {

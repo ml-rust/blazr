@@ -70,22 +70,6 @@ pub enum ResponsesContent {
     Parts(Vec<ResponsesContentPart>),
 }
 
-impl ResponsesContent {
-    pub(super) fn text(&self) -> String {
-        match self {
-            ResponsesContent::Text(s) => s.clone(),
-            ResponsesContent::Parts(parts) => parts
-                .iter()
-                .filter_map(|p| match p {
-                    ResponsesContentPart::InputText { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        }
-    }
-}
-
 /// Content part types
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -95,8 +79,13 @@ pub enum ResponsesContentPart {
     InputText { text: String },
     #[serde(rename = "input_image")]
     InputImage {
-        #[allow(dead_code)]
+        /// A data URL (`data:image/png;base64,...`) or an `http(s)` URL.
+        #[serde(default)]
         image_url: Option<String>,
+        /// Requested detail level: "auto", "low", "high".
+        #[serde(default)]
+        #[allow(dead_code)]
+        detail: Option<String>,
     },
     #[serde(rename = "input_audio")]
     InputAudio {
@@ -227,6 +216,7 @@ pub struct ResponsesUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::chat_vision::marked_text;
 
     #[test]
     fn test_responses_input_text() {
@@ -251,7 +241,7 @@ mod tests {
             ResponsesInput::Items(items) => {
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0].role, "user");
-                assert_eq!(items[0].content.text(), "Hello");
+                assert_eq!(marked_text(&items[0].content.media_parts(), None), "Hello");
             }
             _ => panic!("expected items input"),
         }
@@ -262,13 +252,16 @@ mod tests {
         let json = r#"{
             "model": "test",
             "input": [
-                {"role": "user", "content": [{"type": "input_text", "text": "Hello "}, {"type": "input_text", "text": "World"}]}
+                {"role": "user", "content": [{"type": "input_text", "text": "Hello"}, {"type": "input_text", "text": "World"}]}
             ]
         }"#;
         let req: ResponsesRequest = serde_json::from_str(json).unwrap();
         match req.input {
             ResponsesInput::Items(items) => {
-                assert_eq!(items[0].content.text(), "Hello World");
+                assert_eq!(
+                    marked_text(&items[0].content.media_parts(), None),
+                    "Hello\nWorld"
+                );
             }
             _ => panic!("expected items input"),
         }

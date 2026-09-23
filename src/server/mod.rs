@@ -3,6 +3,8 @@
 //! Provides OpenAI-compatible REST API.
 
 mod anthropic;
+mod anthropic_media;
+mod anthropic_stream;
 mod anthropic_types;
 #[cfg(feature = "audio")]
 mod audio;
@@ -25,10 +27,12 @@ mod lora;
 mod management;
 pub mod metrics;
 pub mod multimodal;
+mod multimodal_audio;
 mod pooling;
 mod reasoning;
 mod rerank;
 mod responses;
+mod responses_media;
 mod responses_types;
 mod routes;
 pub mod slo;

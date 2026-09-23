@@ -210,11 +210,17 @@ blazr pull      Download a model from HuggingFace Hub
 
 ## Image Inputs
 
-With `--mmproj`, a `/v1/chat/completions` message can carry `image_url`
-parts (data URI, `http(s)` URL, or base64) beside its text. Each image takes
-the place of its part in the prompt; the reply describes it. Without
-`--mmproj` such a request gets a 400 naming the flag. `blazr chat` attaches
-an image to the next turn with `/image <path>`.
+With `--mmproj`, three routes take images beside the text. Each image takes
+the place of its own part in the prompt; the reply describes it. Without
+`--mmproj` such a request gets a 400 naming the flag, in the route's own
+error shape. `blazr chat` attaches an image to the next turn with
+`/image <path>`.
+
+| Route                  | Image part                                                       |
+| ---------------------- | ---------------------------------------------------------------- |
+| `/v1/chat/completions` | `image_url` part: data URI, `http(s)` URL, or base64             |
+| `/v1/responses`        | `input_image` part: `image_url` as a data URL or `http(s)` URL   |
+| `/v1/messages`         | `image` block: a `base64` source, or a `url` source              |
 
 ## Chat Templates
 

@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use super::chat_vision::{decode_image_sources, image_route, marked_text, ImageRoute};
 use super::generation::{
     chat_prompt_error_response, error_response, generate_via_scheduler, overloaded_response,
     record_generation_metrics, validate_generation_params,
@@ -22,7 +23,7 @@ use super::metrics;
 use super::responses_types::{
     output_items, ResponsesInput, ResponsesRequest, ResponsesResponse, ResponsesUsage,
 };
-use crate::model::chat_template::{encode_chat_prompt, ChatMessage, RenderOptions};
+use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, RenderOptions};
 
 /// POST /v1/responses — OpenAI Responses API
 pub async fn responses(
@@ -48,6 +49,32 @@ pub async fn responses(
         }
     };
 
+    // Decode the `input_image` parts, then pick the path that serves them:
+    // the vision tower, the model's own encoders, or a 400.
+    let media = {
+        let sources = match request.input.image_sources() {
+            Ok(sources) => sources,
+            Err(message) => {
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+            }
+        };
+        // `sources` borrows the request, so it ends here: the handler moves
+        // request fields into the reply below.
+        match decode_image_sources(&sources).await {
+            Ok(media) => media,
+            Err(message) => {
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+            }
+        }
+    };
+    let multimodal_model = matches!(executor.model(), boostr::model::LoadedModel::Multimodal(_));
+    let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
+        Ok(route) => route,
+        Err(message) => {
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+        }
+    };
+
     // Build chat messages from input
     let mut msgs: Vec<ChatMessage> = Vec::new();
 
@@ -68,23 +95,33 @@ pub async fn responses(
                 } else {
                     item.role.clone()
                 };
-                msgs.push(ChatMessage::new(role, item.content.text()));
+                let content = marked_text(&item.content.media_parts(), route.image_marker());
+                msgs.push(ChatMessage::new(role, content));
             }
         }
     }
 
-    // One encode of the assembled prompt, under the template's own allow-list:
-    // a control token the server did not insert is refused, not promoted.
-    let (prompt, prompt_tokens) = match encode_chat_prompt(
+    // One encode of the assembled prompt, under the template's own allow-list
+    // plus whatever markers this route wrote in: any other control token in
+    // the caller's text is refused, not promoted.
+    let (prompt, prompt_tokens) = match encode_chat_prompt_with_markers(
         executor.chat_template(),
         executor.tokenizer(),
         &msgs,
         "",
         &RenderOptions::default(),
+        &route.server_markers(),
     ) {
         Ok(encoded) => encoded,
         Err(e) => return chat_prompt_error_response(&e),
     };
+    // The marker allow-list let the caller's text spell a marker too: each
+    // one must appear exactly once per image.
+    if let (ImageRoute::Tower, Some(tower)) = (route, executor.vision_tower()) {
+        if let Err(message) = tower.check_marker_counts(&prompt_tokens, media.images.len()) {
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+        }
+    }
 
     let gen_config = crate::config::GenerationConfig {
         max_tokens: request.max_output_tokens,
@@ -104,7 +141,17 @@ pub async fn responses(
     let start = Instant::now();
     let model_name = request.model.clone();
 
-    let gen_result = if let Some(ref rs) = state.request_scheduler {
+    // The media route picks the generator; text may go through the batching
+    // scheduler.
+    let gen_result = if route == ImageRoute::Tower {
+        executor
+            .generate_images_text(&prompt_tokens, &media.images, &gen_config)
+            .await
+    } else if route == ImageRoute::Multimodal {
+        executor
+            .generate_multimodal_text(&prompt_tokens, &media.images, &media.audio, &gen_config)
+            .await
+    } else if let Some(ref rs) = state.request_scheduler {
         match generate_via_scheduler(rs, prompt_tokens.clone(), &gen_config).await {
             Ok(r) => Ok(crate::engine::GenerationResult {
                 text: r.text,

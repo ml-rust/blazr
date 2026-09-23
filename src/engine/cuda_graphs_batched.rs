@@ -105,11 +105,15 @@ impl Executor<boostr::CudaRuntime> {
             self.device(),
         )?;
 
-        let device_scalars = DeviceScalars::new(initial_seq_len_k, self.device())?;
+        // Every lane starts the batch at the same position: `DeviceScalars`
+        // is now one value per lane, so the uniform seq_len is repeated
+        // across the batch instead of shared by a single tensor.
+        let initial_seq_lens = vec![initial_seq_len_k; max_batch_size];
+        let mut device_scalars = DeviceScalars::new(&initial_seq_lens, self.device())?;
 
         // ── Warmup pass: JIT all kernels, do NOT capture yet ──
         device_scalars
-            .update(&client, initial_seq_len_k)
+            .update(&client, &initial_seq_lens)
             .map_err(|e| anyhow!("BatchedGraph DeviceScalars warmup failed: {}", e))?;
         device_scalars
             .update_rope_slices(
@@ -202,6 +206,7 @@ impl Executor<boostr::CudaRuntime> {
             max_batch_size,
             max_blocks_per_seq,
             seq_len: initial_seq_len_k,
+            seq_lens_scratch: initial_seq_lens,
         })
     }
 
@@ -227,10 +232,13 @@ impl Executor<boostr::CudaRuntime> {
 
         let client = CudaRt::default_client(self.device());
 
-        // Update device-side scalars (seq_len_k for attention kernel)
+        // Update device-side scalars (seq_len_k for attention kernel), the
+        // same position repeated across every lane of the batch. Reuses the
+        // state's own scratch buffer, so a replay allocates nothing here.
+        state.seq_lens_scratch.fill(seq_len_k);
         state
             .device_scalars
-            .update(&client, seq_len_k)
+            .update(&client, &state.seq_lens_scratch)
             .map_err(|e| anyhow!("BatchedGraph DeviceScalars update failed: {}", e))?;
 
         // Update RoPE slices for the current position
@@ -302,4 +310,7 @@ pub struct BatchedGraphState {
     pub max_blocks_per_seq: usize,
     /// Current `seq_len_k` (updated by `replay_batched_graph` after each step)
     pub seq_len: usize,
+    /// Reused staging buffer for the uniform `seq_len_k` broadcast to every
+    /// lane; `replay_batched_graph` overwrites it in place each step.
+    seq_lens_scratch: Vec<usize>,
 }

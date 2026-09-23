@@ -265,11 +265,11 @@ impl Executor<CudaRuntime> {
                 &[seq_len_k as i32], &[1], self.device(),
             )?;
 
-            let device_scalars = DeviceScalars::new(seq_len_k, self.device())?;
+            let mut device_scalars = DeviceScalars::new(&[seq_len_k], self.device())?;
             let next_token_buf = boostr::Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device())?;
 
             // ── Warmup pass (JIT kernels) ──
-            device_scalars.update(&client, seq_len_k)
+            device_scalars.update(&client, &[seq_len_k])
                 .map_err(|e| anyhow!("DeviceScalars warmup update failed: {}", e))?;
             let warmup_logits = self.model().forward_graph_paged(
                 &client, &token_buf, &paged_cache, &slot_mapping, &block_table,
@@ -298,7 +298,7 @@ impl Executor<CudaRuntime> {
             ).map_err(|e| anyhow!("Re-prefill for capture failed: {}", e))?;
 
             let capture_seq_len = paged_cache.seq_len();
-            device_scalars.update(&client, capture_seq_len)
+            device_scalars.update(&client, &[capture_seq_len])
                 .map_err(|e| anyhow!("DeviceScalars pre-capture update failed: {}", e))?;
             device_scalars.update_rope_slices(&client, &rope_cos_cache, &rope_sin_cache, &cos_slice, &sin_slice, capture_seq_len, half_dim)
                 .map_err(|e| anyhow!("RoPE pre-capture update failed: {}", e))?;

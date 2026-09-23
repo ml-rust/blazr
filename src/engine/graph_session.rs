@@ -119,7 +119,7 @@ impl Executor<CudaRuntime> {
         session
             .decode
             .device_scalars
-            .update(&client, seq_len)
+            .update(&client, &[seq_len])
             .map_err(|e| anyhow!("DeviceScalars update failed: {}", e))?;
         Ok(logits)
     }
@@ -189,12 +189,12 @@ impl Executor<CudaRuntime> {
             Tensor::<CudaRuntime>::zeros(&[1, half_dim], rope_sin_cache.dtype(), device)?,
             false,
         );
-        let device_scalars = DeviceScalars::new(kv_cache.seq_len(), device)?;
+        let mut device_scalars = DeviceScalars::new(&[kv_cache.seq_len()], device)?;
         let next_token_buf = Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, device)?;
 
         // Warmup pass: JIT every kernel, not captured.
         device_scalars
-            .update(&client, kv_cache.seq_len())
+            .update(&client, &[kv_cache.seq_len()])
             .map_err(|e| anyhow!("DeviceScalars warmup update failed: {}", e))?;
         let warmup_logits = self
             .model()
@@ -220,7 +220,7 @@ impl Executor<CudaRuntime> {
 
         let capture_seq_len = kv_cache.seq_len();
         device_scalars
-            .update(&client, capture_seq_len)
+            .update(&client, &[capture_seq_len])
             .map_err(|e| anyhow!("DeviceScalars pre-capture update failed: {}", e))?;
         device_scalars
             .update_rope_slices(

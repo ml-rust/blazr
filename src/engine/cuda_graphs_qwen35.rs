@@ -19,11 +19,10 @@
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 
-use boostr::inference::decode_graph::{
-    argmax_to_buf, DeviceScalars, MropeScalars, Qwen35DecodeGraph,
-};
-use boostr::inference::{LayeredGdnState, LayeredKvCache};
+use boostr::inference::decode_graph::{argmax_to_buf, DeviceScalars, Qwen35DecodeGraph};
+use boostr::inference::{LaneTable, LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35PromptPlan;
+use boostr::model::LoadedModel;
 use boostr::runtime::cuda::CudaRuntime as CudaRt;
 use boostr::{CudaClient, CudaRuntime, Runtime, Tensor};
 
@@ -43,7 +42,7 @@ struct Qwen35GraphInputs {
     token_buf: Tensor<CudaRuntime>,
     next_token_buf: Tensor<CudaRuntime>,
     device_scalars: DeviceScalars,
-    mrope: MropeScalars,
+    lanes: LaneTable<CudaRuntime>,
 }
 
 impl Executor<CudaRuntime> {
@@ -88,18 +87,36 @@ impl Executor<CudaRuntime> {
     /// context; `rope_pos` lags after an image.
     fn qwen35_write_scalars(
         client: &CudaClient,
-        device_scalars: &DeviceScalars,
-        mrope: &MropeScalars,
+        device_scalars: &mut DeviceScalars,
+        lanes: &mut LaneTable<CudaRuntime>,
         seq_len: usize,
         rope_pos: usize,
     ) -> Result<()> {
         device_scalars
-            .update(client, seq_len)
+            .update(client, &[seq_len])
             .map_err(|e| anyhow!("DeviceScalars update failed: {}", e))?;
-        mrope
-            .update(client, rope_pos)
-            .map_err(|e| anyhow!("MropeScalars update failed: {}", e))?;
+        lanes
+            .set_rope_pos(client, 0, rope_pos)
+            .map_err(|e| anyhow!("LaneTable set_rope_pos failed: {}", e))?;
         Ok(())
+    }
+
+    /// Rope positions the loaded `qwen35` model's IMROPE table holds, read
+    /// through the LLM backbone whether the model is bare or multimodal.
+    fn qwen35_rope_table_len(&self) -> Result<usize> {
+        match self.model() {
+            LoadedModel::Qwen35(m) => Ok(m.rope_table_len()),
+            LoadedModel::Multimodal(m) => match m.llm() {
+                LoadedModel::Qwen35(inner) => Ok(inner.rope_table_len()),
+                other => Err(anyhow!(
+                    "multimodal backbone {other:?} is not qwen35; cannot read its rope table \
+                     length"
+                )),
+            },
+            other => Err(anyhow!(
+                "model {other:?} is not qwen35; cannot read its rope table length"
+            )),
+        }
     }
 
     /// Capture one decode step over `kv_cache` and `gdn_state` into an arena
@@ -107,7 +124,7 @@ impl Executor<CudaRuntime> {
     fn qwen35_capture(
         &self,
         client: &CudaClient,
-        inputs: &Qwen35GraphInputs,
+        inputs: &mut Qwen35GraphInputs,
         kv_cache: &LayeredKvCache<CudaRuntime>,
         gdn_state: &LayeredGdnState<CudaRuntime>,
         rope_pos: usize,
@@ -115,8 +132,8 @@ impl Executor<CudaRuntime> {
     ) -> Result<boostr::runtime::CapturedGraph<CudaRuntime>> {
         Self::qwen35_write_scalars(
             client,
-            &inputs.device_scalars,
-            &inputs.mrope,
+            &mut inputs.device_scalars,
+            &mut inputs.lanes,
             kv_cache.seq_len(),
             rope_pos,
         )?;
@@ -134,7 +151,7 @@ impl Executor<CudaRuntime> {
                         kv_cache,
                         gdn_state,
                         &inputs.device_scalars,
-                        &inputs.mrope,
+                        inputs.lanes.positions(),
                     )
                     .map_err(|e| {
                         boostr::NumrError::Backend(format!("Capture forward failed: {e}"))
@@ -176,8 +193,8 @@ impl Executor<CudaRuntime> {
         session.decode.rope_pos = rope_pos;
         Self::qwen35_write_scalars(
             client,
-            &session.decode.device_scalars,
-            &session.decode.mrope,
+            &mut session.decode.device_scalars,
+            &mut session.decode.lanes,
             seq_len,
             rope_pos,
         )?;
@@ -211,19 +228,24 @@ impl Executor<CudaRuntime> {
         let capture_seq_len = kv_cache.seq_len();
         let capture_rope_pos = Self::qwen35_first_rope_pos(plan, &kv_cache);
 
+        // Single-sequence lane table: one lane, bounded by the model's own
+        // rope table.
+        let rope_table_len = self.qwen35_rope_table_len()?;
+
         // Stable-address decode inputs, all allocated before capture.
-        let inputs = Qwen35GraphInputs {
+        let mut inputs = Qwen35GraphInputs {
             token_buf: Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?,
             next_token_buf: Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device())?,
-            device_scalars: DeviceScalars::new(capture_seq_len, self.device())?,
-            mrope: MropeScalars::new(capture_rope_pos, self.device())?,
+            device_scalars: DeviceScalars::new(&[capture_seq_len], self.device())?,
+            lanes: LaneTable::<CudaRuntime>::new(1, rope_table_len, self.device())
+                .map_err(|e| anyhow!("LaneTable::new failed: {}", e))?,
         };
 
         // Warmup pass: JIT kernels and probe the tuner, not captured.
         Self::qwen35_write_scalars(
             client,
-            &inputs.device_scalars,
-            &inputs.mrope,
+            &mut inputs.device_scalars,
+            &mut inputs.lanes,
             capture_seq_len,
             capture_rope_pos,
         )?;
@@ -235,7 +257,7 @@ impl Executor<CudaRuntime> {
                 &kv_cache,
                 &gdn_state,
                 &inputs.device_scalars,
-                &inputs.mrope,
+                inputs.lanes.positions(),
             )
             .map_err(|e| anyhow!("qwen35 graph-mode warmup forward failed: {}", e))?;
         argmax_to_buf(client, &warmup_logits, &inputs.next_token_buf)
@@ -252,7 +274,7 @@ impl Executor<CudaRuntime> {
         let first_arena = self.qwen35_first_arena_bytes()?;
         let mut graph = self.qwen35_capture(
             client,
-            &inputs,
+            &mut inputs,
             &kv_cache,
             &gdn_state,
             capture_rope_pos,
@@ -273,7 +295,7 @@ impl Executor<CudaRuntime> {
             drop(graph);
             graph = self.qwen35_capture(
                 client,
-                &inputs,
+                &mut inputs,
                 &kv_cache,
                 &gdn_state,
                 capture_rope_pos,
@@ -290,12 +312,12 @@ impl Executor<CudaRuntime> {
             token_buf,
             next_token_buf,
             device_scalars,
-            mrope,
+            lanes,
         } = inputs;
         let decode = Qwen35DecodeGraph {
             graph,
             device_scalars,
-            mrope,
+            lanes,
             token_buf,
             next_token_buf,
             seq_len: kv_cache.seq_len(),

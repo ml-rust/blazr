@@ -8,7 +8,9 @@
 //! into the same caches, then capture. Later requests reset the caches in
 //! place, prefill their prompt, and replay. An image prompt prefills its
 //! [`Qwen35PromptPlan`] instead of its ids and starts the replay at the rope
-//! position the plan leaves, behind the KV slot. One `qwen35` decode step records
+//! position the plan leaves, behind the KV slot. The capture stops at the
+//! logits copy; this arm samples every step greedily on the host and writes
+//! the token back for the next replay. One `qwen35` decode step records
 //! on the order of a thousand intermediate allocations, so capture goes
 //! through the arena variant; the arena is sized generously first and
 //! tightened from the reported footprint when the first guess is more than
@@ -19,7 +21,7 @@
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 
-use boostr::inference::decode_graph::{argmax_to_buf, DeviceScalars, Qwen35DecodeGraph};
+use boostr::inference::decode_graph::{copy_into_stable, DeviceScalars, Qwen35DecodeGraph};
 use boostr::inference::{LaneTable, LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35PromptPlan;
 use boostr::model::LoadedModel;
@@ -41,10 +43,9 @@ const GRAPH_LANE: usize = 0;
 /// The sequence id that lane carries; one request at a time per session.
 const GRAPH_SEQ: u64 = 0;
 
-/// Stable-address buffers every replay reads or writes.
+/// Stable-address inputs every replay reads.
 struct Qwen35GraphInputs {
     token_buf: Tensor<CudaRuntime>,
-    next_token_buf: Tensor<CudaRuntime>,
     device_scalars: DeviceScalars,
     lanes: LaneTable<CudaRuntime>,
 }
@@ -129,11 +130,16 @@ impl Executor<CudaRuntime> {
 
     /// Capture one decode step over `kv_cache` and `gdn_state` into an arena
     /// of `arena_bytes`.
+    ///
+    /// The capture ends at the logits copy into `logits_buf`. It picks no
+    /// token: the decode loop samples each replay's logits on the host and
+    /// writes the result back as the next input token.
     #[allow(clippy::too_many_arguments)]
     fn qwen35_capture(
         &self,
         client: &CudaClient,
         inputs: &mut Qwen35GraphInputs,
+        logits_buf: &Tensor<CudaRuntime>,
         kv_cache: &LayeredKvCache<CudaRuntime>,
         gdn_state: &LayeredGdnState<CudaRuntime>,
         rope_pos: usize,
@@ -151,7 +157,7 @@ impl Executor<CudaRuntime> {
         let graph = CudaRt::capture_graph_into_with_arena(
             client,
             &[&inputs.token_buf],
-            &[&inputs.next_token_buf],
+            &[logits_buf],
             arena_bytes,
             |c| {
                 let logits = self
@@ -167,7 +173,7 @@ impl Executor<CudaRuntime> {
                     .map_err(|e| {
                         boostr::NumrError::Backend(format!("Capture forward failed: {e}"))
                     })?;
-                argmax_to_buf(c, &logits, &inputs.next_token_buf)
+                copy_into_stable(c, &logits, logits_buf)
             },
         )
         .map_err(|e| {
@@ -245,7 +251,6 @@ impl Executor<CudaRuntime> {
         // Stable-address decode inputs, all allocated before capture.
         let mut inputs = Qwen35GraphInputs {
             token_buf: Tensor::<CudaRuntime>::zeros(&[1, 1], boostr::DType::I64, self.device())?,
-            next_token_buf: Tensor::<CudaRuntime>::zeros(&[1], boostr::DType::I64, self.device())?,
             device_scalars: DeviceScalars::new(&[capture_seq_len], self.device())?,
             lanes: LaneTable::<CudaRuntime>::new(1, rope_table_len, self.device())
                 .map_err(|e| anyhow!("LaneTable::new failed: {}", e))?,
@@ -271,8 +276,16 @@ impl Executor<CudaRuntime> {
                 &inputs.lanes,
             )
             .map_err(|e| anyhow!("qwen35 graph-mode warmup forward failed: {}", e))?;
-        argmax_to_buf(client, &warmup_logits, &inputs.next_token_buf)
-            .map_err(|e| anyhow!("Warmup argmax_to_buf failed: {}", e))?;
+
+        // Stable logits destination, shaped and typed by the warmup's own
+        // output and allocated before capture so its address holds.
+        let logits_buf = Tensor::<CudaRuntime>::zeros(
+            warmup_logits.shape(),
+            warmup_logits.dtype(),
+            self.device(),
+        )?;
+        copy_into_stable(client, &warmup_logits, &logits_buf)
+            .map_err(|e| anyhow!("Warmup logits copy failed: {}", e))?;
         drop(warmup_logits);
 
         // The warmup wrote the KV cache and GDN state in place: reset both
@@ -286,6 +299,7 @@ impl Executor<CudaRuntime> {
         let mut graph = self.qwen35_capture(
             client,
             &mut inputs,
+            &logits_buf,
             &kv_cache,
             &gdn_state,
             capture_rope_pos,
@@ -308,6 +322,7 @@ impl Executor<CudaRuntime> {
             graph = self.qwen35_capture(
                 client,
                 &mut inputs,
+                &logits_buf,
                 &kv_cache,
                 &gdn_state,
                 capture_rope_pos,
@@ -323,7 +338,6 @@ impl Executor<CudaRuntime> {
 
         let Qwen35GraphInputs {
             token_buf,
-            next_token_buf,
             device_scalars,
             lanes,
         } = inputs;
@@ -333,7 +347,7 @@ impl Executor<CudaRuntime> {
             capacity,
             lanes,
             token_buf,
-            next_token_buf,
+            logits_buf,
         )
         .map_err(|e| anyhow!("qwen35 decode graph binding failed: {}", e))?;
         let session = Qwen35GraphSession {
@@ -354,7 +368,7 @@ impl Executor<CudaRuntime> {
     ///
     /// # Preconditions
     /// - `self.model().supports_gdn_graph_mode()` is true
-    /// - `gen_config.is_greedy()` is true and `gen_config.has_penalties()` is false: the replay reads only the argmax token
+    /// - `gen_config.is_greedy()` is true and `gen_config.has_penalties()` is false: this loop samples each step greedily
     pub(super) fn generate_with_graphs_qwen35<'a>(
         &'a self,
         prompt_tokens: &'a [u32],
@@ -409,10 +423,14 @@ impl Executor<CudaRuntime> {
             }
             yield Ok(self.text_token(first_token, None));
 
-            decode_graph.seed_next_token(&client, GRAPH_LANE, first_token as i64)
-                .map_err(|e| anyhow!("Failed to seed next_token_buf: {}", e))?;
+            decode_graph.set_next_tokens(&client, &[first_token as i64])
+                .map_err(|e| anyhow!("Failed to seed the graph lane's first token: {}", e))?;
 
-            // ── Graph decode loop (event-gated readback, no device sync) ──
+            // ── Graph decode loop ──
+            // Replay, then sample the lane's logits on the host through the
+            // same greedy path the eager arm uses, then write the chosen
+            // token back as the next replay's input. One event-gated readback
+            // per step, no device sync.
             let graph_max = max_tokens.saturating_sub(1);
             for i in 0..graph_max {
                 let t1 = std::time::Instant::now();
@@ -421,11 +439,10 @@ impl Executor<CudaRuntime> {
                     .map_err(|e| anyhow!("qwen35 graph pre-replay+launch failed: {}", e))?;
                 let fwd_time = t1.elapsed();
 
-                let event = decode_graph.next_token_buf.record_event()
-                    .map_err(|e| anyhow!("Record event failed: {}", e))?;
-
                 let t2 = std::time::Instant::now();
-                let next_token = Self::read_token_id(&decode_graph.next_token_buf, event)?;
+                let next_token = self.first_token_from_logits(decode_graph.logits())?;
+                decode_graph.set_next_tokens(&client, &[next_token as i64])
+                    .map_err(|e| anyhow!("Failed to write the graph lane's next token: {}", e))?;
                 tracing::info!("qwen35 graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
 
                 if self.tokenizer().is_eos(next_token) {

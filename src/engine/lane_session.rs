@@ -4,12 +4,13 @@
 //! GDN state, the lane table, the decode driver and the next-token mirror. This
 //! layer owns which request is in which lane and how that lane samples.
 //!
-//! [`Qwen35LaneSession::admit`] prefills one prompt into a scratch one-lane
-//! cache through the single-sequence prefill, then installs it into a free
-//! lane. [`Qwen35LaneSession::step`] runs one decode step for every occupied
-//! lane, samples each lane's logits row by that lane's own
-//! [`GenerationConfig`], and hands back the token each lane produced.
-//! [`Qwen35LaneSession::release`] gives a lane back for the next sequence.
+//! `lane_prefill` admits a prompt: it prefills into a scratch one-lane cache
+//! through the single-sequence prefill, in one call or in chunks, then
+//! installs that state into a free lane. [`Qwen35LaneSession::step`] runs one
+//! decode step for every occupied lane, samples each lane's logits row by
+//! that lane's own [`GenerationConfig`], and hands back the token each lane
+//! produced. [`Qwen35LaneSession::release`] gives a lane back for the next
+//! sequence.
 //!
 //! A lane holds its sequence from cache position 0 with its own end, so a
 //! lane produces the tokens it would produce alone, whatever the other lanes
@@ -27,17 +28,18 @@ use crate::config::GenerationConfig;
 
 use super::executor::Executor;
 use super::executor_generate_qwen35::SamplerState;
+use super::lane_prefill::PendingPrefill;
 use super::types::FinishReason;
 
 /// One admitted sequence's decode state, held beside its lane.
-struct LaneRequest {
+pub(super) struct LaneRequest {
     /// Sampling policy this lane decodes under.
-    gen_config: GenerationConfig,
+    pub(super) gen_config: GenerationConfig,
     /// Token history for the repetition penalties, mirostat state and the
     /// grammar DFAs, exactly as the single-sequence loop carries them.
-    sampler: SamplerState<CudaRuntime>,
+    pub(super) sampler: SamplerState<CudaRuntime>,
     /// Tokens this lane has produced, which is also the next step's index.
-    generated: usize,
+    pub(super) generated: usize,
 }
 
 /// A token one lane produced in one step.
@@ -63,9 +65,11 @@ pub struct LaneAdmitted {
 /// A fixed set of `qwen35` decode lanes and the requests occupying them.
 pub struct Qwen35LaneSession {
     /// The caches, the lane table, the decode path and the token mirror.
-    decode: LaneDecodeSession,
+    pub(super) decode: LaneDecodeSession,
     /// Per-lane request state, `None` when the lane is free.
-    requests: Vec<Option<LaneRequest>>,
+    pub(super) requests: Vec<Option<LaneRequest>>,
+    /// The prompt part-way through a chunked prefill, if one is running.
+    pub(super) pending: Option<PendingPrefill>,
 }
 
 impl Qwen35LaneSession {
@@ -104,6 +108,7 @@ impl Qwen35LaneSession {
         Ok(Self {
             decode,
             requests: (0..lanes).map(|_| None).collect(),
+            pending: None,
         })
     }
 
@@ -132,79 +137,6 @@ impl Qwen35LaneSession {
         (0..self.requests.len())
             .filter(|&lane| self.requests[lane].is_some())
             .collect()
-    }
-
-    /// Prefill `prompt_tokens` and install it into a free lane.
-    ///
-    /// The prompt goes through the single-sequence prefill into a scratch
-    /// one-lane cache, which is then installed at position 0 of a free lane.
-    /// The prefill logits are sampled under `gen_config`, so the returned
-    /// first token is this lane's own.
-    ///
-    /// # Errors
-    ///
-    /// An error when `prompt_tokens` is empty, when the prompt does not
-    /// leave room for a token inside `capacity`, when every lane is taken,
-    /// or when the prefill or the install fails.
-    pub fn admit(
-        &mut self,
-        exec: &Executor<CudaRuntime>,
-        prompt_tokens: &[u32],
-        gen_config: &GenerationConfig,
-    ) -> Result<LaneAdmitted> {
-        let prompt_len = prompt_tokens.len();
-        let capacity = self.capacity();
-        if prompt_len == 0 {
-            return Err(anyhow!(
-                "a qwen35 lane takes at least one prompt token, got 0; encode a non-empty \
-                 prompt before admitting it"
-            ));
-        }
-        if prompt_len >= capacity {
-            return Err(anyhow!(
-                "prompt of {prompt_len} tokens leaves no room inside the lane capacity of \
-                 {capacity}; shorten the prompt or open the session with a larger context"
-            ));
-        }
-        if self.free_lanes() == 0 {
-            return Err(anyhow!(
-                "every one of the {} qwen35 lanes is taken; release a finished sequence's lane \
-                 before admitting another",
-                self.batch()
-            ));
-        }
-
-        let client = LaneDecodeSession::client(exec.device());
-        let input = exec.create_input_tensor(prompt_tokens)?;
-        let (mut scratch_kv, mut scratch_gdn) = exec.qwen35_caches(prompt_len, capacity)?;
-        let prefill_logits =
-            exec.qwen35_prefill(&input, None, &mut scratch_kv, &mut scratch_gdn)?;
-        let rope_pos = Executor::<CudaRuntime>::qwen35_first_rope_pos(None, &scratch_kv);
-
-        let lane = self
-            .decode
-            .install(&client, &scratch_kv, &scratch_gdn, rope_pos)
-            .map_err(|e| anyhow!("installing a prefilled sequence into a qwen35 lane: {e}"))?;
-        drop(scratch_kv);
-        drop(scratch_gdn);
-
-        let mut request = LaneRequest {
-            gen_config: gen_config.clone(),
-            sampler: exec.sampler_state(prompt_tokens, gen_config)?,
-            generated: 0,
-        };
-        let first_token = Self::sample_lane(exec, &prefill_logits, &mut request)?;
-        let finish_reason = exec.decode_finish_reason(first_token, 0, gen_config.max_tokens);
-
-        self.decode.set_next_token(lane, first_token)?;
-        self.requests[lane] = Some(request);
-        self.decode.commit_next_tokens(&client)?;
-
-        Ok(LaneAdmitted {
-            lane,
-            first_token,
-            finish_reason,
-        })
     }
 
     /// One decode step for every occupied lane.
@@ -274,7 +206,7 @@ impl Qwen35LaneSession {
     /// `logits` is that lane's row alone, `[1, 1, vocab]` from a decode step
     /// or `[1, prompt_len, vocab]` from a prefill; the sampler reads the last
     /// position either way.
-    fn sample_lane(
+    pub(super) fn sample_lane(
         exec: &Executor<CudaRuntime>,
         logits: &Tensor<CudaRuntime>,
         request: &mut LaneRequest,

@@ -132,6 +132,11 @@ pub struct InferenceConfig {
     /// Chunk size for prefill (0 = no chunking, process entire prompt at once).
     /// When set, long prompts are split into chunks of this size, interleaving
     /// with decode steps between chunks to reduce TTFT for concurrent requests.
+    /// Also drives the lane path's chunked prefill, letting a long prompt
+    /// interleave with lanes that are already decoding. Chunking changes the
+    /// shapes the prefill runs at, so a non-zero value makes the prefill
+    /// arithmetic differ in the last bits from a one-shot prefill of the
+    /// same prompt. Neither path is bit-identical to the other.
     #[serde(default)]
     pub prefill_chunk_size: usize,
 

@@ -156,11 +156,36 @@ where
                 .model
                 .forward_qwen35_embeds(&plan.embeds, &plan.positions, kv_cache, gdn_state)
                 .map_err(|e| anyhow!("qwen35 image prefill failed: {}", e)),
-            None => self
-                .model
-                .forward_qwen35(input, kv_cache, gdn_state, 0)
-                .map_err(|e| anyhow!("Forward pass failed: {}", e)),
+            None => self.qwen35_prefill_at(input, 0, kv_cache, gdn_state),
         }
+    }
+
+    /// Prefill `input` at rope position `rope_pos`, continuing whatever
+    /// `kv_cache` and `gdn_state` already hold.
+    ///
+    /// `rope_pos` is the position of `input`'s first token, which for a
+    /// text-only prompt is the number of tokens already cached. The
+    /// attention layers offset their causal mask by the keys in the cache,
+    /// and each GDN layer carries its conv window and delta-rule state
+    /// forward, so feeding a prompt as successive slices leaves the same
+    /// state as feeding all of it in one call.
+    ///
+    /// Returns the logits of the tokens in `input`.
+    pub(super) fn qwen35_prefill_at(
+        &self,
+        input: &Tensor<R>,
+        rope_pos: usize,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+    ) -> Result<Tensor<R>> {
+        self.model
+            .forward_qwen35(input, kv_cache, gdn_state, rope_pos)
+            .map_err(|e| {
+                anyhow!(
+                    "qwen35 prefill of {} tokens at rope position {rope_pos} failed: {e}",
+                    input.shape().last().copied().unwrap_or(0)
+                )
+            })
     }
 
     /// Rope position of the first decode token after a prefill: the plan's

@@ -28,6 +28,7 @@ pub(crate) mod grammar_parser;
 mod graph_session;
 mod lane_api;
 mod lane_engine;
+mod lane_prefill;
 mod lane_scheduler;
 mod lane_session;
 pub mod lora;

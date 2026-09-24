@@ -1,9 +1,10 @@
 //! Executor entry points for the `qwen35` lane session.
 //!
-//! Every call takes the session lock, does one admit, one step or one
-//! release, and drops the lock before returning. No caller holds it across a
-//! request's token stream, so two requests interleave their steps on the same
-//! session instead of queueing behind each other.
+//! Every call takes the session lock, does one admit, one prefill chunk, one
+//! step or one release, and drops the lock before returning. No caller holds
+//! it across a request's token stream or across a whole chunked prefill, so
+//! two requests interleave their steps on the same session instead of
+//! queueing behind each other.
 
 #![cfg(feature = "cuda")]
 
@@ -70,6 +71,53 @@ impl Executor<CudaRuntime> {
         let mut guard = self.qwen35_lane_session.lock().await;
         let session = guard.as_mut().ok_or_else(Self::no_lane_session)?;
         session.admit(self, prompt_tokens, gen_config)
+    }
+
+    /// Start a chunked prefill of `prompt_tokens` under `gen_config`, feeding
+    /// no token yet.
+    ///
+    /// Drive it with [`qwen35_lane_prefill_chunk`](Self::qwen35_lane_prefill_chunk)
+    /// until that hands back the admitted lane, and step the occupied lanes
+    /// between the chunks.
+    ///
+    /// # Errors
+    ///
+    /// An error when no session is open, when a chunked prefill is already
+    /// running, when every lane is taken, or when the prompt does not fit a
+    /// lane.
+    pub async fn qwen35_lane_admit_begin(
+        &self,
+        prompt_tokens: &[u32],
+        gen_config: &GenerationConfig,
+    ) -> Result<()> {
+        let mut guard = self.qwen35_lane_session.lock().await;
+        let session = guard.as_mut().ok_or_else(Self::no_lane_session)?;
+        session.begin_admit(self, prompt_tokens, gen_config)
+    }
+
+    /// Feed the next `chunk_size` prompt tokens of the running chunked
+    /// prefill: `None` while tokens remain, the admitted lane once the last
+    /// chunk is installed.
+    ///
+    /// # Errors
+    ///
+    /// An error when no session is open, when no chunked prefill is running,
+    /// when `chunk_size` is 0, or when the forward or the install fails.
+    pub async fn qwen35_lane_prefill_chunk(
+        &self,
+        chunk_size: usize,
+    ) -> Result<Option<LaneAdmitted>> {
+        let mut guard = self.qwen35_lane_session.lock().await;
+        let session = guard.as_mut().ok_or_else(Self::no_lane_session)?;
+        session.prefill_chunk(self, chunk_size)
+    }
+
+    /// Drop a running chunked prefill and everything it allocated.
+    pub async fn qwen35_lane_admit_cancel(&self) {
+        let mut guard = self.qwen35_lane_session.lock().await;
+        if let Some(session) = guard.as_mut() {
+            session.cancel_admit();
+        }
     }
 
     /// One decode step for every occupied lane, one [`LaneToken`] per lane.

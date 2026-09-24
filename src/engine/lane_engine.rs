@@ -10,6 +10,12 @@
 //! With no lane occupied the task waits on the scheduler's wakeup channel, so
 //! an idle server launches nothing.
 //!
+//! `inference.prefill_chunk_size` above 0 feeds an admitted prompt in slices
+//! of that many tokens and runs one decode step for the already occupied
+//! lanes between the slices, so a long prompt no longer holds back the token
+//! streams of the requests already decoding. At 0 the whole prompt goes
+//! through one prefill.
+//!
 //! Logprobs are not produced on this path: a lane's logits are consumed by its
 //! own sampler and not kept.
 
@@ -23,9 +29,11 @@ use boostr::inference::lane_decode::LaneDecodeMode;
 use boostr::inference::scheduler::SequenceId;
 use boostr::CudaRuntime;
 
+use crate::config::GenerationConfig;
+
 use super::executor::Executor;
 use super::lane_scheduler::LaneScheduler;
-use super::lane_session::LaneToken;
+use super::lane_session::{LaneAdmitted, LaneToken};
 use super::types::{FinishReason, GeneratedToken};
 
 /// Fills and steps the lanes of one `qwen35` lane session.
@@ -34,6 +42,9 @@ pub struct LaneEngine {
     scheduler: Arc<LaneScheduler>,
     /// The decode path the session steps.
     mode: LaneDecodeMode,
+    /// Prompt tokens one prefill chunk feeds; 0 prefills a whole prompt in
+    /// one call.
+    chunk_size: usize,
     /// Request occupying each lane, `None` when the lane is free.
     active: Vec<Option<SequenceId>>,
     /// How many lanes are occupied.
@@ -60,11 +71,13 @@ impl LaneEngine {
         } else {
             LaneDecodeMode::Eager
         };
+        let chunk_size = executor.config().inference.prefill_chunk_size;
         executor.qwen35_lane_open(lanes, mode).await?;
         Ok(Self {
             executor,
             scheduler,
             mode,
+            chunk_size,
             active: vec![None; lanes],
             live: 0,
         })
@@ -143,27 +156,94 @@ impl LaneEngine {
                 .saturating_sub(prompt_tokens.len());
             gen_config.max_tokens = gen_config.max_tokens.clamp(1, room.max(1));
 
-            match self
-                .executor
-                .qwen35_lane_admit(&prompt_tokens, &gen_config)
-                .await
-            {
-                Ok(admitted) => {
-                    self.active[admitted.lane] = Some(seq_id);
-                    self.live += 1;
-                    let keep = self
-                        .deliver(seq_id, admitted.first_token, admitted.finish_reason)
-                        .await;
-                    if !keep {
-                        self.end_lane(admitted.lane).await;
-                    }
-                }
+            let outcome = if self.chunk_size > 0 {
+                self.admit_chunked(&prompt_tokens, &gen_config).await
+            } else {
+                self.executor
+                    .qwen35_lane_admit(&prompt_tokens, &gen_config)
+                    .await
+            };
+
+            match outcome {
+                Ok(admitted) => self.attach(seq_id, admitted).await,
                 Err(e) => {
                     let reason = anyhow!("admitting a request into a qwen35 lane failed: {e}");
                     self.scheduler.registry().send_error(seq_id, reason).await;
                     let _ = self.scheduler.registry().finish(seq_id);
                 }
             }
+        }
+    }
+
+    /// Prefill one prompt in `chunk_size` slices, running one decode step for
+    /// the already occupied lanes between the slices.
+    ///
+    /// A step between chunks forwards its tokens and releases its finished
+    /// lanes exactly as the driver loop's own step does, so the requests
+    /// already decoding keep producing tokens for the whole prefill. A failed
+    /// step ends the requests in the live lanes and the prefill carries on.
+    ///
+    /// # Errors
+    ///
+    /// An error when the prompt does not fit a lane, or when a chunk's
+    /// forward or the install fails. The part-way prefill is dropped either
+    /// way.
+    async fn admit_chunked(
+        &mut self,
+        prompt_tokens: &[u32],
+        gen_config: &GenerationConfig,
+    ) -> Result<LaneAdmitted> {
+        self.executor
+            .qwen35_lane_admit_begin(prompt_tokens, gen_config)
+            .await?;
+
+        loop {
+            match self
+                .executor
+                .qwen35_lane_prefill_chunk(self.chunk_size)
+                .await
+            {
+                Ok(Some(admitted)) => return Ok(admitted),
+                Ok(None) => {}
+                Err(e) => {
+                    self.executor.qwen35_lane_admit_cancel().await;
+                    return Err(e);
+                }
+            }
+
+            if self.live == 0 {
+                continue;
+            }
+            match self.executor.qwen35_lane_step().await {
+                Ok(tokens) => self.forward_step(tokens).await,
+                Err(e) => self.fail_live_lanes(&e).await,
+            }
+        }
+    }
+
+    /// Record an admitted lane against its request and forward the token the
+    /// prefill produced, releasing the lane when that token ends the request.
+    async fn attach(&mut self, seq_id: SequenceId, admitted: LaneAdmitted) {
+        let lanes = self.active.len();
+        if admitted.lane >= lanes {
+            let reason = anyhow!(
+                "an admit returned lane {}, outside the {lanes} lanes this engine tracks; \
+                 restart the lane engine to match the session it drives",
+                admitted.lane
+            );
+            self.scheduler.registry().send_error(seq_id, reason).await;
+            let _ = self.scheduler.registry().finish(seq_id);
+            return;
+        }
+        if let Some(slot) = self.active.get_mut(admitted.lane) {
+            *slot = Some(seq_id);
+        }
+        self.live += 1;
+        let keep = self
+            .deliver(seq_id, admitted.first_token, admitted.finish_reason)
+            .await;
+        if !keep {
+            self.end_lane(admitted.lane).await;
         }
     }
 

@@ -143,6 +143,7 @@ where
             &block_table_tensor,
             max_seq_len,
             max_seq_len - 1,
+            None,
         )
         .map_err(|e| anyhow!("batched decode forward failed: {}", e))?;
 

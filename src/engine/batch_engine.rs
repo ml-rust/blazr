@@ -258,6 +258,7 @@ where
                         &block_table_tensor,
                         end,       // seq_len_k = total tokens up to this chunk
                         processed, // start_pos for this chunk
+                        None,
                     )
                     .map_err(|e| {
                         anyhow!("chunked prefill failed at offset {}: {}", processed, e)
@@ -401,6 +402,7 @@ where
                 &block_table_tensor,
                 prompt_tokens.len(), // total seq_len (including cached)
                 prefill_start,       // start_pos = skip cached tokens
+                None,
             )
             .map_err(|e| anyhow!("prefill forward failed: {}", e))?;
 

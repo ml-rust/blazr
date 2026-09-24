@@ -159,6 +159,7 @@ where
                 &block_table,
                 1,
                 0,
+                None,
             )
             .map_err(|e| anyhow!("Warmup paged prefill failed: {}", e))?;
 
@@ -183,6 +184,7 @@ where
                 &block_table,
                 2,
                 1,
+                None,
             )
             .map_err(|e| anyhow!("Warmup paged decode failed: {}", e))?;
 

@@ -342,7 +342,7 @@ where
                 let t0 = std::time::Instant::now();
                 let mut logits = self.model.forward_with_paged_kv_cache(
                     &prefill_input, &paged_cache, &slot_mapping, &block_table_tensor,
-                    seq_len_k, prefill_start,
+                    seq_len_k, prefill_start, None,
                 ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
                 tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), prompt_tokens.len(), num_blocks);
                 tracing::info!(phase = "prefill_end", backend = "paged");
@@ -372,7 +372,7 @@ where
                     let next_input = token_gpu.reshape(&[1, 1])?;
                     let next_logits = self.model.forward_with_paged_kv_cache(
                         &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
-                        new_seq_len_k, cur_seq_len,
+                        new_seq_len_k, cur_seq_len, None,
                     ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
                     Self::moe_offload_step(&self.moe_offload, &self.expert_placements, &self.model, &self.device);
                     let fwd_time = t1.elapsed();

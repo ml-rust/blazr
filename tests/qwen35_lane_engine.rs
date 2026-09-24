@@ -10,12 +10,14 @@
 //!
 //! # Fixture file
 //!
+//! `BLAZR_TEST_QWEN35_GGUF` is the path of a `qwen35` GGUF to run
+//! against, whichever quantization it is. Unset,
 //! `BOOSTR_BONSAI2_DIR` must hold `Ternary-Bonsai-2-27B-PQ2_0.gguf`, and a
 //! CUDA device must be present. Either missing, the test prints one `skip:`
 //! line and passes.
 //!
 //! ```bash
-//! BOOSTR_BONSAI2_DIR=/path/to/dir cargo test --release -p blazr --features cuda \
+//! BLAZR_TEST_QWEN35_GGUF=/path/to/model.gguf cargo test --release -p blazr --features cuda \
 //!   --test qwen35_lane_engine -- --nocapture
 //! ```
 //!
@@ -36,6 +38,9 @@ use blazr::loader::load_gguf_with_tokenizer;
 use blazr::{Executor, GenerationConfig};
 use boostr::{CudaDevice, CudaRuntime};
 
+/// A `qwen35` GGUF to run against, whichever quantization it is.
+const ENV_GGUF: &str = "BLAZR_TEST_QWEN35_GGUF";
+/// A directory holding [`PQ2_0_FILE`], used when [`ENV_GGUF`] is unset.
 const ENV_DIR: &str = "BOOSTR_BONSAI2_DIR";
 const PQ2_0_FILE: &str = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
 /// Three prompts of deliberately different token lengths.
@@ -52,11 +57,16 @@ const STEP_LIMIT: usize = NUM_TOKENS * 4;
 
 /// The PQ2_0 file, or `None` after one `skip:` line.
 fn require_file() -> Option<PathBuf> {
-    let Some(dir) = std::env::var(ENV_DIR).ok().map(PathBuf::from) else {
-        println!("skip: {ENV_DIR} not set");
-        return None;
+    let path = match std::env::var(ENV_GGUF).ok().map(PathBuf::from) {
+        Some(path) => path,
+        None => {
+            let Some(dir) = std::env::var(ENV_DIR).ok().map(PathBuf::from) else {
+                println!("skip: set {ENV_GGUF} to a qwen35 GGUF, or {ENV_DIR} to a directory holding {PQ2_0_FILE}");
+                return None;
+            };
+            dir.join(PQ2_0_FILE)
+        }
     };
-    let path = dir.join(PQ2_0_FILE);
     if !path.is_file() {
         println!("skip: {} not found", path.display());
         return None;

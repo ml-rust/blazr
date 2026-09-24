@@ -22,7 +22,7 @@
 use anyhow::{anyhow, Result};
 
 use boostr::inference::lane_decode::{LaneDecodeMode, LaneDecodeSession, LaneDriverSpec};
-use boostr::{CudaRuntime, Tensor};
+use boostr::{CudaRuntime, SamplingScratch, Tensor};
 
 use crate::config::GenerationConfig;
 
@@ -164,10 +164,11 @@ impl Qwen35LaneSession {
             let Some(request) = self.requests[lane].as_mut() else {
                 continue;
             };
-            let row = self.decode.logits_row(&logits, lane)?;
+            let row = self.decode.logits_row(&client, &logits, lane)?;
+            let scratch = self.decode.scratch(lane)?;
             let step_index = request.generated;
             let max_tokens = request.gen_config.max_tokens;
-            let token_id = Self::sample_lane(exec, &row, request)?;
+            let token_id = Self::sample_lane(exec, row, scratch, request)?;
             let finish_reason = exec.decode_finish_reason(token_id, step_index, max_tokens);
             self.decode.set_next_token(lane, token_id)?;
             produced.push(LaneToken {
@@ -209,14 +210,16 @@ impl Qwen35LaneSession {
     pub(super) fn sample_lane(
         exec: &Executor<CudaRuntime>,
         logits: &Tensor<CudaRuntime>,
+        scratch: &SamplingScratch<CudaRuntime>,
         request: &mut LaneRequest,
     ) -> Result<u32> {
-        let (token_gpu, mirostat_id) = exec.sample_token_dispatch_with_grammar(
+        let (token_gpu, mirostat_id) = exec.sample_token_dispatch_with_grammar_into(
             logits,
             &request.sampler.token_history,
             &request.gen_config,
             &mut request.sampler.mirostat,
             request.sampler.device_grammar.as_ref(),
+            scratch,
         )?;
         let token_id = match mirostat_id {
             Some(id) => id,

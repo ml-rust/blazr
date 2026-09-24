@@ -9,7 +9,7 @@ use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, DeviceGrammarDfa, GrammarDfaOps, NormalizationOps,
-    Runtime, SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
+    Runtime, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use crate::config::GenerationConfig;
@@ -18,6 +18,17 @@ use super::executor::Executor;
 use super::types::{FinishReason, GeneratedToken, TokenLogprob};
 
 pub use super::mirostat::MirostatState;
+
+/// Logits ready to sample, and what `logits_to_token[_into]` samples them
+/// with: the penalty-window tensors, how many unique tokens they carry, and
+/// the temperature to sample at.
+struct PreparedLogitsToToken<R: Runtime> {
+    logits: Tensor<R>,
+    ids_tensor: Tensor<R>,
+    cnts_tensor: Tensor<R>,
+    num_unique: usize,
+    temperature: f32,
+}
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -108,6 +119,39 @@ where
                 recent_tokens,
                 gen_config,
                 gpu_grammar,
+            )?;
+            Ok((tensor, None)) // token ID read later via pipelined D2H
+        }
+    }
+
+    /// Like [`Self::sample_token_dispatch_with_grammar`], but samples through
+    /// [`Self::logits_to_token_on_device_with_grammar_into`] on the
+    /// non-mirostat path, so a caller stepping the same lane every decode
+    /// step can reuse one [`SamplingScratch`] instead of allocating one per
+    /// step.
+    ///
+    /// Mirostat still pulls logits to the host and returns a freshly
+    /// allocated `[1]` I64 tensor: mirostat's state update needs the full
+    /// distribution on the host, so there is no per-step buffer to reuse.
+    pub(crate) fn sample_token_dispatch_with_grammar_into(
+        &self,
+        logits: &Tensor<R>,
+        recent_tokens: &[u32],
+        gen_config: &GenerationConfig,
+        mirostat: &mut Option<MirostatState>,
+        gpu_grammar: Option<&DeviceGrammarDfa<R>>,
+        scratch: &SamplingScratch<R>,
+    ) -> Result<(Tensor<R>, Option<u32>)> {
+        if let Some(ref mut ms) = mirostat {
+            let (tensor, id) = self.mirostat_sample_on_device(logits, ms, gen_config)?;
+            Ok((tensor, Some(id)))
+        } else {
+            let tensor = self.logits_to_token_on_device_with_grammar_into(
+                logits,
+                recent_tokens,
+                gen_config,
+                gpu_grammar,
+                scratch,
             )?;
             Ok((tensor, None)) // token ID read later via pipelined D2H
         }
@@ -390,6 +434,76 @@ where
         gen_config: &GenerationConfig,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
     ) -> Result<Tensor<R>> {
+        let ready = self.prepare_logits_to_token(logits, recent_tokens, gen_config, gpu_grammar)?;
+        let client = R::default_client(self.device());
+        client
+            .logits_to_token(
+                &ready.logits,
+                &ready.ids_tensor,
+                &ready.cnts_tensor,
+                ready.num_unique,
+                gen_config.repeat_penalty,
+                gen_config.frequency_penalty,
+                gen_config.presence_penalty,
+                ready.temperature,
+                gen_config.top_k,
+                gen_config.top_p,
+                gen_config.min_p,
+                gen_config.seed,
+            )
+            .map_err(|e| anyhow!("logits_to_token failed: {}", e))
+    }
+
+    /// Like [`Self::logits_to_token_on_device_with_grammar`], but samples
+    /// through [`SamplingOps::logits_to_token_into`], writing the token into
+    /// `scratch.output` instead of allocating.
+    pub(crate) fn logits_to_token_on_device_with_grammar_into(
+        &self,
+        logits: &Tensor<R>,
+        recent_tokens: &[u32],
+        gen_config: &GenerationConfig,
+        gpu_grammar: Option<&DeviceGrammarDfa<R>>,
+        scratch: &SamplingScratch<R>,
+    ) -> Result<Tensor<R>> {
+        let ready = self.prepare_logits_to_token(logits, recent_tokens, gen_config, gpu_grammar)?;
+        let client = R::default_client(self.device());
+        client
+            .logits_to_token_into(
+                &ready.logits,
+                &ready.ids_tensor,
+                &ready.cnts_tensor,
+                ready.num_unique,
+                gen_config.repeat_penalty,
+                gen_config.frequency_penalty,
+                gen_config.presence_penalty,
+                ready.temperature,
+                gen_config.top_k,
+                gen_config.top_p,
+                gen_config.min_p,
+                gen_config.seed,
+                scratch,
+            )
+            .map_err(|e| anyhow!("logits_to_token_into failed: {}", e))?;
+        Ok(scratch.output.clone())
+    }
+
+    /// Everything [`Self::logits_to_token_on_device_with_grammar`] and its
+    /// `_into` sibling need before they call into [`SamplingOps`]: logits
+    /// with the CPU-side penalties, the grammar mask and the logit bias
+    /// already applied, the penalty-window tensors, and the temperature to
+    /// sample at.
+    ///
+    /// Every step in this chain (the DRY/typical rewrite, the grammar mask,
+    /// the logit bias, and the penalty-window tensors) still allocates when
+    /// it runs — this only shares the logic between the allocating and the
+    /// `_into` callers, it does not remove those allocations.
+    fn prepare_logits_to_token(
+        &self,
+        logits: &Tensor<R>,
+        recent_tokens: &[u32],
+        gen_config: &GenerationConfig,
+        gpu_grammar: Option<&DeviceGrammarDfa<R>>,
+    ) -> Result<PreparedLogitsToToken<R>> {
         // Apply CPU-side penalties (DRY, typical) if enabled — these still need CPU
         let needs_cpu = gen_config.dry_multiplier > 0.0 || gen_config.typical_p > 0.0;
         let logits = if needs_cpu {
@@ -430,11 +544,10 @@ where
         };
 
         let (ids, cnts) = Self::penalty_window(recent_tokens, gen_config.repeat_last_n);
-
+        let num_unique = ids.len();
         let ids_tensor = Tensor::from_slice(&ids, &[ids.len()], self.device())?;
         let cnts_tensor = Tensor::from_slice(&cnts, &[cnts.len()], self.device())?;
 
-        let client = R::default_client(self.device());
         let temperature = if gen_config.is_greedy() {
             0.0
         } else if gen_config.dynatemp_range > 0.0 {
@@ -443,22 +556,13 @@ where
             gen_config.temperature
         };
 
-        client
-            .logits_to_token(
-                &logits,
-                &ids_tensor,
-                &cnts_tensor,
-                ids.len(),
-                gen_config.repeat_penalty,
-                gen_config.frequency_penalty,
-                gen_config.presence_penalty,
-                temperature,
-                gen_config.top_k,
-                gen_config.top_p,
-                gen_config.min_p,
-                gen_config.seed,
-            )
-            .map_err(|e| anyhow!("logits_to_token failed: {}", e))
+        Ok(PreparedLogitsToToken {
+            logits,
+            ids_tensor,
+            cnts_tensor,
+            num_unique,
+            temperature,
+        })
     }
 
     /// Apply per-token logit biases by creating a sparse bias tensor and adding to logits.

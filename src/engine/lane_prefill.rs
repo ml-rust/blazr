@@ -221,7 +221,8 @@ impl Qwen35LaneSession {
             sampler: exec.sampler_state(prompt_tokens, gen_config)?,
             generated: 0,
         };
-        let first_token = Self::sample_lane(exec, prefill_logits, &mut request)?;
+        let scratch = self.decode.scratch(lane)?;
+        let first_token = Self::sample_lane(exec, prefill_logits, scratch, &mut request)?;
         let finish_reason = exec.decode_finish_reason(first_token, 0, gen_config.max_tokens);
 
         self.decode.set_next_token(lane, first_token)?;

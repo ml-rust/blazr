@@ -75,6 +75,12 @@ pub struct Executor<R: Runtime<DType = DType>> {
     #[cfg(feature = "cuda")]
     pub(crate) qwen35_graph_session:
         tokio::sync::Mutex<Option<super::graph_session::Qwen35GraphSession>>,
+    /// Multi-lane `qwen35` decode session: batched caches, one lane table and
+    /// the decode driver. The lock is taken for one admit, step or release
+    /// and dropped, never held across a request's token stream.
+    #[cfg(feature = "cuda")]
+    pub(crate) qwen35_lane_session:
+        tokio::sync::Mutex<Option<super::lane_session::Qwen35LaneSession>>,
     /// Graph captures on this executor, across both arms.
     #[cfg(feature = "cuda")]
     pub(crate) graph_captures: std::sync::atomic::AtomicUsize,
@@ -252,6 +258,8 @@ where
             llama_graph_session: tokio::sync::Mutex::new(None),
             #[cfg(feature = "cuda")]
             qwen35_graph_session: tokio::sync::Mutex::new(None),
+            #[cfg(feature = "cuda")]
+            qwen35_lane_session: tokio::sync::Mutex::new(None),
             #[cfg(feature = "cuda")]
             graph_captures: std::sync::atomic::AtomicUsize::new(0),
         })

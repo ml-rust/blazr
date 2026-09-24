@@ -10,21 +10,20 @@
 //! [`Qwen35PromptPlan`] instead of its ids and starts the replay at the rope
 //! position the plan leaves, behind the KV slot. The capture stops at the
 //! logits copy; this arm samples every step greedily on the host and writes
-//! the token back for the next replay. One `qwen35` decode step records
-//! on the order of a thousand intermediate allocations, so capture goes
-//! through the arena variant; the arena is sized generously first and
-//! tightened from the reported footprint when the first guess is more than
-//! twice too large.
+//! the token back for the next replay. The arena it captures into is sized by
+//! boostr's `first_arena_bytes` and tightened by `tight_arena_bytes`.
 
 #![cfg(feature = "cuda")]
 
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 
-use boostr::inference::decode_graph::{copy_into_stable, DeviceScalars, Qwen35DecodeGraph};
+use boostr::inference::decode_graph::{
+    arena_is_loose, copy_into_stable, first_arena_bytes, tight_arena_bytes, DeviceScalars,
+    Qwen35DecodeGraph,
+};
 use boostr::inference::{LaneTable, LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35PromptPlan;
-use boostr::model::LoadedModel;
 use boostr::runtime::cuda::CudaRuntime as CudaRt;
 use boostr::{CudaClient, CudaRuntime, Runtime, Tensor};
 
@@ -32,12 +31,6 @@ use super::executor::Executor;
 use super::graph_session::Qwen35GraphSession;
 use super::types::{FinishReason, GeneratedToken};
 
-/// Upper bound for the first capture arena.
-const ARENA_CAP_BYTES: usize = 1 << 30;
-/// The first arena is at most this fraction of free device memory.
-const ARENA_FREE_DIVISOR: u64 = 4;
-/// Recapture granularity for the tightened arena.
-const ARENA_ROUND_BYTES: usize = 1 << 20;
 /// The one lane a `qwen35` graph session decodes in.
 const GRAPH_LANE: usize = 0;
 /// The sequence id that lane carries; one request at a time per session.
@@ -51,23 +44,6 @@ struct Qwen35GraphInputs {
 }
 
 impl Executor<CudaRuntime> {
-    /// Arena for the first capture: `min(free / 4, 1 GiB)`.
-    fn qwen35_first_arena_bytes(&self) -> Result<usize> {
-        let (free, _total) = self
-            .device()
-            .memory_info()
-            .map_err(|e| anyhow!("Device memory query failed: {}", e))?;
-        let quarter = usize::try_from(free / ARENA_FREE_DIVISOR).unwrap_or(ARENA_CAP_BYTES);
-        Ok(quarter.clamp(ARENA_ROUND_BYTES, ARENA_CAP_BYTES))
-    }
-
-    /// Tightened arena from a measured footprint: `used * 5 / 4`, rounded up
-    /// to 1 MiB.
-    fn qwen35_tight_arena_bytes(used: usize) -> usize {
-        let padded = (used * 5).div_ceil(4);
-        padded.div_ceil(ARENA_ROUND_BYTES).max(1) * ARENA_ROUND_BYTES
-    }
-
     /// Reset both caches in place and eager-prefill at position 0: `plan`
     /// through the embeddings forward, else `input` through the token
     /// forward.
@@ -112,20 +88,8 @@ impl Executor<CudaRuntime> {
 
     /// Rope positions the loaded `qwen35` model's IMROPE table holds, read
     /// through the LLM backbone whether the model is bare or multimodal.
-    fn qwen35_rope_table_len(&self) -> Result<usize> {
-        match self.model() {
-            LoadedModel::Qwen35(m) => Ok(m.rope_table_len()),
-            LoadedModel::Multimodal(m) => match m.llm() {
-                LoadedModel::Qwen35(inner) => Ok(inner.rope_table_len()),
-                other => Err(anyhow!(
-                    "multimodal backbone {other:?} is not qwen35; cannot read its rope table \
-                     length"
-                )),
-            },
-            other => Err(anyhow!(
-                "model {other:?} is not qwen35; cannot read its rope table length"
-            )),
-        }
+    pub(super) fn qwen35_rope_table_len(&self) -> Result<usize> {
+        Ok(self.qwen35_backbone()?.rope_table_len())
     }
 
     /// Capture one decode step over `kv_cache` and `gdn_state` into an arena
@@ -295,7 +259,7 @@ impl Executor<CudaRuntime> {
             self.qwen35_reset_and_prefill(client, input, plan, &mut kv_cache, &mut gdn_state)?;
 
         // First capture with a generous arena.
-        let first_arena = self.qwen35_first_arena_bytes()?;
+        let first_arena = first_arena_bytes(self.device())?;
         let mut graph = self.qwen35_capture(
             client,
             &mut inputs,
@@ -316,8 +280,8 @@ impl Executor<CudaRuntime> {
         // Tighten: recapture when the arena is more than twice the footprint.
         // Capture records without executing, so the caches still hold the
         // prefill state and serve the second capture unchanged.
-        if used < first_arena / 2 {
-            let tight_arena = Self::qwen35_tight_arena_bytes(used);
+        if arena_is_loose(used, first_arena) {
+            let tight_arena = tight_arena_bytes(used);
             drop(graph);
             graph = self.qwen35_capture(
                 client,

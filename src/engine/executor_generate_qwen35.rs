@@ -69,6 +69,17 @@ where
         initial_capacity: usize,
         max_seq_len: usize,
     ) -> Result<(LayeredKvCache<R>, LayeredGdnState<R>)> {
+        self.qwen35_caches_at(1, initial_capacity, max_seq_len)
+    }
+
+    /// The same caches at `batch` lanes: one KV lane and one GDN row per
+    /// sequence a batched decode step serves.
+    pub(super) fn qwen35_caches_at(
+        &self,
+        batch: usize,
+        initial_capacity: usize,
+        max_seq_len: usize,
+    ) -> Result<(LayeredKvCache<R>, LayeredGdnState<R>)> {
         let num_attention = self
             .model
             .num_attention_layers()
@@ -92,7 +103,7 @@ where
         let dtype = parse_dtype(self.config.dtype())?;
 
         let kv_config = LayeredKvCacheConfig {
-            batch_size: 1,
+            batch_size: batch,
             num_kv_heads,
             initial_capacity,
             max_seq_len,
@@ -101,9 +112,32 @@ where
         };
         let kv_cache = LayeredKvCache::new(num_attention, &kv_config, &self.device)
             .map_err(|e| anyhow!("Failed to create KV cache: {}", e))?;
-        let gdn_state = LayeredGdnState::zeros(num_gdn, gdn_config, 1, dtype, &self.device)
+        let gdn_state = LayeredGdnState::zeros(num_gdn, gdn_config, batch, dtype, &self.device)
             .map_err(|e| anyhow!("Failed to create GDN state: {}", e))?;
         Ok((kv_cache, gdn_state))
+    }
+
+    /// The `qwen35` model itself, whether it is loaded bare or as the LLM
+    /// backbone of a multimodal model.
+    ///
+    /// # Errors
+    ///
+    /// An error naming the loaded model when it is not `qwen35`.
+    pub(super) fn qwen35_backbone(&self) -> Result<&boostr::model::qwen35::Qwen35Model<R>> {
+        match self.model() {
+            boostr::model::LoadedModel::Qwen35(m) => Ok(m),
+            boostr::model::LoadedModel::Multimodal(m) => match m.llm() {
+                boostr::model::LoadedModel::Qwen35(inner) => Ok(inner),
+                other => Err(anyhow!(
+                    "multimodal backbone {other:?} is not qwen35; load a qwen35 model to run \
+                     the qwen35 decode path"
+                )),
+            },
+            other => Err(anyhow!(
+                "model {other:?} is not qwen35; load a qwen35 model to run the qwen35 decode \
+                 path"
+            )),
+        }
     }
 
     /// Prefill at rope position 0: `plan` through the embeddings forward,

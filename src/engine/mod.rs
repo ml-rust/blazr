@@ -26,6 +26,8 @@ pub mod grammar;
 pub(crate) mod grammar_json;
 pub(crate) mod grammar_parser;
 mod graph_session;
+mod lane_api;
+mod lane_session;
 pub mod lora;
 pub(crate) mod mirostat;
 pub mod moe_offload;
@@ -41,11 +43,16 @@ mod unsupported;
 pub mod vision_tower;
 mod warmup;
 
+#[cfg(feature = "cuda")]
+pub use boostr::inference::lane_decode::LaneDecodeMode;
+
 pub use batch_engine::BatchEngine;
 pub use data_parallel::DataParallelGroup;
 pub use executor::Executor;
 #[cfg(feature = "cuda")]
 pub use graph_session::{LlamaGraphSession, Qwen35GraphSession};
+#[cfg(feature = "cuda")]
+pub use lane_session::{LaneAdmitted, LaneToken, Qwen35LaneSession};
 pub use lora::{load_lora_adapter, LoraAdapter, LoraAdapterRegistry};
 pub use request_scheduler::RequestScheduler;
 pub use scheduler::{parse_keep_alive, AvailableModelInfo, Scheduler};

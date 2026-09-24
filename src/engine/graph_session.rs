@@ -58,8 +58,13 @@ impl Executor<CudaRuntime> {
 
     /// Record one capture.
     pub(super) fn note_graph_capture(&self) {
+        self.note_graph_captures(1);
+    }
+
+    /// Record `count` captures, as a driver build reports them.
+    pub(super) fn note_graph_captures(&self, count: usize) {
         self.graph_captures
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Greedy first token from prefill logits, read through one event.

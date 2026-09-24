@@ -30,6 +30,10 @@ pub struct BatchEngine<R: Runtime<DType = DType>> {
     scheduler: Arc<RequestScheduler>,
     /// Shared paged KV cache (one large pool for all sequences)
     paged_cache: Option<LayeredPagedKvCache<R>>,
+    /// Prefill chunk size for this engine. `None` until set explicitly by
+    /// `with_prefill_chunk_size`, in which case `process_batch` falls back
+    /// to `inference.prefill_chunk_size` from the executor's config.
+    prefill_chunk_size: Option<usize>,
 }
 
 impl<R: Runtime<DType = DType>> BatchEngine<R>
@@ -94,7 +98,16 @@ where
             executor,
             scheduler,
             paged_cache,
+            prefill_chunk_size: None,
         })
+    }
+
+    /// Override the prefill chunk size for this engine, taking precedence
+    /// over `inference.prefill_chunk_size` from the executor's config. A
+    /// value of `0` disables chunking.
+    pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.prefill_chunk_size = Some(chunk_size);
+        self
     }
 
     /// Run the continuous batching loop. This is the main scheduling loop
@@ -156,7 +169,9 @@ where
     /// When `prefill_chunk_size > 0`, prefill is split into chunks. Between
     /// chunks, pending decode steps run to keep latency low for active sequences.
     async fn process_batch(&mut self, batch: &ScheduledBatch) -> Result<()> {
-        let chunk_size = self.executor.config().inference.prefill_chunk_size;
+        let chunk_size = self
+            .prefill_chunk_size
+            .unwrap_or(self.executor.config().inference.prefill_chunk_size);
 
         // Process prefill sequences
         for &seq_id in &batch.prefill_sequences {

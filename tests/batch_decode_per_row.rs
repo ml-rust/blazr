@@ -83,7 +83,9 @@ fn greedy_config(max_tokens: usize) -> GenerationConfig {
 /// Paged attention and a small block pool are turned on so both the
 /// single-sequence baseline and the batched path below exercise the paged
 /// decode kernel; `max_batch_size` is set to the two sequences this test
-/// admits together.
+/// admits together. Prefill chunking is a per-`BatchEngine` setting
+/// (`BatchEngine::with_prefill_chunk_size`), so each test below selects it
+/// on its own engine rather than on this shared executor's config.
 fn require_executor() -> Option<Arc<Executor<CpuRuntime>>> {
     let dir = require_dir()?;
     static EXECUTOR: OnceLock<Arc<Executor<CpuRuntime>>> = OnceLock::new();
@@ -125,6 +127,10 @@ async fn single_sequence_ids(
     ids
 }
 
+/// Runs its `BatchEngine` with unchunked prefill
+/// (`with_prefill_chunk_size(0)`), the same setting `Executor::generate`
+/// always uses, so this test isolates the batched-decode path from
+/// chunked prefill.
 #[tokio::test]
 async fn batched_decode_matches_single_sequence_at_mixed_lengths() {
     let Some(executor) = require_executor() else {
@@ -184,7 +190,8 @@ async fn batched_decode_matches_single_sequence_at_mixed_lengths() {
     };
     let scheduler = RequestScheduler::new(allocator, sched_config);
     let batch_engine = BatchEngine::new(Arc::clone(&executor), Arc::clone(&scheduler))
-        .unwrap_or_else(|e| panic!("BatchEngine::new: {e}"));
+        .unwrap_or_else(|e| panic!("BatchEngine::new: {e}"))
+        .with_prefill_chunk_size(0);
     tokio::spawn(async move {
         batch_engine.run().await;
     });
@@ -248,5 +255,90 @@ async fn batched_decode_matches_single_sequence_at_mixed_lengths() {
     assert_eq!(
         long_ids, long_alone,
         "the long sequence's batched decode diverged from its single-sequence run"
+    );
+}
+
+/// Drives one prompt through the real chunked-prefill path
+/// (`RequestScheduler` + `BatchEngine`, with
+/// `with_prefill_chunk_size(1)` on this test's own engine) and requires the
+/// generated token ids to equal the same prompt run through the
+/// single-sequence path, which never chunks prefill (`Executor::generate`
+/// always behaves as `prefill_chunk_size == 0`). This pins that prefilling
+/// one token at a time through the scheduler produces the same generation
+/// as an unchunked prefill.
+#[tokio::test]
+async fn chunk_size_one_prefill_matches_unchunked_prefill() {
+    let Some(executor) = require_executor() else {
+        return;
+    };
+
+    let prompt = executor.tokenizer().encode(LONG_PROMPT);
+    assert!(
+        !prompt.is_empty(),
+        "prompt {LONG_PROMPT:?} encoded to no tokens"
+    );
+    assert!(
+        prompt.len() + NUM_TOKENS < NUM_CTX,
+        "prompt of {} tokens plus {NUM_TOKENS} decode steps does not fit {NUM_CTX} of context",
+        prompt.len()
+    );
+
+    let gen_config = greedy_config(NUM_TOKENS);
+
+    // Reference: the unchunked single-sequence path.
+    let unchunked_ids = single_sequence_ids(&executor, &prompt, &gen_config).await;
+    assert_eq!(
+        unchunked_ids.len(),
+        NUM_TOKENS,
+        "single-sequence unchunked run produced {unchunked_ids:?}"
+    );
+
+    // Same prompt, admitted through the scheduler so its prefill runs
+    // through `process_prefill_chunked` with `chunk_size == 1`.
+    let allocator = CpuBlockAllocator::new(TOTAL_BLOCKS, BLOCK_SIZE);
+    let sched_config = SchedulerConfig {
+        max_batch_size: 2,
+        max_batch_tokens: NUM_CTX,
+        max_seq_len: NUM_CTX,
+        block_size: BLOCK_SIZE,
+        ..Default::default()
+    };
+    let scheduler = RequestScheduler::new(allocator, sched_config);
+    let batch_engine = BatchEngine::new(Arc::clone(&executor), Arc::clone(&scheduler))
+        .unwrap_or_else(|e| panic!("BatchEngine::new: {e}"))
+        .with_prefill_chunk_size(1);
+    tokio::spawn(async move {
+        batch_engine.run().await;
+    });
+
+    let mut handle = scheduler
+        .submit(prompt.clone(), gen_config)
+        .unwrap_or_else(|e| panic!("submit: {e}"));
+
+    let mut chunked_ids = Vec::new();
+    let mut steps = 0usize;
+    loop {
+        assert!(
+            steps < STEP_LIMIT,
+            "chunk-of-1 prefill did not finish within {STEP_LIMIT} steps; ids so far \
+             {chunked_ids:?}"
+        );
+        steps += 1;
+        match handle.token_rx.recv().await {
+            Some(Ok(token)) => {
+                chunked_ids.push(token.token_id);
+                if token.finish_reason.is_some() || chunked_ids.len() >= NUM_TOKENS {
+                    break;
+                }
+            }
+            Some(Err(e)) => panic!("chunk-of-1 lane: {e}"),
+            None => break,
+        }
+    }
+
+    println!("chunk-of-1 {chunked_ids:?} unchunked {unchunked_ids:?}");
+    assert_eq!(
+        chunked_ids, unchunked_ids,
+        "prefilling one token at a time diverged from an unchunked prefill of the same prompt"
     );
 }

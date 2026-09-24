@@ -7,12 +7,12 @@ use anyhow::{anyhow, Result};
 
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
+#[cfg(feature = "cuda")]
+use boostr::SamplingScratch;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, DeviceGrammarDfa, GrammarDfaOps, NormalizationOps,
     Runtime, SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
-#[cfg(feature = "cuda")]
-use boostr::SamplingScratch;
 
 use crate::config::GenerationConfig;
 

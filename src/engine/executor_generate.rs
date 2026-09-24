@@ -14,8 +14,8 @@ use boostr::inference::{LayeredKvCache, LayeredSsmState};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
-    Tensor, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use crate::config::{parse_dtype, GenerationConfig};
@@ -58,6 +58,7 @@ where
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>
+        + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
     /// Whether `next_token` ends generation, and why.
@@ -342,7 +343,7 @@ where
                 let t0 = std::time::Instant::now();
                 let mut logits = self.model.forward_with_paged_kv_cache(
                     &prefill_input, &paged_cache, &slot_mapping, &block_table_tensor,
-                    seq_len_k, prefill_start, None,
+                    seq_len_k, prefill_start, None, None,
                 ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
                 tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), prompt_tokens.len(), num_blocks);
                 tracing::info!(phase = "prefill_end", backend = "paged");
@@ -372,7 +373,7 @@ where
                     let next_input = token_gpu.reshape(&[1, 1])?;
                     let next_logits = self.model.forward_with_paged_kv_cache(
                         &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
-                        new_seq_len_k, cur_seq_len, None,
+                        new_seq_len_k, cur_seq_len, None, None,
                     ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
                     Self::moe_offload_step(&self.moe_offload, &self.expert_placements, &self.model, &self.device);
                     let fwd_time = t1.elapsed();

@@ -30,6 +30,7 @@ where
         + boostr::SamplingOps<R>
         + boostr::GrammarDfaOps<R>
         + boostr::model::ModelClient<R>
+        + boostr::RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
     eprintln!("{} - Interactive generation", "blazr run".bold().cyan());

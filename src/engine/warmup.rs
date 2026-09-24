@@ -9,8 +9,8 @@ use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::quant::ScheduleTuning;
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
-    Tensor, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use crate::config::parse_dtype;
@@ -30,6 +30,7 @@ where
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>
+        + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
     /// Warm up the model by running a dummy forward pass
@@ -160,6 +161,7 @@ where
                 1,
                 0,
                 None,
+                None,
             )
             .map_err(|e| anyhow!("Warmup paged prefill failed: {}", e))?;
 
@@ -184,6 +186,7 @@ where
                 &block_table,
                 2,
                 1,
+                None,
                 None,
             )
             .map_err(|e| anyhow!("Warmup paged decode failed: {}", e))?;

@@ -13,8 +13,8 @@ use boostr::inference::scheduler::{ScheduledBatch, SequenceId};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
-    Tensor, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use super::batch_decode::process_decode_batch;
@@ -45,6 +45,7 @@ where
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>
+        + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
     /// Create a new batch engine
@@ -259,6 +260,7 @@ where
                         end,       // seq_len_k = total tokens up to this chunk
                         processed, // start_pos for this chunk
                         None,
+                        None,
                     )
                     .map_err(|e| {
                         anyhow!("chunked prefill failed at offset {}: {}", processed, e)
@@ -402,6 +404,7 @@ where
                 &block_table_tensor,
                 prompt_tokens.len(), // total seq_len (including cached)
                 prefill_start,       // start_pos = skip cached tokens
+                None,
                 None,
             )
             .map_err(|e| anyhow!("prefill forward failed: {}", e))?;

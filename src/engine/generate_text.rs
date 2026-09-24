@@ -7,8 +7,8 @@ use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::quant::{DequantOps, QuantMatmulOps};
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
-    TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, TypeConversionOps, UnaryOps,
 };
 
 use crate::config::GenerationConfig;
@@ -29,6 +29,7 @@ where
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>
+        + RoPEPackedOps<R>
         + DequantOps<R>
         + QuantMatmulOps<R>,
 {

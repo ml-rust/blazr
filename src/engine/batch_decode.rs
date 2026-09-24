@@ -9,8 +9,8 @@ use boostr::inference::scheduler::{ScheduledBatch, SequenceId};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
-    Tensor, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, DType, KvSeqLen, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use super::executor::Executor;
@@ -50,6 +50,7 @@ where
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>
+        + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
     let block_size = paged_cache.block_size();
@@ -130,8 +131,21 @@ where
     }
     let block_table_tensor = Tensor::from_slice(&bt_flat, &[n, max_num_blocks], device)?;
 
-    // Use the maximum seq_len across all sequences for the attention kernel.
+    // max_seq_len only sizes the gathered KV buffer and the KV-write
+    // position; it must not bound any row's own attention range, since a
+    // shorter row's real keys end before it.
     let max_seq_len = seq_data.iter().map(|s| s.seq_len).max().unwrap_or(1);
+
+    // Each row's own key end (its seq_len), so a shorter row does not
+    // attend past its real cached keys into another row's blocks.
+    let ends_flat: Vec<i32> = seq_data.iter().map(|s| s.seq_len as i32).collect();
+    let kv_ends = Tensor::from_slice(&ends_flat, &[n], device)?;
+
+    // Each row's own RoPE position (its last token's index), so a shorter
+    // row's query rotates at its real position instead of the batch max
+    // `max_seq_len - 1`.
+    let positions_flat: Vec<i32> = seq_data.iter().map(|s| (s.seq_len - 1) as i32).collect();
+    let rope_positions = Tensor::from_slice(&positions_flat, &[n], device)?;
 
     // Single batched forward pass — model dispatches paged decode attention per (batch, head).
     let batch_logits = executor
@@ -143,7 +157,8 @@ where
             &block_table_tensor,
             max_seq_len,
             max_seq_len - 1,
-            None,
+            Some(KvSeqLen::PerRow(&kv_ends)),
+            Some(&rope_positions),
         )
         .map_err(|e| anyhow!("batched decode forward failed: {}", e))?;
 

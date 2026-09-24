@@ -240,7 +240,7 @@ impl Executor<CudaRuntime> {
             let t0 = std::time::Instant::now();
             let prefill_logits = self.model().forward_with_paged_kv_cache(
                 &input, &paged_cache, &prefill_slot_mapping, &block_table,
-                seq_len_k, 0, None,
+                seq_len_k, 0, None, None,
             ).map_err(|e| anyhow!("Paged graph prefill failed: {}", e))?;
             tracing::info!("Paged graph prefill: {:?} (seq_len={})", t0.elapsed(), prompt_tokens.len());
 
@@ -294,7 +294,7 @@ impl Executor<CudaRuntime> {
 
             let _ = self.model().forward_with_paged_kv_cache(
                 &input, &paged_cache, &prefill_slot_mapping, &block_table,
-                seq_len_k, 0, None,
+                seq_len_k, 0, None, None,
             ).map_err(|e| anyhow!("Re-prefill for capture failed: {}", e))?;
 
             let capture_seq_len = paged_cache.seq_len();

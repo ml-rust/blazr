@@ -15,8 +15,8 @@ use boostr::model::qwen35::Qwen35PromptPlan;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
-    Tensor, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use crate::config::{parse_dtype, GenerationConfig};
@@ -59,6 +59,7 @@ where
         + SamplingOps<R>
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>
+        + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
     /// KV cache sized for the attention layers only, and zeroed GDN state

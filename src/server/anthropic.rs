@@ -179,7 +179,7 @@ pub async fn messages(
                 .generate_multimodal_text(&prompt_tokens, &media.images, &media.audio, &gen_config)
                 .await
         } else if let Some(ref rs) = state.request_scheduler {
-            match generate_via_scheduler(rs, prompt_tokens.clone(), &gen_config).await {
+            match generate_via_scheduler(rs.as_ref(), prompt_tokens.clone(), &gen_config).await {
                 Ok(r) => Ok(crate::engine::GenerationResult {
                     text: r.text,
                     prompt_tokens: r.prompt_tokens,

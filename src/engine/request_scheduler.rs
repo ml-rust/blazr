@@ -4,11 +4,11 @@
 //! - Async request submission from HTTP handlers
 //! - Token streaming back to callers via channels
 //! - A scheduling loop that produces batches for the executor
+//!
+//! The per-request metadata and channels live in [`RequestRegistry`], shared
+//! with the other schedulers.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
@@ -18,8 +18,12 @@ use boostr::inference::scheduler::{
     ScheduledBatch, SchedulerConfig, SequenceId, SequenceRequest, SequenceScheduler, SequenceState,
 };
 
+use super::request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
 use super::types::GeneratedToken;
 use crate::config::GenerationConfig;
+
+/// Wakeups the scheduling loop can miss without blocking a submitting handler.
+const NOTIFY_CHANNEL_CAPACITY: usize = 64;
 
 /// A pending generation request submitted via the HTTP API
 pub struct InferenceRequest {
@@ -35,50 +39,26 @@ pub struct InferenceRequest {
     pub _done_tx: Option<oneshot::Sender<()>>,
 }
 
-/// Handle returned to callers when submitting a request
-pub struct RequestHandle {
-    /// Sequence ID for tracking
-    pub seq_id: SequenceId,
-    /// Receive generated tokens
-    pub token_rx: mpsc::Receiver<Result<GeneratedToken>>,
-    /// Notified when generation is complete
-    pub done_rx: oneshot::Receiver<()>,
-}
-
 /// The request scheduler wraps boostr's SequenceScheduler and manages
 /// the lifecycle of inference requests in a continuous batching loop.
 pub struct RequestScheduler {
     /// Inner boostr scheduler (protected by mutex for multi-threaded access)
     inner: Mutex<SequenceScheduler<CpuBlockAllocator>>,
     /// Per-sequence metadata (gen config, token channels)
-    request_meta: Mutex<HashMap<SequenceId, RequestMeta>>,
-    /// Monotonically increasing sequence ID generator
-    next_seq_id: AtomicU64,
+    registry: RequestRegistry,
     /// Channel to notify the scheduling loop of new work
     notify_tx: mpsc::Sender<()>,
     /// Receiver end (held by the scheduling loop)
     notify_rx: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
-/// Per-sequence metadata stored alongside the scheduler
-#[allow(dead_code)]
-struct RequestMeta {
-    gen_config: GenerationConfig,
-    token_tx: mpsc::Sender<Result<GeneratedToken>>,
-    done_tx: Option<oneshot::Sender<()>>,
-    prompt_tokens: Vec<u32>,
-    token_history: Vec<u32>,
-    submitted_at: Instant,
-}
-
 impl RequestScheduler {
     /// Create a new request scheduler with the given allocator and config
     pub fn new(allocator: CpuBlockAllocator, config: SchedulerConfig) -> Arc<Self> {
-        let (notify_tx, notify_rx) = mpsc::channel(64);
+        let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
         Arc::new(Self {
             inner: Mutex::new(SequenceScheduler::new(allocator, config)),
-            request_meta: Mutex::new(HashMap::new()),
-            next_seq_id: AtomicU64::new(1),
+            registry: RequestRegistry::new(),
             notify_tx,
             notify_rx: Mutex::new(Some(notify_rx)),
         })
@@ -90,12 +70,11 @@ impl RequestScheduler {
         config: SchedulerConfig,
         prefix_cache: boostr::inference::prefix_cache::PrefixCache<CpuBlockAllocator>,
     ) -> Arc<Self> {
-        let (notify_tx, notify_rx) = mpsc::channel(64);
+        let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
         let scheduler = SequenceScheduler::new(allocator, config).with_prefix_cache(prefix_cache);
         Arc::new(Self {
             inner: Mutex::new(scheduler),
-            request_meta: Mutex::new(HashMap::new()),
-            next_seq_id: AtomicU64::new(1),
+            registry: RequestRegistry::new(),
             notify_tx,
             notify_rx: Mutex::new(Some(notify_rx)),
         })
@@ -107,14 +86,10 @@ impl RequestScheduler {
         prompt_tokens: Vec<u32>,
         gen_config: GenerationConfig,
     ) -> Result<RequestHandle> {
-        let seq_id = self.next_seq_id.fetch_add(1, Ordering::Relaxed);
-        let (token_tx, token_rx) = mpsc::channel(32);
-        let (done_tx, done_rx) = oneshot::channel();
-
+        let seq_id = self.registry.next_id();
         let request = SequenceRequest::new(seq_id, prompt_tokens.clone())
             .with_max_tokens(gen_config.max_tokens);
 
-        // Add to boostr scheduler
         {
             let mut sched = self
                 .inner
@@ -123,33 +98,12 @@ impl RequestScheduler {
             sched.add_request(request).map_err(|e| anyhow!("{e}"))?;
         }
 
-        // Store metadata
-        {
-            let mut meta = self
-                .request_meta
-                .lock()
-                .map_err(|e| anyhow!("meta lock: {e}"))?;
-            meta.insert(
-                seq_id,
-                RequestMeta {
-                    gen_config,
-                    token_tx,
-                    done_tx: Some(done_tx),
-                    prompt_tokens: prompt_tokens.clone(),
-                    token_history: prompt_tokens,
-                    submitted_at: Instant::now(),
-                },
-            );
-        }
+        let handle = self.registry.insert(seq_id, prompt_tokens, gen_config)?;
 
         // Wake the scheduling loop
         let _ = self.notify_tx.try_send(());
 
-        Ok(RequestHandle {
-            seq_id,
-            token_rx,
-            done_rx,
-        })
+        Ok(handle)
     }
 
     /// Cancel a pending or running request
@@ -161,14 +115,7 @@ impl RequestScheduler {
                 .map_err(|e| anyhow!("scheduler lock: {e}"))?;
             sched.abort_sequence(seq_id).map_err(|e| anyhow!("{e}"))?;
         }
-        {
-            let mut meta = self
-                .request_meta
-                .lock()
-                .map_err(|e| anyhow!("meta lock: {e}"))?;
-            meta.remove(&seq_id);
-        }
-        Ok(())
+        self.registry.remove(seq_id)
     }
 
     /// Schedule the next batch of work. Called by the scheduling loop.
@@ -218,24 +165,12 @@ impl RequestScheduler {
             }
         }
         // Signal completion and clean up metadata
-        {
-            let mut meta = self
-                .request_meta
-                .lock()
-                .map_err(|e| anyhow!("meta lock: {e}"))?;
-            if let Some(mut m) = meta.remove(&seq_id) {
-                if let Some(done_tx) = m.done_tx.take() {
-                    let _ = done_tx.send(());
-                }
-            }
-        }
-        Ok(())
+        self.registry.finish(seq_id)
     }
 
     /// Get the generation config for a sequence
     pub fn get_gen_config(&self, seq_id: SequenceId) -> Option<GenerationConfig> {
-        let meta = self.request_meta.lock().ok()?;
-        meta.get(&seq_id).map(|m| m.gen_config.clone())
+        self.registry.gen_config(seq_id)
     }
 
     /// Get the token sender for a sequence (to stream tokens back to caller)
@@ -243,29 +178,22 @@ impl RequestScheduler {
         &self,
         seq_id: SequenceId,
     ) -> Option<mpsc::Sender<Result<GeneratedToken>>> {
-        let meta = self.request_meta.lock().ok()?;
-        meta.get(&seq_id).map(|m| m.token_tx.clone())
+        self.registry.token_sender(seq_id)
     }
 
     /// Get token history for a sequence (prompt + generated so far)
     pub fn get_token_history(&self, seq_id: SequenceId) -> Option<Vec<u32>> {
-        let meta = self.request_meta.lock().ok()?;
-        meta.get(&seq_id).map(|m| m.token_history.clone())
+        self.registry.token_history(seq_id)
     }
 
     /// Append to token history for a sequence
     pub fn append_to_history(&self, seq_id: SequenceId, token: u32) {
-        if let Ok(mut meta) = self.request_meta.lock() {
-            if let Some(m) = meta.get_mut(&seq_id) {
-                m.token_history.push(token);
-            }
-        }
+        self.registry.push_history(seq_id, token);
     }
 
     /// Get the prompt tokens for a sequence
     pub fn get_prompt_tokens(&self, seq_id: SequenceId) -> Option<Vec<u32>> {
-        let meta = self.request_meta.lock().ok()?;
-        meta.get(&seq_id).map(|m| m.prompt_tokens.clone())
+        self.registry.prompt_tokens(seq_id)
     }
 
     /// Get block table for a sequence from the inner scheduler
@@ -304,5 +232,19 @@ impl RequestScheduler {
     /// Get notify sender (for waking the loop from outside)
     pub fn notify_sender(&self) -> mpsc::Sender<()> {
         self.notify_tx.clone()
+    }
+}
+
+impl GenerationScheduler for RequestScheduler {
+    fn submit(
+        &self,
+        prompt_tokens: Vec<u32>,
+        gen_config: GenerationConfig,
+    ) -> Result<RequestHandle> {
+        RequestScheduler::submit(self, prompt_tokens, gen_config)
+    }
+
+    fn block_stats(&self) -> Option<boostr::inference::memory::BlockAllocatorStats> {
+        RequestScheduler::block_stats(self)
     }
 }

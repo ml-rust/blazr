@@ -18,6 +18,7 @@ mod pull;
 mod run;
 mod run_repl;
 mod serve;
+mod serve_batching;
 #[cfg(feature = "distributed")]
 mod swarm;
 #[cfg(feature = "distributed")]

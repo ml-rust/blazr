@@ -62,8 +62,9 @@ where
         + boostr::quant::traits::DequantOps<R>,
 {
     /// KV cache sized for the attention layers only, and zeroed GDN state
-    /// for the GDN layers. `num_layers()` counts both, so sizing the KV cache
-    /// by it allocates 4x too much on Bonsai 2.
+    /// for the GDN layers. `num_layers()` counts both, so sizing the KV
+    /// cache by it over-allocates on any model where GDN layers outnumber
+    /// attention layers.
     pub(super) fn qwen35_caches(
         &self,
         initial_capacity: usize,
@@ -123,6 +124,7 @@ where
     /// # Errors
     ///
     /// An error naming the loaded model when it is not `qwen35`.
+    #[cfg(feature = "cuda")]
     pub(super) fn qwen35_backbone(&self) -> Result<&boostr::model::qwen35::Qwen35Model<R>> {
         match self.model() {
             boostr::model::LoadedModel::Qwen35(m) => Ok(m),

@@ -27,11 +27,14 @@ pub(crate) mod grammar_json;
 pub(crate) mod grammar_parser;
 mod graph_session;
 mod lane_api;
+mod lane_engine;
+mod lane_scheduler;
 mod lane_session;
 pub mod lora;
 pub(crate) mod mirostat;
 pub mod moe_offload;
 pub mod moe_offload_types;
+pub mod request_registry;
 pub mod request_scheduler;
 pub(crate) mod sampling;
 mod scheduler;
@@ -52,8 +55,13 @@ pub use executor::Executor;
 #[cfg(feature = "cuda")]
 pub use graph_session::{LlamaGraphSession, Qwen35GraphSession};
 #[cfg(feature = "cuda")]
+pub use lane_engine::LaneEngine;
+#[cfg(feature = "cuda")]
+pub use lane_scheduler::LaneScheduler;
+#[cfg(feature = "cuda")]
 pub use lane_session::{LaneAdmitted, LaneToken, Qwen35LaneSession};
 pub use lora::{load_lora_adapter, LoraAdapter, LoraAdapterRegistry};
+pub use request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
 pub use request_scheduler::RequestScheduler;
 pub use scheduler::{parse_keep_alive, AvailableModelInfo, Scheduler};
 pub use slots::SlotManager;

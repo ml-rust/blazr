@@ -113,9 +113,11 @@ pub async fn completions(
                 iter_config.seed = Some(s.wrapping_add(i as u64));
             }
 
-            // Use RequestScheduler if available (continuous batching), else direct generation
+            // Use the configured scheduler when the server has one, else
+            // generate this request on its own.
             let gen_result = if let Some(ref rs) = state.request_scheduler {
-                match generate_via_scheduler(rs, prompt_tokens.clone(), &iter_config).await {
+                match generate_via_scheduler(rs.as_ref(), prompt_tokens.clone(), &iter_config).await
+                {
                     Ok(r) => Ok(crate::engine::GenerationResult {
                         text: r.text,
                         prompt_tokens: r.prompt_tokens,

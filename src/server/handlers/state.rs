@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::{ReasoningFormat, UserConfig};
-use crate::engine::{RequestScheduler, Scheduler, SlotManager};
+use crate::engine::{GenerationScheduler, Scheduler, SlotManager};
 use crate::server::metrics;
 
 #[cfg(feature = "cuda")]
@@ -39,8 +39,9 @@ pub struct AppState {
     pub max_inflight_tokens: usize,
     /// Inference slot manager
     pub slot_manager: SlotManager,
-    /// Request scheduler for continuous batching (None = legacy single-request mode)
-    pub request_scheduler: Option<Arc<RequestScheduler>>,
+    /// Scheduler the handlers submit through, whichever kind the server was
+    /// started with (None = single-request mode).
+    pub request_scheduler: Option<Arc<dyn GenerationScheduler>>,
     /// Standalone vision embedders (SigLIP/CLIP) keyed by model name, used by
     /// `/v1/embeddings` for image inputs. Populated at server startup from CLI
     /// or config.
@@ -182,8 +183,10 @@ impl AppState {
         self
     }
 
-    pub fn with_request_scheduler(mut self, rs: Arc<RequestScheduler>) -> Self {
-        self.request_scheduler = Some(rs);
+    /// Route generation through `scheduler` instead of the single-sequence
+    /// path.
+    pub fn with_scheduler(mut self, scheduler: Arc<dyn GenerationScheduler>) -> Self {
+        self.request_scheduler = Some(scheduler);
         self
     }
 

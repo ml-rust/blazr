@@ -240,7 +240,7 @@ async fn forward_with_stop_sequences<S>(
     }
 }
 
-/// Result of a batched generation via RequestScheduler
+/// Result of a batched generation via the configured scheduler
 pub struct BatchedGenerationResult {
     pub text: String,
     pub prompt_tokens: usize,
@@ -249,10 +249,10 @@ pub struct BatchedGenerationResult {
     pub prompt_eval_duration_ms: u64,
 }
 
-/// Submit a request to the RequestScheduler and collect all generated tokens.
-/// Used by chat/completion handlers when continuous batching is enabled.
+/// Submit a request to the configured scheduler and collect all generated
+/// tokens. Used by chat/completion handlers when batched generation is on.
 pub async fn generate_via_scheduler(
-    request_scheduler: &crate::engine::RequestScheduler,
+    request_scheduler: &dyn crate::engine::GenerationScheduler,
     prompt_tokens: Vec<u32>,
     gen_config: &GenerationConfig,
 ) -> Result<BatchedGenerationResult, String> {

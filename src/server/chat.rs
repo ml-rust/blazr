@@ -273,7 +273,8 @@ pub async fn chat_completions(
                     )
                     .await
             } else if let Some(ref rs) = state.request_scheduler {
-                match generate_via_scheduler(rs, prompt_tokens.clone(), &iter_config).await {
+                match generate_via_scheduler(rs.as_ref(), prompt_tokens.clone(), &iter_config).await
+                {
                     Ok(r) => Ok(crate::engine::GenerationResult {
                         text: r.text,
                         prompt_tokens: r.prompt_tokens,

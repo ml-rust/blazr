@@ -15,7 +15,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::ServerConfig;
-use crate::engine::{RequestScheduler, Scheduler};
+use crate::engine::{GenerationScheduler, Scheduler};
 
 use super::config_watch;
 use super::handlers::{self, AppState};
@@ -166,17 +166,17 @@ pub async fn start(
     .await
 }
 
-/// Start the HTTP server with optional continuous batching via RequestScheduler.
+/// Start the HTTP server with optional batched generation.
 ///
 /// When `request_scheduler` is Some, HTTP handlers submit requests through it
-/// instead of calling executor.generate() directly. A BatchEngine task must be
-/// spawned separately by the caller (see cli/serve.rs).
+/// instead of calling executor.generate() directly. The task that drives that
+/// scheduler is spawned separately by the caller (see cli/serve.rs).
 #[allow(clippy::too_many_arguments)]
 pub async fn start_with_batch(
     scheduler: Arc<Scheduler<ServerRuntime>>,
     config: ServerConfig,
     api_keys: Vec<String>,
-    request_scheduler: Option<Arc<RequestScheduler>>,
+    request_scheduler: Option<Arc<dyn GenerationScheduler>>,
     vision_embedders: Vec<(
         String,
         Arc<crate::server::handlers::VisionEmbedder>,
@@ -202,7 +202,7 @@ pub async fn start_with_batch(
         .with_reasoning_format(config.reasoning_format)
         .with_voice_dir(voice_dir);
     if let Some(rs) = request_scheduler {
-        app_state = app_state.with_request_scheduler(rs);
+        app_state = app_state.with_scheduler(rs);
     }
     let state = Arc::new(app_state);
 

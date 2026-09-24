@@ -9,8 +9,10 @@ use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, DeviceGrammarDfa, GrammarDfaOps, NormalizationOps,
-    Runtime, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
+    Runtime, SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
+#[cfg(feature = "cuda")]
+use boostr::SamplingScratch;
 
 use crate::config::GenerationConfig;
 
@@ -133,6 +135,7 @@ where
     /// Mirostat still pulls logits to the host and returns a freshly
     /// allocated `[1]` I64 tensor: mirostat's state update needs the full
     /// distribution on the host, so there is no per-step buffer to reuse.
+    #[cfg(feature = "cuda")]
     pub(crate) fn sample_token_dispatch_with_grammar_into(
         &self,
         logits: &Tensor<R>,
@@ -457,6 +460,7 @@ where
     /// Like [`Self::logits_to_token_on_device_with_grammar`], but samples
     /// through [`SamplingOps::logits_to_token_into`], writing the token into
     /// `scratch.output` instead of allocating.
+    #[cfg(feature = "cuda")]
     pub(crate) fn logits_to_token_on_device_with_grammar_into(
         &self,
         logits: &Tensor<R>,

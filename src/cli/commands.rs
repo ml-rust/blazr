@@ -122,12 +122,15 @@ pub enum Commands {
         tts_batch_window_ms: u64,
 
         /// Keep a VoxCPM2 engine's batch open across steps and admit a
-        /// request that arrives mid-generation into a free slot on the
-        /// next step, instead of making it wait for the batch to drain.
-        /// Lowers latency for overlapping requests at a standing cost:
-        /// every reserved slot steps every iteration, occupied or not,
-        /// for the engine's whole life. Off by default. Kokoro is
-        /// unaffected.
+        /// request that arrives mid-generation into a free slot on the next
+        /// step, instead of making it wait for the batch to drain.
+        ///
+        /// The batch steps only the slots actually seated, so an idle slot
+        /// costs no compute and a lone request runs as it would without
+        /// this. The cost is a standing memory reservation: --tts-max-batch
+        /// slots of --tts-continuous-capacity positions, held for the
+        /// engine's whole life and paid once per TTS bundle. Off by default
+        /// for that reason. Kokoro is unaffected.
         #[cfg(feature = "audio")]
         #[arg(long = "tts-continuous-batching")]
         tts_continuous_batching: bool,
@@ -138,7 +141,11 @@ pub enum Commands {
         /// and V) per layer, sized at this value times --tts-max-batch,
         /// for the engine's whole life. Kokoro is unaffected.
         #[cfg(feature = "audio")]
-        #[arg(long = "tts-continuous-capacity", value_name = "N", default_value_t = 1024)]
+        #[arg(
+            long = "tts-continuous-capacity",
+            value_name = "N",
+            default_value_t = 1024
+        )]
         tts_continuous_capacity: usize,
 
         /// Directory containing TTS voice files (`.safetensors`, `.pt`, or

@@ -394,7 +394,11 @@ mod tests {
 
     #[test]
     fn load_errors_on_missing_dir() {
-        assert!(load_tts_from_dir("/nonexistent-kokoro-path-xyz", VoxCpm2SynthOptions::default()).is_err());
+        assert!(load_tts_from_dir(
+            "/nonexistent-kokoro-path-xyz",
+            VoxCpm2SynthOptions::default()
+        )
+        .is_err());
     }
 
     #[test]

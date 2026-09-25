@@ -29,6 +29,10 @@ pub async fn serve(
     vision_models: Vec<String>,
     #[cfg(feature = "audio")] asr_models: Vec<String>,
     #[cfg(feature = "audio")] tts_models: Vec<String>,
+    #[cfg(feature = "audio")] tts_max_batch: usize,
+    #[cfg(feature = "audio")] tts_batch_window_ms: u64,
+    #[cfg(feature = "audio")] tts_continuous_batching: bool,
+    #[cfg(feature = "audio")] tts_continuous_capacity: usize,
     voice_dir: Option<PathBuf>,
     reasoning_format: ReasoningFormat,
     vision: VisionOverrides,
@@ -239,7 +243,16 @@ pub async fn serve(
             loaded_asr.push((name, Arc::new(bundle), path));
         }
 
-        // Load any TTS bundles: Kokoro or VoxCPM2 by directory layout.
+        // Load any TTS bundles: Kokoro or VoxCPM2 by directory layout. The
+        // batching options apply to VoxCPM2 only — a Kokoro bundle ignores
+        // them, since Kokoro has no batching of its own.
+        let tts_synth_options = boostr_audio::voxcpm::VoxCpm2SynthOptions {
+            max_batch: tts_max_batch,
+            batch_window: std::time::Duration::from_millis(tts_batch_window_ms),
+            continuous_batching: tts_continuous_batching,
+            continuous_capacity: tts_continuous_capacity,
+            ..Default::default()
+        };
         let mut loaded_tts: Vec<(String, Arc<crate::server::handlers::TtsBundle>, PathBuf)> =
             Vec::with_capacity(tts_models.len());
         for arg in &tts_models {
@@ -249,7 +262,7 @@ pub async fn serve(
                 name,
                 path.display()
             ));
-            let bundle = crate::loader::load_tts_from_dir(&path)?;
+            let bundle = crate::loader::load_tts_from_dir(&path, tts_synth_options.clone())?;
             spinner.finish_and_clear();
             let status = if bundle.has_engine() {
                 "".normal()

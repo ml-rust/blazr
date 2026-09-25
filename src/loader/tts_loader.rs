@@ -51,7 +51,11 @@ const KOKORO_SAMPLE_RATE: u32 = 24_000;
 /// If `config.json` + weights are present, a real engine is built and
 /// attached. Missing pieces downgrade gracefully: no config → scaffolding
 /// only; config present but safetensors fails → returns the load error.
-pub fn load_tts_from_dir<P: AsRef<Path>>(path: P) -> Result<TtsBundle> {
+///
+/// `synth` carries the per-request generation defaults (batching included)
+/// for a VoxCPM2 engine. A Kokoro bundle ignores it — Kokoro has no batching
+/// knobs of its own.
+pub fn load_tts_from_dir<P: AsRef<Path>>(path: P, synth: VoxCpm2SynthOptions) -> Result<TtsBundle> {
     let path = path.as_ref();
     if !path.exists() {
         return Err(anyhow!("tts model directory not found: {}", path.display()));
@@ -67,7 +71,7 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P) -> Result<TtsBundle> {
     if !config_path.exists() {
         if let Some(gguf) = single_file_with_ext(path, "gguf")? {
             if is_voxcpm2_gguf(&gguf)? {
-                return load_voxcpm2(path, None);
+                return load_voxcpm2(path, None, synth);
             }
         }
         eprintln!(
@@ -81,7 +85,7 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P) -> Result<TtsBundle> {
         ));
     }
     if is_voxcpm2_config(&config_path)? {
-        return load_voxcpm2(path, Some(&config_path));
+        return load_voxcpm2(path, Some(&config_path), synth);
     }
     let device = Arc::new(CpuDevice::new());
     let client = Arc::new(CpuRuntime::default_client(&device));
@@ -238,7 +242,11 @@ fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
 /// model for its lifetime, chosen at load time, not per request. Serving
 /// several adapters means several `--tts-model NAME=DIR` bundles, each with
 /// its own `adapters/` directory.
-fn load_voxcpm2(dir: &Path, config_path: Option<&Path>) -> Result<TtsBundle> {
+fn load_voxcpm2(
+    dir: &Path,
+    config_path: Option<&Path>,
+    synth: VoxCpm2SynthOptions,
+) -> Result<TtsBundle> {
     let weights = if let Some(tcf) = single_file_with_ext(dir, "tcf")? {
         let config = config_path.ok_or_else(|| {
             anyhow!(
@@ -284,7 +292,7 @@ fn load_voxcpm2(dir: &Path, config_path: Option<&Path>) -> Result<TtsBundle> {
     let load_options = VoxCpm2LoadOptions {
         dtype: None,
         vae_decoder_dtype,
-        synth: VoxCpm2SynthOptions::default(),
+        synth,
         adapter,
     };
 
@@ -386,7 +394,7 @@ mod tests {
 
     #[test]
     fn load_errors_on_missing_dir() {
-        assert!(load_tts_from_dir("/nonexistent-kokoro-path-xyz").is_err());
+        assert!(load_tts_from_dir("/nonexistent-kokoro-path-xyz", VoxCpm2SynthOptions::default()).is_err());
     }
 
     #[test]
@@ -394,7 +402,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("blazr_tts_loader_no_config");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let bundle = load_tts_from_dir(&tmp).unwrap();
+        let bundle = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).unwrap();
         assert!(!bundle.has_engine());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -430,7 +438,7 @@ mod tests {
         let gguf = tmp.join("model.gguf");
         std::fs::write(&gguf, gguf_with_architecture("voxcpm2")).unwrap();
         assert!(is_voxcpm2_gguf(&gguf).unwrap());
-        assert!(load_tts_from_dir(&tmp).is_err());
+        assert!(load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -444,7 +452,7 @@ mod tests {
         let gguf = tmp.join("model.gguf");
         std::fs::write(&gguf, gguf_with_architecture("llama")).unwrap();
         assert!(!is_voxcpm2_gguf(&gguf).unwrap());
-        let bundle = load_tts_from_dir(&tmp).unwrap();
+        let bundle = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).unwrap();
         assert!(!bundle.has_engine());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -457,7 +465,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("config.json"), br#"{"vocab": {"a": 1}}"#).unwrap();
-        assert!(load_tts_from_dir(&tmp).is_err());
+        assert!(load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

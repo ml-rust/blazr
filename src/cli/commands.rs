@@ -106,6 +106,41 @@ pub enum Commands {
         #[arg(long = "tts-model", value_name = "NAME=PATH")]
         tts_models: Vec<String>,
 
+        /// Requests one VoxCPM2 batch renders together (rounded down to 1,
+        /// 2, 4, or 8). Kokoro is unaffected. Every slot steps on every
+        /// iteration, a finished one included, so a wider batch raises
+        /// throughput and raises each request's own latency.
+        #[cfg(feature = "audio")]
+        #[arg(long = "tts-max-batch", value_name = "N", default_value_t = 8)]
+        tts_max_batch: usize,
+
+        /// Milliseconds a VoxCPM2 batch waits after its first request
+        /// before starting, so late arrivals still join it instead of
+        /// opening the next batch. Kokoro is unaffected.
+        #[cfg(feature = "audio")]
+        #[arg(long = "tts-batch-window-ms", value_name = "MS", default_value_t = 20)]
+        tts_batch_window_ms: u64,
+
+        /// Keep a VoxCPM2 engine's batch open across steps and admit a
+        /// request that arrives mid-generation into a free slot on the
+        /// next step, instead of making it wait for the batch to drain.
+        /// Lowers latency for overlapping requests at a standing cost:
+        /// every reserved slot steps every iteration, occupied or not,
+        /// for the engine's whole life. Off by default. Kokoro is
+        /// unaffected.
+        #[cfg(feature = "audio")]
+        #[arg(long = "tts-continuous-batching")]
+        tts_continuous_batching: bool,
+
+        /// Cache positions reserved per batch slot when
+        /// --tts-continuous-batching is on; ignored otherwise. A memory
+        /// reservation, not a per-request limit: held for two caches (K
+        /// and V) per layer, sized at this value times --tts-max-batch,
+        /// for the engine's whole life. Kokoro is unaffected.
+        #[cfg(feature = "audio")]
+        #[arg(long = "tts-continuous-capacity", value_name = "N", default_value_t = 1024)]
+        tts_continuous_capacity: usize,
+
         /// Directory containing TTS voice files (`.safetensors`, `.pt`, or
         /// `.pth`). Overrides the bundled `assets/kokoro_voices/` that ships
         /// with blazr. Also overridable via `$BLAZR_VOICE_DIR`. The `--voice`

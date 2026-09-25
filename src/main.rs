@@ -52,6 +52,14 @@ async fn main() -> Result<()> {
             asr_models,
             #[cfg(feature = "audio")]
             tts_models,
+            #[cfg(feature = "audio")]
+            tts_max_batch,
+            #[cfg(feature = "audio")]
+            tts_batch_window_ms,
+            #[cfg(feature = "audio")]
+            tts_continuous_batching,
+            #[cfg(feature = "audio")]
+            tts_continuous_capacity,
             voice_dir,
             reasoning_format,
             vision,
@@ -70,6 +78,14 @@ async fn main() -> Result<()> {
                 asr_models,
                 #[cfg(feature = "audio")]
                 tts_models,
+                #[cfg(feature = "audio")]
+                tts_max_batch,
+                #[cfg(feature = "audio")]
+                tts_batch_window_ms,
+                #[cfg(feature = "audio")]
+                tts_continuous_batching,
+                #[cfg(feature = "audio")]
+                tts_continuous_capacity,
                 voice_dir,
                 reasoning_format,
                 vision.into_overrides(),

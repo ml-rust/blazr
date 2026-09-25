@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
             #[cfg(feature = "audio")]
             tts_batch_window_ms,
             #[cfg(feature = "audio")]
-            tts_continuous_batching,
+            tts_no_continuous_batching,
             #[cfg(feature = "audio")]
             tts_continuous_capacity,
             voice_dir,
@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
                 #[cfg(feature = "audio")]
                 tts_batch_window_ms,
                 #[cfg(feature = "audio")]
-                tts_continuous_batching,
+                !tts_no_continuous_batching,
                 #[cfg(feature = "audio")]
                 tts_continuous_capacity,
                 voice_dir,

@@ -121,25 +121,25 @@ pub enum Commands {
         #[arg(long = "tts-batch-window-ms", value_name = "MS", default_value_t = 20)]
         tts_batch_window_ms: u64,
 
-        /// Keep a VoxCPM2 engine's batch open across steps and admit a
-        /// request that arrives mid-generation into a free slot on the next
-        /// step, instead of making it wait for the batch to drain.
+        /// Stop keeping a VoxCPM2 engine's batch open across steps.
         ///
-        /// The batch steps only the slots actually seated, so an idle slot
-        /// costs no compute and a lone request runs as it would without
-        /// this. The cost is a standing memory reservation: --tts-max-batch
-        /// slots of --tts-continuous-capacity positions, held for the
-        /// engine's whole life and paid once per TTS bundle. Off by default
-        /// for that reason. Kokoro is unaffected.
+        /// By default the batch is persistent, so a request that arrives
+        /// mid-generation joins a free slot on the next step instead of
+        /// waiting for the running batch to drain. It costs an idle
+        /// deployment nothing: the batch steps only the slots actually
+        /// seated, and its row allocation opens at one and grows only as far
+        /// as concurrency reaches. What a seated row does hold is
+        /// --tts-continuous-capacity cache positions for the engine's life.
+        /// Pass this where that is worth more than mid-flight admission.
+        /// Kokoro is unaffected.
         #[cfg(feature = "audio")]
-        #[arg(long = "tts-continuous-batching")]
-        tts_continuous_batching: bool,
+        #[arg(long = "tts-no-continuous-batching")]
+        tts_no_continuous_batching: bool,
 
-        /// Cache positions reserved per batch slot when
-        /// --tts-continuous-batching is on; ignored otherwise. A memory
-        /// reservation, not a per-request limit: held for two caches (K
-        /// and V) per layer, sized at this value times --tts-max-batch,
-        /// for the engine's whole life. Kokoro is unaffected.
+        /// Cache positions held per seated batch slot, unless
+        /// --tts-no-continuous-batching is passed. Not a per-request limit:
+        /// held for two caches (K and V) per layer, for the engine's whole
+        /// life, once per row the batch has grown to. Kokoro is unaffected.
         #[cfg(feature = "audio")]
         #[arg(
             long = "tts-continuous-capacity",

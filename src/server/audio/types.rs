@@ -15,7 +15,14 @@ pub struct VerboseTranscriptionResponse {
     pub text: String,
     pub language: String,
     pub duration: f64,
-    pub segments: Vec<TranscriptionSegment>,
+    /// Present when `segment` is in the requested granularities, which is
+    /// every request except one that names `word` only — matching OpenAI's
+    /// default granularity of `["segment"]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<TranscriptionSegment>>,
+    /// Present only when `word` is in the requested `timestamp_granularities[]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<TranscriptionWord>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,9 +34,72 @@ pub struct TranscriptionSegment {
     pub text: String,
 }
 
+/// One OpenAI-shaped word timestamp: `{word, start, end}`, seconds on the
+/// full input's clock (a later chunk's words are already offset).
+#[derive(Debug, Serialize)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct TranscriptionWord {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 pub(super) const VALID_TRANSCRIPTION_FORMATS: &[&str] =
     &["json", "text", "verbose_json", "vtt", "srt"];
 pub(super) const DEFAULT_TRANSCRIPTION_FORMAT: &str = "json";
+
+/// The only values OpenAI accepts inside `timestamp_granularities[]`.
+pub(super) const VALID_TIMESTAMP_GRANULARITIES: &[&str] = &["word", "segment"];
+
+/// What `verbose_json` renders, derived from the request's
+/// `timestamp_granularities[]` values and its `response_format`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Granularities {
+    pub want_segments: bool,
+    pub want_words: bool,
+}
+
+/// Validates `timestamp_granularities[]` against OpenAI's rules and resolves
+/// what the response renders:
+///
+/// - Any value outside [`VALID_TIMESTAMP_GRANULARITIES`] is a 400.
+/// - A non-empty list is only valid with `response_format=verbose_json`; a 400
+///   names the field and tells the caller to set that format.
+/// - No values given defaults to `["segment"]`, matching OpenAI. `word` adds
+///   `words`; `segment`'s absence (a `word`-only request) drops `segments`.
+///
+/// Returns `Err(message)` for either rejection, `Ok(Granularities)` otherwise.
+pub(super) fn validate_timestamp_granularities(
+    values: &[String],
+    response_format: &str,
+) -> Result<Granularities, String> {
+    for v in values {
+        if !VALID_TIMESTAMP_GRANULARITIES.contains(&v.as_str()) {
+            return Err(format!(
+                "Invalid timestamp_granularities[] value '{}'. Must be one of: {}",
+                v,
+                VALID_TIMESTAMP_GRANULARITIES.join(", ")
+            ));
+        }
+    }
+    if !values.is_empty() && response_format != "verbose_json" {
+        return Err(format!(
+            "timestamp_granularities[] requires response_format='verbose_json' (got '{}'); \
+             set response_format=verbose_json to use it",
+            response_format
+        ));
+    }
+    if values.is_empty() {
+        return Ok(Granularities {
+            want_segments: true,
+            want_words: false,
+        });
+    }
+    Ok(Granularities {
+        want_segments: values.iter().any(|v| v == "segment"),
+        want_words: values.iter().any(|v| v == "word"),
+    })
+}
 
 /// Format a duration in seconds as an SRT timestamp `HH:MM:SS,mmm`.
 pub(super) fn format_srt_time(seconds: f64) -> String {
@@ -99,12 +169,13 @@ mod tests {
             text: "Hello".to_string(),
             language: "en".to_string(),
             duration: 1.5,
-            segments: vec![TranscriptionSegment {
+            segments: Some(vec![TranscriptionSegment {
                 id: 0,
                 start: 0.0,
                 end: 1.5,
                 text: "Hello".to_string(),
-            }],
+            }]),
+            words: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["language"], "en");
@@ -113,6 +184,27 @@ mod tests {
         assert_eq!(json["segments"][0]["start"], 0.0);
         assert_eq!(json["segments"][0]["end"], 1.5);
         assert_eq!(json["segments"][0]["text"], "Hello");
+        assert!(json.get("words").is_none());
+    }
+
+    #[test]
+    fn verbose_transcription_response_with_words() {
+        let resp = VerboseTranscriptionResponse {
+            text: "Hi".to_string(),
+            language: "en".to_string(),
+            duration: 1.0,
+            segments: None,
+            words: Some(vec![TranscriptionWord {
+                word: "Hi".to_string(),
+                start: 0.0,
+                end: 0.5,
+            }]),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json.get("segments").is_none());
+        assert_eq!(json["words"][0]["word"], "Hi");
+        assert_eq!(json["words"][0]["start"], 0.0);
+        assert_eq!(json["words"][0]["end"], 0.5);
     }
 
     #[test]
@@ -176,5 +268,51 @@ mod tests {
     fn validates_new_formats() {
         assert!(VALID_TRANSCRIPTION_FORMATS.contains(&"srt"));
         assert!(VALID_TRANSCRIPTION_FORMATS.contains(&"vtt"));
+    }
+
+    #[test]
+    fn granularities_default_is_segment_only() {
+        let g = validate_timestamp_granularities(&[], "verbose_json").unwrap();
+        assert!(g.want_segments);
+        assert!(!g.want_words);
+    }
+
+    #[test]
+    fn granularities_word_only_drops_segments() {
+        let g = validate_timestamp_granularities(&["word".to_string()], "verbose_json").unwrap();
+        assert!(!g.want_segments);
+        assert!(g.want_words);
+    }
+
+    #[test]
+    fn granularities_both_keeps_both() {
+        let g = validate_timestamp_granularities(
+            &["segment".to_string(), "word".to_string()],
+            "verbose_json",
+        )
+        .unwrap();
+        assert!(g.want_segments);
+        assert!(g.want_words);
+    }
+
+    #[test]
+    fn granularities_rejects_unknown_value() {
+        let err = validate_timestamp_granularities(&["sentence".to_string()], "verbose_json")
+            .unwrap_err();
+        assert!(err.contains("sentence"));
+    }
+
+    #[test]
+    fn granularities_reject_without_verbose_json() {
+        let err = validate_timestamp_granularities(&["word".to_string()], "json").unwrap_err();
+        assert!(err.contains("timestamp_granularities"));
+        assert!(err.contains("verbose_json"));
+    }
+
+    #[test]
+    fn granularities_empty_ignores_response_format() {
+        // No timestamp_granularities[] at all is valid regardless of format —
+        // OpenAI only rejects a *non-empty* list paired with a non-verbose format.
+        assert!(validate_timestamp_granularities(&[], "json").is_ok());
     }
 }

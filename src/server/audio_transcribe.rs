@@ -8,7 +8,7 @@
 use anyhow::{anyhow, Result};
 
 use boostr::Runtime;
-use boostr_audio::{TranscribeOptions, WhisperBundle};
+use boostr_audio::{TranscribeOptions, WhisperBundle, WordTiming};
 
 use super::handlers::ServerRuntime;
 
@@ -25,6 +25,9 @@ pub struct ChunkTranscript {
     /// Language the chunk was decoded under: the request's, or the detected
     /// one. `None` only for an english-only checkpoint.
     pub language: Option<&'static str>,
+    /// Word timings from this chunk, already offset onto the full input's
+    /// clock. Empty when word timestamps were not requested.
+    pub words: Vec<WordTiming>,
 }
 
 /// Transcribe any-length audio by splitting into non-overlapping 30-second
@@ -35,12 +38,16 @@ pub struct ChunkTranscript {
 /// - `language`: BCP-47 code like `"en"`; `None` detects it per chunk.
 /// - `translate`: `true` emits `<|translate|>` (to English) instead of `<|transcribe|>`.
 /// - `max_new_tokens`: decoder step budget per chunk, capped by the checkpoint's own.
+/// - `want_words`: runs [`WhisperBundle::transcribe_words`] per chunk instead
+///   of the plain decode, and offsets each returned word by the chunk's start
+///   so every timestamp lands on the input's clock, not the chunk's.
 pub fn transcribe_chunks(
     bundle: &WhisperBundle<ServerRuntime>,
     samples: &[f32],
     language: Option<&str>,
     translate: bool,
     max_new_tokens: usize,
+    want_words: bool,
 ) -> Result<Vec<ChunkTranscript>> {
     if samples.is_empty() {
         return Err(anyhow!("no audio samples to transcribe"));
@@ -59,14 +66,34 @@ pub fn transcribe_chunks(
     for (index, window) in samples.chunks(WHISPER_CHUNK_SAMPLES).enumerate() {
         let start = index * WHISPER_CHUNK_SAMPLES;
         let end = start + window.len();
-        let result = bundle
-            .transcribe(&client, window, WHISPER_SAMPLE_RATE, &opts)
-            .map_err(|e| anyhow!("whisper transcribe (window {index}): {e}"))?;
+        let chunk_start_secs = start as f64 / WHISPER_SAMPLE_RATE as f64;
+
+        let (text, language_used, words) = if want_words {
+            let (result, words) = bundle
+                .transcribe_words(&client, window, WHISPER_SAMPLE_RATE, &opts)
+                .map_err(|e| anyhow!("whisper transcribe_words (window {index}): {e}"))?;
+            let offset_words = words
+                .into_iter()
+                .map(|w| WordTiming {
+                    text: w.text,
+                    start: w.start + chunk_start_secs as f32,
+                    end: w.end + chunk_start_secs as f32,
+                })
+                .collect();
+            (result.text, result.language, offset_words)
+        } else {
+            let result = bundle
+                .transcribe(&client, window, WHISPER_SAMPLE_RATE, &opts)
+                .map_err(|e| anyhow!("whisper transcribe (window {index}): {e}"))?;
+            (result.text, result.language, Vec::new())
+        };
+
         out.push(ChunkTranscript {
-            start: start as f64 / WHISPER_SAMPLE_RATE as f64,
+            start: chunk_start_secs,
             end: end as f64 / WHISPER_SAMPLE_RATE as f64,
-            text: result.text.trim().to_string(),
-            language: result.language,
+            text: text.trim().to_string(),
+            language: language_used,
+            words,
         });
     }
     Ok(out)

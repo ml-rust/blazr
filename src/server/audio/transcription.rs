@@ -16,8 +16,9 @@ use crate::server::gen_types::error_response;
 use crate::server::handlers::AppState;
 
 use super::types::{
-    render_srt, render_vtt, TranscriptionResponse, TranscriptionSegment,
-    VerboseTranscriptionResponse, DEFAULT_TRANSCRIPTION_FORMAT, VALID_TRANSCRIPTION_FORMATS,
+    render_srt, render_vtt, validate_timestamp_granularities, TranscriptionResponse,
+    TranscriptionSegment, TranscriptionWord, VerboseTranscriptionResponse,
+    DEFAULT_TRANSCRIPTION_FORMAT, VALID_TRANSCRIPTION_FORMATS,
 };
 
 /// Shared pipeline for `/v1/audio/transcriptions` and `/v1/audio/translations`.
@@ -34,6 +35,8 @@ async fn run_audio_pipeline(
     let mut response_format: Option<String> = None;
     let mut temperature: Option<f32> = None;
     let mut translate = force_translate;
+    // `timestamp_granularities[]` arrives as one multipart field per value.
+    let mut timestamp_granularities: Vec<String> = Vec::new();
 
     // Extract multipart fields
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -60,6 +63,11 @@ async fn run_audio_pipeline(
             }
             "temperature" => {
                 temperature = field.text().await.ok().and_then(|s| s.parse::<f32>().ok());
+            }
+            "timestamp_granularities[]" if !force_translate => {
+                if let Some(v) = field.text().await.ok().filter(|s| !s.is_empty()) {
+                    timestamp_granularities.push(v);
+                }
             }
             // Some clients pass `task=translate` on the transcriptions
             // endpoint — honor it when the route itself isn't forcing it.
@@ -137,6 +145,11 @@ async fn run_audio_pipeline(
     }
     let _ = temperature; // greedy decode ignores temperature for now
 
+    let granularities = match validate_timestamp_granularities(&timestamp_granularities, &fmt) {
+        Ok(g) => g,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg, "invalid_request_error"),
+    };
+
     // Look up the loaded Whisper bundle.
     let bundle = match state.asr_model(&model_name).await {
         Some(b) => b,
@@ -152,6 +165,18 @@ async fn run_audio_pipeline(
             );
         }
     };
+
+    if granularities.want_words && bundle.generation.alignment_heads.is_none() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "ASR model '{}' ships no `alignment_heads` in its generation_config.json; word \
+                 timestamps are unavailable for this checkpoint",
+                model_name
+            ),
+            "invalid_request_error",
+        );
+    }
 
     // Decode audio off the executor thread — the boostr decode/resample path is CPU-bound.
     let ext_for_decode = file_ext.clone();
@@ -186,6 +211,7 @@ async fn run_audio_pipeline(
         language_for_pipeline.as_deref(),
         translate,
         bundle.config.max_target_positions,
+        granularities.want_words,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -230,11 +256,21 @@ async fn run_audio_pipeline(
                 .map(str::to_string)
                 .or(language)
                 .unwrap_or_else(|| "en".to_string());
+            let words: Vec<TranscriptionWord> = chunks
+                .iter()
+                .flat_map(|c| c.words.iter())
+                .map(|w| TranscriptionWord {
+                    word: w.text.clone(),
+                    start: w.start as f64,
+                    end: w.end as f64,
+                })
+                .collect();
             let resp = VerboseTranscriptionResponse {
                 text: full_text,
                 language: decoded_language,
                 duration: total_duration,
-                segments,
+                segments: granularities.want_segments.then_some(segments),
+                words: granularities.want_words.then_some(words),
             };
             (StatusCode::OK, Json(resp)).into_response()
         }

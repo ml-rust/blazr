@@ -132,6 +132,9 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+# `ServiceExt::oneshot`, for driving the axum router in-process against a
+# built request instead of a live socket (server route integration tests).
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 opt-level = 3

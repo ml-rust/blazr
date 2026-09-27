@@ -28,9 +28,12 @@ use blazr::server::handlers::{AppState, ServerRuntime};
 /// on disk, so callers skip.
 pub fn model_fixture(specific_var: &str, relative: &str) -> Option<PathBuf> {
     let path = match std::env::var(specific_var) {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => {
-            let root = PathBuf::from(std::env::var("BOOSTR_MODELS_DIR").ok()?);
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => {
+            let root = std::env::var("BOOSTR_MODELS_DIR")
+                .ok()
+                .filter(|r| !r.is_empty())?;
+            let root = PathBuf::from(root);
             if relative.is_empty() {
                 root
             } else {

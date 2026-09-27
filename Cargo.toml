@@ -26,6 +26,7 @@ audio = [
   "dep:boostr-audio",
   "boostr-audio/kokoro",
   "boostr-audio/voxcpm",
+  "boostr-audio/vits",
   "boostr-audio/whisper",
   "boostr/whisper",
 ]

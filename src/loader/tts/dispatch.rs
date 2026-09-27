@@ -5,6 +5,8 @@
 //! - a VoxCPM2 config (it carries `dit_config`) loads a `VoxCpm2Engine` —
 //!   voice cloning from the reference recordings in `voices/`, on CUDA when
 //!   this binary was built with it;
+//! - a VITS config (`model_type` is `vits`, as in every MMS-TTS checkpoint)
+//!   loads a `VitsEngine` on the CPU, one voice per checkpoint;
 //! - a Kokoro config (`vocab.json` or an inlined `vocab`, safetensors
 //!   weights) loads a `KokoroEngine` on the CPU;
 //! - no `config.json`, but one `.gguf` whose `general.architecture` is
@@ -18,12 +20,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
 use boostr::format::gguf::Gguf;
+use boostr_audio::tts::{is_vits_config, load_vits_from_dir};
 use boostr_audio::voxcpm::VoxCpm2SynthOptions;
-use boostr_audio::{TtsBundle, default_kokoro_voices};
+use boostr_audio::{default_kokoro_voices, TtsBundle};
 
 use super::kokoro::load_kokoro;
 use super::voxcpm::load_voxcpm2;
@@ -71,6 +74,10 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P, synth: VoxCpm2SynthOptions) ->
     }
     if is_voxcpm2_config(&config_path)? {
         return load_voxcpm2(path, Some(&config_path), synth);
+    }
+    if is_vits_config(&config_path).with_context(|| format!("reading {}", config_path.display()))? {
+        return load_vits_from_dir(path)
+            .with_context(|| format!("loading VITS model from {}", path.display()));
     }
     load_kokoro(path, &config_path, &vocab_path)
 }
@@ -122,13 +129,11 @@ mod tests {
 
     #[test]
     fn load_errors_on_missing_dir() {
-        assert!(
-            load_tts_from_dir(
-                "/nonexistent-kokoro-path-xyz",
-                VoxCpm2SynthOptions::default()
-            )
-            .is_err()
-        );
+        assert!(load_tts_from_dir(
+            "/nonexistent-kokoro-path-xyz",
+            VoxCpm2SynthOptions::default()
+        )
+        .is_err());
     }
 
     #[test]
@@ -173,6 +178,27 @@ mod tests {
         std::fs::write(&gguf, gguf_with_architecture("voxcpm2")).unwrap();
         assert!(is_voxcpm2_gguf(&gguf).unwrap());
         assert!(load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A `model_type: vits` config reaches the VITS loader, which fails on
+    /// the missing tokenizer and weights, instead of falling through to the
+    /// Kokoro loader.
+    #[test]
+    fn a_vits_config_is_dispatched_to_the_vits_loader() {
+        let tmp = std::env::temp_dir().join("blazr_tts_loader_vits_config");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config = tmp.join("config.json");
+        std::fs::write(&config, r#"{"model_type": "vits"}"#).unwrap();
+        assert!(is_vits_config(&config).unwrap());
+        let Err(err) = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()) else {
+            panic!("a VITS directory without weights loaded");
+        };
+        assert!(
+            format!("{err:#}").contains("loading VITS model"),
+            "unexpected error: {err:#}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

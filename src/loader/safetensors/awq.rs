@@ -10,15 +10,15 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
+use boostr::Tensor;
+use boostr::VarBuilder;
+use boostr::VarMap;
 use boostr::format::SafeTensorsLoader;
 use boostr::model::LoadedModel;
 use boostr::ops::TensorOps;
 use boostr::quant::decomposed::{DecomposedQuantMethod, DecomposedQuantTensor};
-use boostr::Tensor;
-use boostr::VarBuilder;
-use boostr::VarMap;
 use boostr::{DType, Runtime};
 
 use crate::config::BlazrConfig;

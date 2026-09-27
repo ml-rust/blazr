@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
+use boostr::VarBuilder;
+use boostr::VarMap;
 use boostr::format::SafeTensorsLoader;
 use boostr::model::{LoadedModel, UniversalConfig};
 use boostr::ops::TensorOps;
-use boostr::VarBuilder;
-use boostr::VarMap;
 use boostr::{DType, Runtime};
 
 use crate::config::BlazrConfig;

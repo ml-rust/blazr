@@ -4,18 +4,18 @@
 use std::path::Path;
 
 #[cfg(feature = "cuda")]
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
+#[cfg(feature = "cuda")]
+use boostr::VarBuilder;
+#[cfg(feature = "cuda")]
+use boostr::VarMap;
 #[cfg(feature = "cuda")]
 use boostr::format::{DevicePlacement, LayerDeviceMap, SafeTensorsLoader};
 #[cfg(feature = "cuda")]
 use boostr::model::LoadedModel;
 #[cfg(feature = "cuda")]
 use boostr::ops::TensorOps;
-#[cfg(feature = "cuda")]
-use boostr::VarBuilder;
-#[cfg(feature = "cuda")]
-use boostr::VarMap;
 #[cfg(feature = "cuda")]
 use boostr::{DType, Runtime};
 
@@ -340,8 +340,8 @@ where
 #[cfg(feature = "cuda")]
 fn get_available_vram<R: Runtime>(device: &R::Device) -> Option<u64> {
     if R::name() == "CUDA" {
-        use boostr::runtime::Device;
         use boostr::CudaDevice;
+        use boostr::runtime::Device;
 
         let device_id = device.id();
         let cuda_device = CudaDevice::new(device_id);

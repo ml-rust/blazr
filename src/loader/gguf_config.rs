@@ -1,7 +1,7 @@
 //! `BlazrConfig` from a GGUF header. `qwen35` goes to boostr's key table,
 //! every other architecture through the generic blocks here, unknown ones error.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use boostr::format::Gguf;
 use boostr::model::UniversalConfig;
@@ -101,7 +101,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
                 "Unsupported GGUF architecture '{}'. Supported: {}",
                 other,
                 SUPPORTED_GGUF_ARCHS.join(", ")
-            ))
+            ));
         }
     };
 

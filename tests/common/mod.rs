@@ -12,9 +12,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::Router;
 use tower::ServiceExt;
 
 #[cfg(feature = "audio")]

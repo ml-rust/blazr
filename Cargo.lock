@@ -399,13 +399,17 @@ name = "boostr-audio"
 version = "0.1.0"
 dependencies = [
  "boostr",
+ "flate2",
  "numr",
+ "regexr",
  "serde",
  "serde_json",
  "splintr",
  "symphonia",
  "thiserror 2.0.17",
  "tracing",
+ "unicode-general-category",
+ "unicode-normalization",
 ]
 
 [[package]]

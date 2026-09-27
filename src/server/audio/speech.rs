@@ -157,17 +157,12 @@ pub(super) fn tts_error_response(err: TtsError) -> Response {
         TtsError::NotImplemented => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "this TTS model has no synthesis engine: its directory carried no \
-             loadable config.json, so only voice lookup and G2P ran",
+             loadable config.json, so only voice lookup ran",
             "not_implemented",
         ),
         TtsError::UnknownVoice(v) => error_response(
             StatusCode::BAD_REQUEST,
             &format!("Unknown voice: {v}"),
-            "invalid_request_error",
-        ),
-        TtsError::G2p(e) => error_response(
-            StatusCode::BAD_REQUEST,
-            &format!("G2P failed: {e}"),
             "invalid_request_error",
         ),
         TtsError::Load(e) => error_response(

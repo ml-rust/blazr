@@ -83,7 +83,7 @@ fn voice_entry(v: &boostr_audio::Voice) -> VoiceEntry {
     VoiceEntry {
         id: v.id.clone(),
         name: v.display_name.clone(),
-        language: v.lang.espeak_voice().to_string(),
+        language: v.lang.bcp47().to_string(),
     }
 }
 

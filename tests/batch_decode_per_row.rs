@@ -13,8 +13,8 @@
 //! `BLAZR_TEST_LLAMA_MODEL` is the directory of a plain Llama-architecture
 //! SafeTensors checkpoint (a `config.json` beside `model.safetensors`),
 //! NOT a qwen35 model — `BatchEngine::new` refuses any model that needs
-//! GDN state. Unset, `models/llama-3.2-1b` is tried.
-//! Either missing, the test prints one `skip:` line and passes.
+//! GDN state. Unset, `$BOOSTR_MODELS_DIR/llama-3.2-1b` is tried. Neither
+//! present, the test prints one skip line and passes.
 //!
 //! ```bash
 //! BLAZR_TEST_LLAMA_MODEL=/path/to/llama-dir cargo test --release -p blazr \
@@ -37,10 +37,13 @@ use boostr::inference::memory::CpuBlockAllocator;
 use boostr::inference::scheduler::SchedulerConfig;
 use boostr::{CpuDevice, CpuRuntime};
 
+mod common;
+use common::{model_fixture, skip_notice};
+
 /// A plain Llama-architecture SafeTensors checkpoint directory.
 const ENV_DIR: &str = "BLAZR_TEST_LLAMA_MODEL";
-/// Tried when `ENV_DIR` is unset.
-const FALLBACK_DIR: &str = "models/llama-3.2-1b";
+/// Tried under `$BOOSTR_MODELS_DIR` when `ENV_DIR` is unset.
+const MODELS_DIR_ENTRY: &str = "llama-3.2-1b";
 const SHORT_PROMPT: &str = "Hello";
 const LONG_PROMPT: &str = "The sea is wide and the wind is cold and the boats go out at dawn \
     to fish beyond the harbour wall before the tide turns again and the gulls follow them home";
@@ -51,16 +54,16 @@ const TOTAL_BLOCKS: usize = 64;
 /// Batched-decode steps allowed before the drive loop gives up.
 const STEP_LIMIT: usize = NUM_TOKENS * 8;
 
-/// The checkpoint directory, or `None` after one `skip:` line.
+/// The checkpoint directory, or `None` after one skip line.
 fn require_dir() -> Option<PathBuf> {
-    let path = std::env::var(ENV_DIR)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(FALLBACK_DIR));
+    let Some(path) = model_fixture(ENV_DIR, MODELS_DIR_ENTRY) else {
+        skip_notice("a plain Llama-architecture SafeTensors checkpoint", ENV_DIR);
+        return None;
+    };
     if !path.join("config.json").is_file() {
         println!(
-            "skip: set {ENV_DIR} to a plain Llama-architecture SafeTensors checkpoint directory \
-             (config.json beside model.safetensors), or place one at {FALLBACK_DIR}; {} has no \
-             config.json",
+            "skip: {} has no config.json; point {ENV_DIR} at a plain Llama-architecture \
+             SafeTensors checkpoint directory (config.json beside model.safetensors)",
             path.display()
         );
         return None;

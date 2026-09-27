@@ -6,6 +6,9 @@
 //!   vocab.json           — phoneme → id map
 //!   model.safetensors    — weights (may be sharded)
 //!   voices/               — optional per-voice .safetensors / .pt files
+//!   g2p/tagger/           — spaCy tagger (tagger.safetensors, tagger.json),
+//!                           required — see KokoroG2pModels::resolve
+//!   g2p/oov/              — optional g2p_lm out-of-vocabulary fallback
 //! ```
 
 use std::path::Path;
@@ -16,7 +19,7 @@ use anyhow::{anyhow, Result};
 use boostr::model::audio::kokoro::{load_kokoro_v2, KokoroPhonemeVocab};
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
 use boostr::Runtime;
-use boostr_audio::kokoro::{KokoroEngine, KokoroG2p, VoiceResolver};
+use boostr_audio::kokoro::{KokoroEngine, KokoroG2pModels, VoiceResolver};
 use boostr_audio::{default_kokoro_voices, TtsBundle};
 
 /// Builds a Kokoro engine from `path`'s `config.json` + weights and wraps it
@@ -46,7 +49,9 @@ pub(super) fn load_kokoro(path: &Path, config_path: &Path, vocab_path: &Path) ->
         VoiceResolver::new()
     };
 
-    let g2p = KokoroG2p::new().map_err(|e| anyhow!("building Kokoro G2P: {e}"))?;
+    let g2p = KokoroG2pModels::resolve(path, None, None)
+        .and_then(|models| models.load())
+        .map_err(|e| anyhow!("building Kokoro G2P: {e}"))?;
     let engine = KokoroEngine {
         model,
         vocab,

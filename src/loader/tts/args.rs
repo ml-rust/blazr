@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 /// Parse `--tts-model NAME=PATH` into `(name, path)`.
 pub fn parse_tts_model_arg(arg: &str) -> Result<(String, PathBuf)> {

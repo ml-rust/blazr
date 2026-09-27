@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 /// Detected model format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -22,12 +22,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
 use boostr::model::audio::voxcpm::VoxCpm2Weights;
-use boostr_audio::TtsBundle;
 use boostr_audio::voxcpm::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions};
+use boostr_audio::TtsBundle;
 
 use super::dispatch::single_file_with_ext;
 
@@ -145,8 +145,8 @@ pub(super) fn load_voxcpm2(
 
     #[cfg(feature = "cuda")]
     let engine: Arc<dyn boostr_audio::TtsEngine> = {
-        use boostr::Runtime;
         use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
+        use boostr::Runtime;
         let device = CudaDevice::new(0);
         let client = Arc::new(CudaRuntime::default_client(&device));
         let engine = VoxCpm2Engine::<CudaRuntime>::load(
@@ -163,8 +163,8 @@ pub(super) fn load_voxcpm2(
     };
     #[cfg(not(feature = "cuda"))]
     let engine: Arc<dyn boostr_audio::TtsEngine> = {
-        use boostr::Runtime;
         use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
+        use boostr::Runtime;
         let device = CpuDevice::new();
         let client = Arc::new(CpuRuntime::default_client(&device));
         let engine = VoxCpm2Engine::<CpuRuntime>::load(

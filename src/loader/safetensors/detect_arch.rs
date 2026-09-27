@@ -198,7 +198,7 @@ pub fn read_awq_group_size(model_dir: &std::path::Path) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::detect::{LayerType, ModelFormat, detect_architecture_from_names};
+    use crate::model::detect::{detect_architecture_from_names, LayerType, ModelFormat};
 
     fn hf_transformer_names(num_layers: usize) -> Vec<String> {
         let mut names = vec![
@@ -247,12 +247,10 @@ mod tests {
         assert_eq!(config.format, ModelFormat::HuggingFace);
         assert_eq!(config.num_layers, 32);
         assert!(!config.tie_word_embeddings);
-        assert!(
-            config
-                .layer_types
-                .iter()
-                .all(|&t| t == LayerType::StandardTransformer)
-        );
+        assert!(config
+            .layer_types
+            .iter()
+            .all(|&t| t == LayerType::StandardTransformer));
     }
 
     #[test]
@@ -277,12 +275,10 @@ mod tests {
         let config = detect_architecture_from_names(&names).unwrap();
         assert_eq!(config.format, ModelFormat::HuggingFace);
         assert_eq!(config.num_layers, 8);
-        assert!(
-            config
-                .layer_types
-                .iter()
-                .all(|&t| t == LayerType::MlaWithMoe)
-        );
+        assert!(config
+            .layer_types
+            .iter()
+            .all(|&t| t == LayerType::MlaWithMoe));
     }
 
     #[test]

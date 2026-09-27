@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 use boostr::format::Gguf;
 use boostr::model::{LoadedModel, UniversalConfig};

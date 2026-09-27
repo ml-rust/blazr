@@ -21,12 +21,12 @@ mod vision_embedder;
 mod whisper_loader;
 
 pub use api::{load_model, load_model_tp, load_model_with_config, load_model_with_offloading};
-pub use detect::{ModelFormat, ModelSource, detect_model_source};
+pub use detect::{detect_model_source, ModelFormat, ModelSource};
 pub use gguf::{load_gguf, load_gguf_with_tokenizer};
-pub use gguf_info::{GgufInfo, get_gguf_info};
+pub use gguf_info::{get_gguf_info, GgufInfo};
 pub use gguf_template::{chat_template_from_metadata, gguf_chat_template};
 pub use safetensors::{
-    OffloadingInfo, OffloadingOptions, load_safetensors, load_safetensors_with_offloading,
+    load_safetensors, load_safetensors_with_offloading, OffloadingInfo, OffloadingOptions,
 };
 #[cfg(feature = "audio")]
 pub use tts::{load_tts_from_dir, parse_tts_model_arg};

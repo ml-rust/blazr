@@ -27,8 +27,7 @@ pub const MARKER_NAMES: [&str; 3] = [VISION_START, IMAGE_PAD, VISION_END];
 pub const IMAGE_MARKER_TEXT: &str = "<|vision_start|><|image_pad|><|vision_end|>";
 
 /// Error text for an image request on an executor without a tower.
-pub const NO_TOWER_ERROR: &str =
-    "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj (--mmproj)";
+pub const NO_TOWER_ERROR: &str = "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj (--mmproj)";
 
 /// Output-token bounds a tower resizes every image into.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -35,7 +35,7 @@ pub async fn apply_template(
         Some(name) => match crate::server::chat::named_template(name) {
             Ok(template) => template,
             Err(message) => {
-                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
         },
         None => executor.chat_template().clone(),

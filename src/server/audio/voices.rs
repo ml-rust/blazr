@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use serde::{Deserialize, Serialize};
 

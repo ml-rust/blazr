@@ -68,7 +68,7 @@ pub async fn messages(
         let sources = match request.image_sources() {
             Ok(sources) => sources,
             Err(message) => {
-                return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+                return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
         };
         // `sources` borrows the request, so it ends here: the handler moves
@@ -76,7 +76,7 @@ pub async fn messages(
         match decode_image_sources(&sources).await {
             Ok(media) => media,
             Err(message) => {
-                return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+                return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
         }
     };
@@ -84,7 +84,7 @@ pub async fn messages(
     let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
         Ok(route) => route,
         Err(message) => {
-            return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+            return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
         }
     };
     let msgs = request.chat_messages(route.image_marker());

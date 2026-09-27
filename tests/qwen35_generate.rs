@@ -55,7 +55,9 @@ fn require_file() -> Option<PathBuf> {
         Some(path) => path,
         None => {
             let Some(dir) = std::env::var(ENV_DIR).ok().map(PathBuf::from) else {
-                println!("skip: set {ENV_GGUF} to a qwen35 GGUF, or {ENV_DIR} to a directory holding {PQ2_0_FILE}");
+                println!(
+                    "skip: set {ENV_GGUF} to a qwen35 GGUF, or {ENV_DIR} to a directory holding {PQ2_0_FILE}"
+                );
                 return None;
             };
             dir.join(PQ2_0_FILE)

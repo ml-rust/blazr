@@ -86,7 +86,7 @@ pub async fn chat_completions(
     let override_template = match request.template.as_deref().map(named_template) {
         Some(Ok(template)) => Some(template),
         Some(Err(message)) => {
-            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
         }
         None => None,
     };
@@ -107,14 +107,14 @@ pub async fn chat_completions(
     let media = match decode_request_media(&request.messages).await {
         Ok(media) => media,
         Err(message) => {
-            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
         }
     };
     let multimodal_model = matches!(executor.model(), boostr::model::LoadedModel::Multimodal(_));
     let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
         Ok(route) => route,
         Err(message) => {
-            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
         }
     };
     if route == ImageRoute::Tower && request.raw.unwrap_or(false) {

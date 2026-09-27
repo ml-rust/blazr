@@ -11,13 +11,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
-use boostr::Runtime;
-use boostr::model::audio::kokoro::{KokoroPhonemeVocab, load_kokoro_v2};
+use boostr::model::audio::kokoro::{load_kokoro_v2, KokoroPhonemeVocab};
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
+use boostr::Runtime;
 use boostr_audio::kokoro::{KokoroEngine, KokoroG2p, VoiceResolver};
-use boostr_audio::{TtsBundle, default_kokoro_voices};
+use boostr_audio::{default_kokoro_voices, TtsBundle};
 
 /// Builds a Kokoro engine from `path`'s `config.json` + weights and wraps it
 /// in a scaffolding bundle. Kokoro ships the vocab inlined in `config.json`

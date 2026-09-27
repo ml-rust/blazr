@@ -8,7 +8,7 @@ use boostr::{DType, Runtime};
 
 use crate::config::BlazrConfig;
 
-use super::detect::{ModelFormat, detect_model_source};
+use super::detect::{detect_model_source, ModelFormat};
 use super::gguf;
 use super::safetensors::{self, OffloadingInfo, OffloadingOptions};
 

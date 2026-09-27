@@ -55,7 +55,7 @@ pub async fn responses(
         let sources = match request.input.image_sources() {
             Ok(sources) => sources,
             Err(message) => {
-                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
         };
         // `sources` borrows the request, so it ends here: the handler moves
@@ -63,7 +63,7 @@ pub async fn responses(
         match decode_image_sources(&sources).await {
             Ok(media) => media,
             Err(message) => {
-                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
         }
     };
@@ -71,7 +71,7 @@ pub async fn responses(
     let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
         Ok(route) => route,
         Err(message) => {
-            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error")
+            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
         }
     };
 

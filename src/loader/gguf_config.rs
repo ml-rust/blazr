@@ -1,7 +1,7 @@
 //! `BlazrConfig` from a GGUF header. `qwen35` goes to boostr's key table,
 //! every other architecture through the generic blocks here, unknown ones error.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 use boostr::format::Gguf;
 use boostr::model::UniversalConfig;

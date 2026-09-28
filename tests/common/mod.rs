@@ -1,6 +1,6 @@
 //! Shared fixtures for blazr's `tests/*.rs` integration crates: model-fixture
 //! resolution (`$SPECIFIC_VAR` else `$BOOSTR_MODELS_DIR/<relative>`, mirroring
-//! boostr-audio's `tests/common/mod.rs`), an in-process ASR-only `AppState` +
+//! voxr's `tests/common/mod.rs`), an in-process ASR-only `AppState` +
 //! router, and a hand-rolled multipart body encoder so a test can drive
 //! `/v1/audio/transcriptions` without a live server.
 //!
@@ -54,7 +54,7 @@ pub fn skip_notice(what: &str, specific_var: &str) {
 /// `$BOOSTR_MODELS_DIR/whisper-tiny`, else the HF hub cache layout
 /// `huggingface_hub.snapshot_download` produces (`~/.cache/huggingface/hub/
 /// models--openai--whisper-tiny/snapshots/<rev>`) — the same fallback
-/// boostr-audio's `whisper_word_oracle` test uses for `whisper-small` when no
+/// voxr's `whisper_word_oracle` test uses for `whisper-small` when no
 /// local copy is staged under `$BOOSTR_MODELS_DIR`.
 pub fn whisper_tiny_dir() -> Option<PathBuf> {
     if let Some(dir) = model_fixture("WHISPER_TINY_DIR", "whisper-tiny") {

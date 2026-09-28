@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 
 use boostr::{DType, Runtime, TypeConversionOps};
-use boostr_audio::WhisperBundle;
+use voxr::WhisperBundle;
 
 /// Load a Whisper bundle from an HF-style directory (config.json +
 /// tokenizer.json + model.safetensors), casting every weight to F32.

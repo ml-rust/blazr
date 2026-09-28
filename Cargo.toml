@@ -21,13 +21,13 @@ distributed = ["boostr/distributed", "dep:nexar"]
 # TTS/Whisper loaders they need. Off by default — a text-only inference server
 # has no use for the audio pipelines or their four codec decoders. The Whisper
 # weights and mel front end come from boostr; the bundle (tokenizer, generation
-# config) and the TTS engines come from boostr-audio.
+# config) and the TTS engines come from voxr.
 audio = [
-  "dep:boostr-audio",
-  "boostr-audio/kokoro",
-  "boostr-audio/voxcpm",
-  "boostr-audio/vits",
-  "boostr-audio/whisper",
+  "dep:voxr",
+  "voxr/kokoro",
+  "voxr/voxcpm",
+  "voxr/vits",
+  "voxr/whisper",
   "boostr/whisper",
 ]
 
@@ -35,7 +35,7 @@ audio = [
 # ML framework (model architectures, quant kernels, tensors via numr)
 boostr = { version = "0.3" }
 # Sample-level audio: codecs, resampling, WAV encoding, TTS engines.
-boostr-audio = { path = "../boostr/crates/boostr-audio", optional = true }
+voxr = { version = "0.1", optional = true }
 
 # Tokenization
 splintr = { version = "0.20", features = [

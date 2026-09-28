@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use futures::stream;
 use tokio::sync::mpsc;
 
-use boostr_audio::{
+use voxr::{
     encode_f32_raw, encode_pcm16_raw, wav_stream_header_f32, wav_stream_header_pcm16,
     SynthesizeOptions, TtsBundle, TtsError,
 };
@@ -59,7 +59,7 @@ impl StreamFormat {
 
     /// The bytes before the first chunk: an unknown-length WAV header, or
     /// nothing for raw PCM.
-    pub(super) fn header(self, sample_rate: u32) -> Result<Vec<u8>, boostr_audio::Error> {
+    pub(super) fn header(self, sample_rate: u32) -> Result<Vec<u8>, voxr::Error> {
         match self {
             Self::Wav => wav_stream_header_pcm16(sample_rate),
             Self::F32 => wav_stream_header_f32(sample_rate),
@@ -103,10 +103,10 @@ pub(super) async fn stream_speech(
     let (tx, mut rx) = mpsc::channel::<Chunk>(8);
     tokio::task::spawn_blocking(move || {
         let sender = tx.clone();
-        let mut sink = move |samples: &[f32]| -> boostr_audio::Result<()> {
+        let mut sink = move |samples: &[f32]| -> voxr::Result<()> {
             sender
                 .blocking_send(Ok(Bytes::from(format.encode(samples))))
-                .map_err(|_| boostr_audio::Error::ModelError {
+                .map_err(|_| voxr::Error::ModelError {
                     reason: "client disconnected before the stream finished".into(),
                 })
         };

@@ -33,5 +33,6 @@ checkpoints
 research
 CLAUDE.md
 
-.cargo
+.cargo/*
+!.cargo/config.toml.example
 .claude

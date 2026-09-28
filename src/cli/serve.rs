@@ -246,7 +246,7 @@ pub async fn serve(
         // Load any TTS bundles: Kokoro or VoxCPM2 by directory layout. The
         // batching options apply to VoxCPM2 only — a Kokoro bundle ignores
         // them, since Kokoro has no batching of its own.
-        let tts_synth_options = boostr_audio::voxcpm::VoxCpm2SynthOptions {
+        let tts_synth_options = voxr::voxcpm::VoxCpm2SynthOptions {
             max_batch: tts_max_batch,
             batch_window: std::time::Duration::from_millis(tts_batch_window_ms),
             continuous_batching: tts_continuous_batching,

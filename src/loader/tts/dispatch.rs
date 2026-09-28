@@ -24,9 +24,9 @@ use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
 use boostr::format::gguf::Gguf;
-use boostr_audio::tts::{is_vits_config, load_vits_from_dir};
-use boostr_audio::voxcpm::VoxCpm2SynthOptions;
-use boostr_audio::{default_kokoro_voices, TtsBundle};
+use voxr::tts::{is_vits_config, load_vits_from_dir};
+use voxr::voxcpm::VoxCpm2SynthOptions;
+use voxr::{default_kokoro_voices, TtsBundle};
 
 use super::kokoro::load_kokoro;
 use super::voxcpm::load_voxcpm2;

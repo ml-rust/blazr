@@ -38,7 +38,7 @@ fn fixtures() -> Option<Fixtures> {
     let wav_path = asr_test_wav()?;
     let wav_bytes =
         std::fs::read(&wav_path).unwrap_or_else(|e| panic!("reading {}: {e}", wav_path.display()));
-    let wav = boostr_audio::decode_wav(&wav_bytes)
+    let wav = voxr::decode_wav(&wav_bytes)
         .unwrap_or_else(|e| panic!("decoding {}: {e}", wav_path.display()));
     let duration_secs = wav.frames() as f64 / wav.sample_rate as f64;
     Some(Fixtures {

@@ -22,11 +22,11 @@ pub type VisionEmbedder = boostr::model::vision::ImageEmbedder<ServerRuntime>;
 
 /// Standalone Whisper ASR bundle keyed by model name.
 #[cfg(feature = "audio")]
-pub type AsrBundle = boostr_audio::WhisperBundle<ServerRuntime>;
+pub type AsrBundle = voxr::WhisperBundle<ServerRuntime>;
 
 /// Standalone TTS bundle keyed by model name.
 #[cfg(feature = "audio")]
-pub type TtsBundle = boostr_audio::TtsBundle;
+pub type TtsBundle = voxr::TtsBundle;
 
 /// Shared application state
 pub struct AppState {

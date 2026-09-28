@@ -8,7 +8,7 @@
 use anyhow::{anyhow, Result};
 
 use boostr::Runtime;
-use boostr_audio::{TranscribeOptions, WhisperBundle, WordTiming};
+use voxr::{TranscribeOptions, WhisperBundle, WordTiming};
 
 use super::handlers::ServerRuntime;
 

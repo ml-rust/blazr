@@ -16,7 +16,7 @@ use axum::{
 
 use crate::server::gen_types::error_response;
 use crate::server::handlers::{AppState, TtsBundle};
-use boostr_audio::{SynthesizeOptions, TtsError};
+use voxr::{SynthesizeOptions, TtsError};
 
 use super::encode::encode_speech;
 use super::request::{SpeechRequest, NATIVE_TTS_FORMATS, VALID_TTS_FORMATS};

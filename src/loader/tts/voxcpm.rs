@@ -26,8 +26,8 @@ use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
 use boostr::model::audio::voxcpm::VoxCpm2Weights;
-use boostr_audio::voxcpm::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions};
-use boostr_audio::TtsBundle;
+use voxr::voxcpm::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions};
+use voxr::TtsBundle;
 
 use super::dispatch::single_file_with_ext;
 
@@ -144,7 +144,7 @@ pub(super) fn load_voxcpm2(
     };
 
     #[cfg(feature = "cuda")]
-    let engine: Arc<dyn boostr_audio::TtsEngine> = {
+    let engine: Arc<dyn voxr::TtsEngine> = {
         use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
         use boostr::Runtime;
         let device = CudaDevice::new(0);
@@ -162,7 +162,7 @@ pub(super) fn load_voxcpm2(
         Arc::new(engine)
     };
     #[cfg(not(feature = "cuda"))]
-    let engine: Arc<dyn boostr_audio::TtsEngine> = {
+    let engine: Arc<dyn voxr::TtsEngine> = {
         use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
         use boostr::Runtime;
         let device = CpuDevice::new();

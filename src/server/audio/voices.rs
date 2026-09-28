@@ -79,7 +79,7 @@ pub async fn voices(
         .into_response()
 }
 
-fn voice_entry(v: &boostr_audio::Voice) -> VoiceEntry {
+fn voice_entry(v: &voxr::Voice) -> VoiceEntry {
     VoiceEntry {
         id: v.id.clone(),
         name: v.display_name.clone(),
@@ -90,7 +90,7 @@ fn voice_entry(v: &boostr_audio::Voice) -> VoiceEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boostr_audio::{Lang, Voice};
+    use voxr::{Lang, Voice};
 
     #[test]
     fn voice_entry_maps_id_name_and_language() {

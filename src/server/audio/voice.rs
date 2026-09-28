@@ -3,7 +3,7 @@
 //! on-disk `--voice-dir` resolver.
 
 use axum::{http::StatusCode, response::Response};
-use boostr_audio::voxcpm::ZERO_SHOT_VOICE_ID;
+use voxr::voxcpm::ZERO_SHOT_VOICE_ID;
 
 use crate::server::gen_types::error_response;
 use crate::server::handlers::{AppState, TtsBundle};
@@ -49,7 +49,7 @@ pub(super) fn resolve_voice(
         // actual loading happens once the neural synth path is wired; for now
         // we surface invalid paths as 400s at the HTTP layer so users get
         // fast feedback rather than waiting for a cryptic synth error.
-        let mut resolver = boostr_audio::kokoro::VoiceResolver::new();
+        let mut resolver = voxr::kokoro::VoiceResolver::new();
         if let Some(dir) = state.voice_dir.clone() {
             resolver = resolver.with_asset_dir(dir);
         }
@@ -65,7 +65,7 @@ pub(super) fn resolve_voice(
         // bundled lookup before giving up. This lets users drop a new voice
         // into the voice directory and reference it by ID without restarting
         // TTS model registration.
-        let mut resolver = boostr_audio::kokoro::VoiceResolver::new();
+        let mut resolver = voxr::kokoro::VoiceResolver::new();
         if let Some(dir) = state.voice_dir.clone() {
             resolver = resolver.with_asset_dir(dir);
         }

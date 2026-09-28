@@ -1,0 +1,17 @@
+# Local build overrides. Copy to `.cargo/config.toml`, which is gitignored.
+#
+# blazr depends on sibling crates by version. Without this patch cargo resolves
+# them from crates.io and the build fails on APIs the published versions lack.
+[patch.crates-io]
+numr = { path = "../numr" }
+boostr = { path = "../boostr" }
+splintr = { path = "../splintr" }
+regexr = { path = "../regexr" }
+nexar = { path = "../nexar/nexar" }
+voxr = { path = "../voxr/crates/voxr" }
+voxr-narrate = { path = "../voxr/crates/voxr-narrate" }
+
+# Model fixtures live outside the repo. Point this at your own checkpoint
+# directory. Tests that need a real model skip when it is unset.
+[env]
+BOOSTR_MODELS_DIR = "/path/to/models"

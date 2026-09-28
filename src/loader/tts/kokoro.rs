@@ -19,8 +19,8 @@ use anyhow::{anyhow, Result};
 use boostr::model::audio::kokoro::{load_kokoro_v2, KokoroPhonemeVocab};
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
 use boostr::Runtime;
-use boostr_audio::kokoro::{KokoroEngine, KokoroG2pModels, VoiceResolver};
-use boostr_audio::{default_kokoro_voices, TtsBundle};
+use voxr::kokoro::{KokoroEngine, KokoroG2pModels, VoiceResolver};
+use voxr::{default_kokoro_voices, TtsBundle};
 
 /// Builds a Kokoro engine from `path`'s `config.json` + weights and wraps it
 /// in a scaffolding bundle. Kokoro ships the vocab inlined in `config.json`
@@ -68,7 +68,7 @@ pub(super) fn load_kokoro(path: &Path, config_path: &Path, vocab_path: &Path) ->
 
 #[cfg(test)]
 mod tests {
-    use boostr_audio::voxcpm::VoxCpm2SynthOptions;
+    use voxr::voxcpm::VoxCpm2SynthOptions;
 
     use super::super::load_tts_from_dir;
 

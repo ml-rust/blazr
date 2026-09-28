@@ -331,7 +331,6 @@ dependencies = [
  "async-stream",
  "axum",
  "boostr",
- "boostr-audio",
  "bytemuck",
  "chrono",
  "clap",
@@ -368,6 +367,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "voxr",
 ]
 
 [[package]]
@@ -392,24 +392,6 @@ dependencies = [
  "thiserror 2.0.17",
  "tracing",
  "zip",
-]
-
-[[package]]
-name = "boostr-audio"
-version = "0.1.0"
-dependencies = [
- "boostr",
- "flate2",
- "numr",
- "regexr",
- "serde",
- "serde_json",
- "splintr",
- "symphonia",
- "thiserror 2.0.17",
- "tracing",
- "unicode-general-category",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -3851,6 +3833,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "voxr"
+version = "0.1.0"
+dependencies = [
+ "boostr",
+ "flate2",
+ "numr",
+ "regexr",
+ "serde",
+ "serde_json",
+ "splintr",
+ "symphonia",
+ "thiserror 2.0.17",
+ "tracing",
+ "unicode-general-category",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4519,3 +4519,7 @@ checksum = "410e9ecef634c709e3831c2cfdb8d9c32164fae1c67496d5b68fff728eec37fe"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "voxr-narrate"
+version = "0.1.0"

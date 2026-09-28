@@ -76,8 +76,8 @@ pub fn transcribe_chunks(
                 .into_iter()
                 .map(|w| WordTiming {
                     text: w.text,
-                    start: w.start + chunk_start_secs as f32,
-                    end: w.end + chunk_start_secs as f32,
+                    start: w.start + chunk_start_secs,
+                    end: w.end + chunk_start_secs,
                 })
                 .collect();
             (result.text, result.language, offset_words)

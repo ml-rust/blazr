@@ -261,8 +261,8 @@ async fn run_audio_pipeline(
                 .flat_map(|c| c.words.iter())
                 .map(|w| TranscriptionWord {
                     word: w.text.clone(),
-                    start: w.start as f64,
-                    end: w.end as f64,
+                    start: w.start,
+                    end: w.end,
                 })
                 .collect();
             let resp = VerboseTranscriptionResponse {

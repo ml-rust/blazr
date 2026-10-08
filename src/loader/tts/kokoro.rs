@@ -58,7 +58,6 @@ pub(super) fn load_kokoro(path: &Path, config_path: &Path, vocab_path: &Path) ->
         resolver,
         client,
         device,
-        min_frames_per_phoneme: 1,
         g2p,
     };
     let sample_rate = engine.sample_rate();

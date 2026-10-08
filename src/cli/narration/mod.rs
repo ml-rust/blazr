@@ -2,17 +2,15 @@
 
 mod args;
 mod config;
-mod download;
 mod engines;
 mod gpu;
 mod hearing;
-mod kinds;
-mod models;
 mod paths;
 mod print;
 mod speak;
 mod transcribe;
 mod tts_section;
+mod weights;
 
 pub use args::{SpeakArgs, TranscribeArgs};
 pub use speak::speak;

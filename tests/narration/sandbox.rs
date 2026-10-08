@@ -79,6 +79,15 @@ impl Sandbox {
         Self { root }
     }
 
+    /// A sandbox with no model in its model folder.
+    pub fn empty() -> Self {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("sandbox: {e}"));
+        for sub in ["models", "config/motion-video", "cache", "hf", "project"] {
+            std::fs::create_dir_all(root.path().join(sub)).unwrap_or_else(|e| panic!("{e}"));
+        }
+        Self { root }
+    }
+
     /// The working directory of every run.
     pub fn project(&self) -> PathBuf {
         self.root.path().join("project")

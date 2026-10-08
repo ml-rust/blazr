@@ -1,22 +1,20 @@
-//! Finding a speech model on disk: a path, or a Hugging Face id looked up
-//! under `$BOOSTR_MODELS_DIR`, the skill's model folder and the hub
-//! caches, each candidate checked for every file its loader reads. Models
-//! are never downloaded: a missing one names the next action.
+//! Finding a model on disk: a path, or a Hugging Face id looked up under
+//! model folders by name and in hub caches, each candidate checked for
+//! every file its loader reads. A missing one downloads on first use, or
+//! names the next action.
 
 use std::path::{Path, PathBuf};
 
-use voxr_narrate::{resolve, CommandError};
+use voxr_narrate::resolve;
 
-use super::config::MotionConfig;
 use super::download::{download, download_file, offline};
+use super::env::{default_hubs, env};
 use super::kinds::{checkpoint_id, missing_file, ModelKind};
-use super::paths::{env, hub_caches, models_dir};
 
 /// Where models are looked for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelSearch {
-    /// Directories holding models by name: `$BOOSTR_MODELS_DIR`, then the
-    /// skill's model folder.
+    /// Directories holding models by name, such as `$BOOSTR_MODELS_DIR`.
     roots: Vec<PathBuf>,
     /// Hugging Face hub caches.
     hubs: Vec<PathBuf>,
@@ -25,21 +23,25 @@ pub struct ModelSearch {
 }
 
 impl ModelSearch {
-    /// The search the config and the environment set.
-    pub fn new(config: &MotionConfig, cwd: &Path) -> Self {
-        let mut roots: Vec<PathBuf> = env("BOOSTR_MODELS_DIR")
+    /// A search of `roots`, folders holding models by name, then `hubs`,
+    /// hub caches, the first of which takes a download. A relative path
+    /// resolves against `cwd`.
+    pub fn new(roots: Vec<PathBuf>, hubs: Vec<PathBuf>, cwd: &Path) -> Self {
+        Self {
+            roots,
+            hubs,
+            cwd: cwd.to_path_buf(),
+        }
+    }
+
+    /// The search the environment sets: `$BOOSTR_MODELS_DIR` by name, then
+    /// [`default_hubs`].
+    pub fn from_env(cwd: &Path) -> Self {
+        let roots = env("BOOSTR_MODELS_DIR")
             .map(|d| resolve(cwd, Path::new(&d)))
             .into_iter()
             .collect();
-        let folder = models_dir(config, cwd);
-        if !roots.contains(&folder) {
-            roots.push(folder);
-        }
-        Self {
-            roots,
-            hubs: hub_caches(config, cwd),
-            cwd: cwd.to_path_buf(),
-        }
+        Self::new(roots, default_hubs(cwd), cwd)
     }
 
     /// Every snapshot of `id` in hub layout under `dir`, newest first.
@@ -84,8 +86,7 @@ impl ModelSearch {
 
     /// The directories searched, for a message.
     fn searched(&self) -> String {
-        // The skill's model folder is searched as a root and as a hub
-        // cache, and is named once.
+        // A folder searched as a root and as a hub cache is named once.
         let mut all: Vec<String> = Vec::new();
         for p in self.roots.iter().chain(&self.hubs) {
             let text = p.display().to_string();
@@ -129,16 +130,20 @@ impl ModelSearch {
             }
         }
         if let Some((dir, file)) = partial {
-            // The hub never holds the G2P tagger: a download cannot add it.
-            let fixable = !file.starts_with("g2p/");
             return Err(Missing {
                 reason: incomplete(kind, &dir, &file, Some(&id)),
-                id: fixable.then_some(id),
+                id: Some(id),
             });
         }
+        // A Kokoro checkpoint's G2P models are found, never passed.
+        let pass = if kind == ModelKind::KokoroG2p {
+            ""
+        } else {
+            ", or pass its directory"
+        };
         Err(Missing {
             reason: format!(
-                "the {} model {id} is not on disk. Searched: {}. Download it with `hf download {id}`, or pass its directory.",
+                "the {} model {id} is not on disk. Searched: {}. Download it with `hf download {id}`{pass}.",
                 kind.name(),
                 self.searched()
             ),
@@ -146,8 +151,7 @@ impl ModelSearch {
         })
     }
 
-    /// Where a download goes: the first hub cache, the skill's model
-    /// folder.
+    /// Where a download goes: the first hub cache.
     pub fn download_dir(&self) -> PathBuf {
         self.hubs
             .first()
@@ -156,18 +160,18 @@ impl ModelSearch {
     }
 
     /// The model `spec` names, downloaded first when it is a Hugging Face
-    /// id that is not on disk, as the skill downloads on first use. The
-    /// download prints `notice` first, or a notice of its own. Offline
-    /// (`$HF_HUB_OFFLINE`), or when the download fails, the run fails with
-    /// the next action, led by `what`, such as `speak`.
+    /// id that is not on disk. The download prints `notice` on standard
+    /// error first, or a notice of its own. Offline (`$HF_HUB_OFFLINE`), or
+    /// when the download fails, the error is the reason with the next
+    /// action, led by `what`, such as `speak`.
     pub fn obtain(
         &self,
         what: &str,
         spec: &str,
         kind: ModelKind,
         notice: Option<&str>,
-    ) -> Result<PathBuf, CommandError> {
-        let failed = |reason: String| CommandError::Failed(format!("{what}: {reason}"));
+    ) -> Result<PathBuf, String> {
+        let failed = |reason: String| format!("{what}: {reason}");
         let missing = match self.look(spec, kind) {
             Ok(dir) => return Ok(dir),
             Err(m) => m,
@@ -195,6 +199,23 @@ impl ModelSearch {
 }
 
 impl ModelSearch {
+    /// The directories on disk the model `spec` names: its path, else every
+    /// place the search holds it. With them, its Hugging Face id when
+    /// `spec` is no path.
+    pub fn copies(&self, spec: &str, kind: ModelKind) -> (Vec<PathBuf>, Option<String>) {
+        let as_path = resolve(&self.cwd, Path::new(spec));
+        if as_path.exists() {
+            return (vec![as_path], None);
+        }
+        let id = checkpoint_id(spec, kind);
+        let dirs = self
+            .candidates(&id)
+            .into_iter()
+            .filter(|d| d.is_dir())
+            .collect();
+        (dirs, Some(id))
+    }
+
     /// The `config.json` of the model `spec` names: on disk at its path or
     /// in the search, else fetched alone from the hub, a small file, so a
     /// model's kind is known before its weights are downloaded. `None` when
@@ -227,13 +248,9 @@ struct Missing {
 
 /// Why a model that lacks `file` cannot load, with the next action.
 fn incomplete(kind: ModelKind, dir: &Path, file: &str, id: Option<&str>) -> String {
-    let next = if file.starts_with("g2p/tagger/") {
-        "Convert spaCy's en_core_web_sm tagger into g2p/tagger with voxr's assets/spacy_en/convert_tagger.py".to_string()
-    } else {
-        match id {
-            Some(id) => format!("Download it again with `hf download {id}`"),
-            None => format!("Point it at a complete {} checkpoint", kind.name()),
-        }
+    let next = match id {
+        Some(id) => format!("Download it again with `hf download {id}`"),
+        None => format!("Point it at a complete {} checkpoint", kind.name()),
     };
     format!(
         "the {} model at {} lacks {file}. {next}.",
@@ -290,9 +307,11 @@ mod tests {
         );
         touch(d, &["generation_config.json"]);
         assert_eq!(missing_file(d, ModelKind::Whisper), None);
+        // Weights and a config: Kokoro's G2P models come from elsewhere.
+        assert_eq!(missing_file(d, ModelKind::Kokoro), None);
         assert_eq!(
-            missing_file(d, ModelKind::Kokoro).as_deref(),
-            Some("g2p/tagger/tagger.safetensors")
+            missing_file(d, ModelKind::KokoroG2p).as_deref(),
+            Some("tagger/tagger.json")
         );
         assert_eq!(
             missing_file(d, ModelKind::Voxcpm).as_deref(),

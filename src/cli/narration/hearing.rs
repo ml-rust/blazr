@@ -10,8 +10,7 @@ use voxr_narrate::{
     WhisperHearing, WhisperTranscriber, DEFAULT_ASR_MODEL, SMALL_ASR_MODEL,
 };
 
-use super::kinds::ModelKind;
-use super::models::ModelSearch;
+use crate::loader::hub::{ModelKind, ModelSearch};
 
 /// Where the models run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,9 +74,7 @@ pub fn load_whisper(dir: &Path, at: Placement) -> Result<Loaded> {
 pub fn find_and_load(search: &ModelSearch, id: &str, at: Placement) -> Result<Loaded> {
     let dir = search
         .obtain("speak", id, ModelKind::Whisper, None)
-        .map_err(|e| Error::Recognizer {
-            reason: e.message().to_string(),
-        })?;
+        .map_err(|reason| Error::Recognizer { reason })?;
     load_whisper(&dir, at)
 }
 
@@ -100,7 +97,9 @@ pub fn hearing<'a>(
     main: Recognizer,
     at: Placement,
 ) -> std::result::Result<WhisperHearing<'a>, CommandError> {
-    search.obtain("speak", id_of(main, configured), ModelKind::Whisper, None)?;
+    search
+        .obtain("speak", id_of(main, configured), ModelKind::Whisper, None)
+        .map_err(CommandError::Failed)?;
     let source = move |id: &'a str| RecognizerSource::lazy(move || find_and_load(search, id, at));
     let mut hearing = WhisperHearing::new(source(DEFAULT_ASR_MODEL), source(SMALL_ASR_MODEL));
     if let Some(id) = configured.filter(|c| *c != DEFAULT_ASR_MODEL && *c != SMALL_ASR_MODEL) {

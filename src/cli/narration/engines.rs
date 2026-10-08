@@ -15,8 +15,8 @@ use voxr_narrate::{
 
 use super::config::MotionConfig;
 use super::hearing::Placement;
-use super::kinds::{missing_file, ModelKind, VOXCPM_ID};
-use super::models::ModelSearch;
+use super::weights::holds_safetensors;
+use crate::loader::hub::{missing_file, ModelKind, ModelSearch, VOXCPM_ID};
 use crate::loader::{load_kokoro_engine, voxcpm2_source_at};
 
 /// A VoxCPM2 engine on either runtime.
@@ -69,12 +69,40 @@ pub fn voxcpm_checkpoint(
 /// caller runs it another way.
 fn not_vits(model: &str) -> CommandError {
     CommandError::Unsupported(format!(
-        "speak --model {model}: only VITS (MMS-TTS) checkpoints run natively, and {model} is not one. Run it with the skill's Python runner, or pass --command."
+        "speak --model {model}: only VITS (MMS-TTS) checkpoints run natively, and {model} is not one. Run it with the skill's own runner, or pass --command."
+    ))
+}
+
+/// The refusal of a VITS model with no `model.safetensors`, exit 3: the
+/// skill's own runner reads its ONNX or PyTorch `.bin` weights.
+fn not_native(model: &str) -> CommandError {
+    CommandError::Unsupported(format!(
+        "speak --model {model}: only VITS (MMS-TTS) checkpoints with model.safetensors run natively, and {model} holds other weights. Run it with the skill's own runner, or pass --command."
     ))
 }
 
 fn load_failed(what: &str, e: impl std::fmt::Display) -> CommandError {
     CommandError::Failed(format!("speak: loading {what}: {e:#}"))
+}
+
+/// Refuses, exit 3, the Hugging Face model `model` when it is no VITS
+/// checkpoint or holds no `model.safetensors`. Its kind and weights are
+/// read before any weights are downloaded. A model the search does not
+/// tell about passes, and its download decides.
+pub fn refuse_foreign_model(
+    search: &ModelSearch,
+    model: &str,
+) -> std::result::Result<(), CommandError> {
+    if let Some(config) = search.config_of(model, ModelKind::Vits) {
+        let vits = is_vits_config(&config).map_err(|e| load_failed(model, e))?;
+        if !vits {
+            return Err(not_vits(model));
+        }
+    }
+    if holds_safetensors(search, model) == Some(false) {
+        return Err(not_native(model));
+    }
+    Ok(())
 }
 
 /// Loads the engine `choice` speaks with. A Hugging Face model not on
@@ -91,19 +119,17 @@ pub fn load_engines(
     match choice {
         EngineChoice::Command { .. } => {}
         EngineChoice::Kokoro { model, .. } => {
-            let dir = search.obtain("speak", model, ModelKind::Kokoro, None)?;
-            engines.kokoro = Some(load_kokoro_engine(&dir).map_err(|e| load_failed("Kokoro", e))?);
+            let dir = search
+                .obtain("speak", model, ModelKind::Kokoro, None)
+                .map_err(CommandError::Failed)?;
+            engines.kokoro =
+                Some(load_kokoro_engine(&dir, search, "speak").map_err(CommandError::Failed)?);
         }
         EngineChoice::Model { model } => {
-            // The model's kind is read before its weights are downloaded:
-            // only VITS runs here.
-            if let Some(config) = search.config_of(model, ModelKind::Vits) {
-                let vits = is_vits_config(&config).map_err(|e| load_failed(model, e))?;
-                if !vits {
-                    return Err(not_vits(model));
-                }
-            }
-            let dir = search.obtain("speak", model, ModelKind::Vits, None)?;
+            refuse_foreign_model(search, model)?;
+            let dir = search
+                .obtain("speak", model, ModelKind::Vits, None)
+                .map_err(CommandError::Failed)?;
             if !is_vits_config(&dir.join("config.json")).map_err(|e| load_failed(model, e))? {
                 return Err(not_vits(model));
             }
@@ -121,8 +147,9 @@ pub fn load_engines(
                         "speak: no VoxCPM2 checkpoint on disk. Downloading it (about 4.7 GB) into {}. This happens once.",
                         search.download_dir().display()
                     );
-                    let path =
-                        search.obtain("speak", VOXCPM_ID, ModelKind::Voxcpm, Some(&notice))?;
+                    let path = search
+                        .obtain("speak", VOXCPM_ID, ModelKind::Voxcpm, Some(&notice))
+                        .map_err(CommandError::Failed)?;
                     engines.downloaded = true;
                     path
                 }

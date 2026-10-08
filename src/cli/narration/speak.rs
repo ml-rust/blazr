@@ -7,18 +7,19 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 use voxr_narrate::{
-    asr_model, decode_48k, finish_speak, prepare_speak, resolve_speak, speak_failure, CommandError,
-    Error, FinishInputs, PreparedSpeak, Result, SpeakFlags, SpeakTarget, TtsConfig,
+    asr_model, decode_48k, finish_speak, parse_skill_args, prepare_speak, resolve_speak,
+    speak_failure, CommandError, EngineChoice, Error, FinishInputs, PreparedSpeak, Result,
+    SkillArgs, SpeakFlags, SpeakTarget, TtsConfig,
 };
 
-use super::args::SpeakArgs;
+use super::args::speak_help;
 use super::config::{read_config, MotionConfig};
-use super::engines::{load_engines, run_speak, voxcpm_checkpoint, RunInput};
+use super::engines::{load_engines, refuse_foreign_model, run_speak, voxcpm_checkpoint, RunInput};
 use super::gpu::{gpu, voxcpm_readiness};
 use super::hearing::{hearing, Placement};
-use super::models::ModelSearch;
-use super::paths::{take_cache, working_dir};
+use super::paths::{model_search, take_cache, working_dir};
 use super::print::Printer;
+use crate::loader::hub::ModelSearch;
 
 /// Runs `line` in the shell, as Node's `spawnSync(cmd, { shell: true })`
 /// does: no input, its output on this process's own output, or on
@@ -46,12 +47,26 @@ fn spawn(line: &str, json: bool) -> Result<Option<i32>> {
     Ok(status.code())
 }
 
-/// Runs `blazr speak` and returns its exit code: 0 when every phrase was
-/// heard back as written, 1 when a problem remains or the run failed, 2
-/// on a bad input.
-pub fn speak(args: &SpeakArgs) -> i32 {
-    let printer = Printer { json: args.json };
-    match run(args, printer) {
+/// Runs `blazr speak` on `argv`, the arguments after the command, and
+/// returns its exit code: 0 when every phrase was heard back as written,
+/// 1 when a problem remains or the run failed, 2 on a bad input, 3 on a
+/// model that runs elsewhere.
+pub fn speak(argv: &[String]) -> i32 {
+    let args = match parse_skill_args(argv, &speak_help()) {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("{}", e.line());
+            return e.exit_code();
+        }
+    };
+    if args.help() {
+        println!("{}", speak_help());
+        return 0;
+    }
+    let printer = Printer {
+        json: args.on("--json"),
+    };
+    match run(&args, printer) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{}", e.line());
@@ -60,18 +75,29 @@ pub fn speak(args: &SpeakArgs) -> i32 {
     }
 }
 
-fn run(args: &SpeakArgs, printer: Printer) -> std::result::Result<i32, CommandError> {
-    let flags = args.flags()?;
+fn run(args: &SkillArgs, printer: Printer) -> std::result::Result<i32, CommandError> {
+    let flags = args.speak_flags()?;
     let cwd = working_dir()?;
     let config = read_config()?;
     let tts = config.tts.config();
-    let search = ModelSearch::new(&config, &cwd);
+    let search = model_search(&config, &cwd);
     let checkpoint = voxcpm_checkpoint(&config, &search, &cwd);
     let ready = voxcpm_readiness(gpu());
     let mut lines = Vec::new();
     let prepared = prepare_speak(&flags, &tts, ready.ok, &ready.why, &cwd, &mut lines);
+    let prepared = match prepared {
+        Ok(p) => p,
+        Err(e) => {
+            printer.lines(&lines);
+            return Err(e);
+        }
+    };
+    // A model that runs elsewhere is refused before the review prints: the
+    // caller then speaks the script another way, review included.
+    if !prepared.review_only {
+        refuse_model_first(&flags, &prepared, &tts, &ready, &search)?;
+    }
     printer.lines(&lines);
-    let prepared = prepared?;
     if prepared.review_only {
         if printer.json {
             printer.json(&json!({ "review": prepared.review, "exitCode": 0 }));
@@ -106,6 +132,27 @@ fn run(args: &SpeakArgs, printer: Printer) -> std::result::Result<i32, CommandEr
         printer.json(&value);
     }
     Ok(outcome.code)
+}
+
+/// The exit-3 refusal of the run's `--model`, or of the config's
+/// `tts.model`, when it is no VITS checkpoint with `model.safetensors`. A
+/// run that resolves to another engine, or does not resolve, passes: the
+/// run itself reports its error.
+fn refuse_model_first(
+    flags: &SpeakFlags,
+    prepared: &PreparedSpeak,
+    tts: &TtsConfig<'_>,
+    ready: &super::gpu::Readiness,
+    search: &ModelSearch,
+) -> std::result::Result<(), CommandError> {
+    let opts = prepared.opts(flags);
+    match resolve_speak(&prepared.script, &opts, tts, ready.ok, &ready.why) {
+        Ok(r) => match &r.engine {
+            EngineChoice::Model { model } => refuse_foreign_model(search, model),
+            _ => Ok(()),
+        },
+        Err(_) => Ok(()),
+    }
 }
 
 /// Loads what the run speaks and hears with, and speaks the script.

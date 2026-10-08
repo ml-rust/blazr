@@ -1,7 +1,6 @@
-//! A missing model downloaded on first use, as the skill downloads its
-//! own: the files its loader reads, from the Hugging Face hub into the
-//! skill's model folder in hub layout, where the model search finds them
-//! next time.
+//! A missing model downloaded on first use: the files its loader reads,
+//! from the Hugging Face hub into a hub cache in hub layout, where the
+//! model search finds them next time.
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +30,7 @@ pub fn wanted(name: &str, kind: ModelKind) -> bool {
                     || (name.starts_with("voices/") && name.ends_with(".pt"))
             }
             ModelKind::Voxcpm => name == "model.safetensors" || name == "audiovae.pth",
+            ModelKind::KokoroG2p => name.starts_with("tagger/") || name.starts_with("oov/"),
         }
 }
 
@@ -52,19 +52,37 @@ pub fn download(id: &str, kind: ModelKind, hub: &Path) -> Result<PathBuf, String
         .map(|s| s.rfilename)
         .filter(|n| wanted(n, kind))
         .collect();
-    // A file at the top of the repo sits right in the snapshot directory.
-    let first = names
-        .iter()
-        .find(|n| !n.contains('/'))
-        .ok_or_else(|| format!("{id} holds none of the files a {kind:?} model needs"))?;
+    if names.is_empty() {
+        return Err(format!(
+            "{id} holds none of the files a {kind:?} model needs"
+        ));
+    }
     let mut snapshot = None;
     for name in &names {
         let path = repo.get(name).map_err(|e| format!("{name}: {e}"))?;
-        if name == first {
-            snapshot = path.parent().map(Path::to_path_buf);
-        }
+        // The snapshot directory holds the file as the repo does: one
+        // directory up for each part of its repo path.
+        snapshot = snapshot.or_else(|| {
+            path.ancestors()
+                .nth(name.split('/').count())
+                .map(Path::to_path_buf)
+        });
     }
     snapshot.ok_or_else(|| format!("{id}: the hub cache holds no snapshot directory"))
+}
+
+/// Every file of the repo `id` on the hub, as paths in the repo. The error
+/// is the hub's reason.
+pub fn repo_files(id: &str) -> Result<Vec<String>, String> {
+    let api = ApiBuilder::from_env()
+        .with_progress(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let info = api
+        .model(id.to_string())
+        .info()
+        .map_err(|e| e.to_string())?;
+    Ok(info.siblings.into_iter().map(|s| s.rfilename).collect())
 }
 
 /// Downloads the one repo file `name` of `id` into the hub cache `hub`
@@ -98,5 +116,8 @@ mod tests {
         assert!(!wanted("samples/HEARME.wav", ModelKind::Kokoro));
         assert!(wanted("audiovae.pth", ModelKind::Voxcpm));
         assert!(!wanted("model.safetensors", ModelKind::Kokoro));
+        assert!(wanted("tagger/tagger.json", ModelKind::KokoroG2p));
+        assert!(wanted("oov/model.safetensors", ModelKind::KokoroG2p));
+        assert!(!wanted("README.md", ModelKind::KokoroG2p));
     }
 }

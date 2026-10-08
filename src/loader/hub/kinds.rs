@@ -9,21 +9,25 @@ use voxr_narrate::KOKORO_MODEL;
 pub enum ModelKind {
     /// A Whisper recognizer with word timings.
     Whisper,
-    /// Kokoro-82M with its G2P models.
+    /// Kokoro-82M: its config, weights and voices.
     Kokoro,
     /// A VITS (MMS-TTS) checkpoint.
     Vits,
     /// VoxCPM2: a checkpoint directory, or one `.gguf` file.
     Voxcpm,
+    /// Kokoro's G2P models: the spaCy tagger under `tagger/`, the
+    /// out-of-vocabulary model under `oov/`.
+    KokoroG2p,
 }
 
 impl ModelKind {
-    pub(super) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Whisper => "Whisper",
             Self::Kokoro => "Kokoro",
             Self::Vits => "VITS",
             Self::Voxcpm => "VoxCPM2",
+            Self::KokoroG2p => "Kokoro G2P",
         }
     }
 }
@@ -31,7 +35,13 @@ impl ModelKind {
 /// VoxCPM2's Hugging Face id.
 pub const VOXCPM_ID: &str = "openbmb/VoxCPM2";
 /// Kokoro's PyTorch checkpoint, the one voxr loads.
-pub(super) const KOKORO_ID: &str = "hexgrad/Kokoro-82M";
+pub(crate) const KOKORO_ID: &str = "hexgrad/Kokoro-82M";
+/// Kokoro's G2P models, for a Kokoro checkpoint with no `g2p/` beside it.
+pub const KOKORO_G2P_ID: &str = "fs90/kokoro-g2p";
+/// The tagger's files, under `tagger/`.
+pub const TAGGER_FILES: [&str; 2] = ["tagger.json", "tagger.safetensors"];
+/// The out-of-vocabulary model's files, under `oov/`.
+pub const OOV_FILES: [&str; 3] = ["config.json", "model.safetensors", "vocab.json"];
 
 /// The checkpoint a skill model id names: the skill's ONNX Whisper builds
 /// (`onnx-community/whisper-base_timestamped`) are the `openai/whisper-*`
@@ -80,8 +90,13 @@ pub fn missing_file(path: &Path, kind: ModelKind) -> Option<String> {
             } else if !any("pth") && !any("safetensors") {
                 Some("kokoro-v1_0.pth".to_string())
             } else {
-                first(&["g2p/tagger/tagger.safetensors", "g2p/tagger/tagger.json"])
+                None
             }
+        }
+        ModelKind::KokoroG2p => {
+            let tagger = TAGGER_FILES.map(|f| format!("tagger/{f}"));
+            let oov = OOV_FILES.map(|f| format!("oov/{f}"));
+            tagger.into_iter().chain(oov).find(|f| !has(f))
         }
         ModelKind::Voxcpm => {
             if path.is_file() || any("gguf") {

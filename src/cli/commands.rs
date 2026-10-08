@@ -382,7 +382,6 @@ pub enum Commands {
     /// spans, and every phrase heard back with Whisper. Exits 1 when a
     /// problem remains, 2 on a bad input.
     #[cfg(feature = "audio")]
-    #[command(allow_negative_numbers = true)]
     Speak(super::narration::SpeakArgs),
 
     /// Word timings for narration from a local Whisper model: one words

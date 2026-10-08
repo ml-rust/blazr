@@ -12,6 +12,8 @@ pub(crate) mod gguf;
 mod gguf_config;
 mod gguf_info;
 mod gguf_template;
+#[cfg(feature = "audio")]
+pub mod hub;
 mod safetensors;
 #[cfg(feature = "audio")]
 mod tts;
@@ -30,8 +32,8 @@ pub use safetensors::{
 };
 #[cfg(feature = "audio")]
 pub use tts::{
-    load_kokoro_engine, load_tts_from_dir, parse_tts_model_arg, voxcpm2_source, voxcpm2_source_at,
-    Voxcpm2Source,
+    kokoro_g2p, load_kokoro_engine, load_tts_from_dir, parse_tts_model_arg, voxcpm2_source,
+    voxcpm2_source_at, Voxcpm2Source,
 };
 pub use vision::{load_gguf_with_mmproj, load_mmproj_tensors};
 pub use vision_embedder::{load_vision_embedder_from_dir, parse_vision_model_arg};

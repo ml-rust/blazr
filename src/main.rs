@@ -15,6 +15,21 @@ fn logs_to_stderr(command: &Commands) -> bool {
     false
 }
 
+/// The arguments after the narration command `command`, as given. clap
+/// drops a leading `--`, which the skill reads as an unknown option, so
+/// the command reads the process's own arguments.
+#[cfg(feature = "audio")]
+fn narration_argv(command: &str) -> Vec<String> {
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    args.iter()
+        .skip(1)
+        .position(|a| a == command)
+        .map(|i| args[i + 2..].to_vec())
+        .unwrap_or_default()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -238,9 +253,11 @@ async fn main() -> Result<()> {
             );
         }
         #[cfg(feature = "audio")]
-        Commands::Speak(args) => std::process::exit(blazr::cli::speak(&args)),
+        Commands::Speak(_) => std::process::exit(blazr::cli::speak(&narration_argv("speak"))),
         #[cfg(feature = "audio")]
-        Commands::Transcribe(args) => std::process::exit(blazr::cli::transcribe(&args)),
+        Commands::Transcribe(_) => {
+            std::process::exit(blazr::cli::transcribe(&narration_argv("transcribe")))
+        }
         Commands::Decode { model: _, input: _ } => {
             eprintln!("Decode command not yet implemented");
         }

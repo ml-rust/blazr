@@ -6,6 +6,7 @@
 //! * `WHISPER_BASE_DIR` → `whisper-base`
 //! * `WHISPER_SMALL_DIR` → `whisper-small` (else the base checkpoint, with
 //!   a notice)
+//! * `MMS_TTS_ZLM_DIR` → `facebook/mms-tts-zlm`
 //! * `VOXCPM2_GGUF`, no fallback
 //!
 //! A test whose model is missing prints a skip notice and passes.

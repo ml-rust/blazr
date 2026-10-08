@@ -7,16 +7,7 @@ use std::path::{Path, PathBuf};
 use voxr_narrate::{resolve, CommandError};
 
 use super::config::MotionConfig;
-
-/// `$name`, when set and not empty.
-pub(super) fn env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty())
-}
-
-/// The home directory. A machine without one reads as `/`.
-pub(super) fn home() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
-}
+use crate::loader::hub::{default_hubs, env, home, ModelSearch};
 
 /// The working directory, which every relative path resolves against.
 pub fn working_dir() -> Result<PathBuf, CommandError> {
@@ -67,30 +58,30 @@ pub fn models_dir(config: &MotionConfig, cwd: &Path) -> PathBuf {
 }
 
 /// The Hugging Face hub caches that can hold a model, in the skill's
-/// order: the model folder, `$HF_HUB_CACHE`, then `$HF_HOME/hub` (else
-/// `$XDG_CACHE_HOME/huggingface/hub`, else `~/.cache/huggingface/hub`).
+/// order: the model folder, then [`default_hubs`].
 pub fn hub_caches(config: &MotionConfig, cwd: &Path) -> Vec<PathBuf> {
-    let hf_home = env("HF_HOME").map_or_else(
-        || {
-            env("XDG_CACHE_HOME")
-                .map_or_else(|| home().join(".cache"), PathBuf::from)
-                .join("huggingface")
-        },
-        PathBuf::from,
-    );
-    let mut out: Vec<PathBuf> = Vec::new();
-    let candidates = [
-        Some(models_dir(config, cwd)),
-        env("HF_HUB_CACHE").map(PathBuf::from),
-        Some(hf_home.join("hub")),
-    ];
-    for dir in candidates.into_iter().flatten() {
-        let dir = resolve(cwd, &dir);
+    let mut out = vec![models_dir(config, cwd)];
+    for dir in default_hubs(cwd) {
         if !out.contains(&dir) {
             out.push(dir);
         }
     }
     out
+}
+
+/// Where the narration commands look for models: `$BOOSTR_MODELS_DIR`,
+/// then the skill's model folder, by name, then [`hub_caches`]. A
+/// download goes into the model folder.
+pub fn model_search(config: &MotionConfig, cwd: &Path) -> ModelSearch {
+    let mut roots: Vec<PathBuf> = env("BOOSTR_MODELS_DIR")
+        .map(|d| resolve(cwd, Path::new(&d)))
+        .into_iter()
+        .collect();
+    let folder = models_dir(config, cwd);
+    if !roots.contains(&folder) {
+        roots.push(folder);
+    }
+    ModelSearch::new(roots, hub_caches(config, cwd), cwd)
 }
 
 /// VoxCPM2's take cache, shared with the skill:

@@ -25,6 +25,23 @@ use blazr::engine::Scheduler;
 #[cfg(feature = "audio")]
 use blazr::server::handlers::{AppState, ServerRuntime};
 
+/// Whether the Hugging Face hub is in reach: `HF_HUB_OFFLINE` unset, and
+/// huggingface.co answers on port 443 within 5 s. A test that downloads
+/// skips with a notice otherwise.
+pub fn hub_online() -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    if std::env::var_os("HF_HUB_OFFLINE").is_some_and(|v| !v.is_empty() && v != "0") {
+        return false;
+    }
+    ("huggingface.co", 443)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|addr| {
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).is_ok()
+        })
+}
+
 /// Resolve a model fixture: `$<specific_var>`, else `$BOOSTR_MODELS_DIR/<relative>`
 /// (pass `relative = ""` when the specific var's fallback is the models root
 /// itself). Returns `None` when neither is set or the resolved path is absent

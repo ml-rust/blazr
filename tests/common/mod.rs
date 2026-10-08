@@ -9,7 +9,10 @@
 //! there. The helpers ARE used — just not all of them by every crate.
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "audio")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "audio")]
 use std::sync::Arc;
 
 use axum::body::Body;

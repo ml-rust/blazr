@@ -16,53 +16,25 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use boostr::model::audio::kokoro::{load_kokoro_v2, KokoroPhonemeVocab};
-use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
-use boostr::Runtime;
-use voxr::kokoro::{KokoroEngine, KokoroG2pModels, VoiceResolver};
+use voxr::kokoro::KokoroEngine;
 use voxr::{default_kokoro_voices, TtsBundle};
 
 /// Builds a Kokoro engine from `path`'s `config.json` + weights and wraps it
 /// in a scaffolding bundle. Kokoro ships the vocab inlined in `config.json`
-/// under a `"vocab"` key; a separate `vocab.json` at `vocab_path` takes
+/// under a `"vocab"` key; a separate `vocab.json` beside it takes
 /// precedence when it exists (custom variants).
-pub(super) fn load_kokoro(path: &Path, config_path: &Path, vocab_path: &Path) -> Result<TtsBundle> {
-    let device = Arc::new(CpuDevice::new());
-    let client = Arc::new(CpuRuntime::default_client(&device));
-
-    let model = load_kokoro_v2::<CpuRuntime, _>(client.as_ref(), path, device.as_ref())
-        .map_err(|e| anyhow!("loading kokoro weights from {}: {e}", path.display()))?;
-    let vocab_source = if vocab_path.exists() {
-        vocab_path
-    } else {
-        config_path
-    };
-    let vocab = KokoroPhonemeVocab::from_json_file(vocab_source)
-        .map_err(|e| anyhow!("loading vocab from {}: {e}", vocab_source.display()))?;
-
-    // Voice resolver: prefer `{model_dir}/voices/`, then fall back to the
-    // system defaults (env var / bundled assets) for unknown ids.
-    let voices_dir = path.join("voices");
-    let resolver = if voices_dir.is_dir() {
-        VoiceResolver::new().with_asset_dir(&voices_dir)
-    } else {
-        VoiceResolver::new()
-    };
-
-    let g2p = KokoroG2pModels::resolve(path, None, None)
-        .and_then(|models| models.load())
-        .map_err(|e| anyhow!("building Kokoro G2P: {e}"))?;
-    let engine = KokoroEngine {
-        model,
-        vocab,
-        resolver,
-        client,
-        device,
-        g2p,
-    };
+pub(super) fn load_kokoro(path: &Path) -> Result<TtsBundle> {
+    let engine = load_kokoro_engine(path)?;
     let sample_rate = engine.sample_rate();
-
     Ok(TtsBundle::scaffolding(default_kokoro_voices(), sample_rate).with_engine(Arc::new(engine)))
+}
+
+/// Builds a Kokoro engine from `path` on the CPU: the weights, the phoneme
+/// vocab, the voices under `voices/` (then the bundled defaults), and the
+/// G2P models under `g2p/`.
+pub fn load_kokoro_engine(path: &Path) -> Result<KokoroEngine> {
+    KokoroEngine::from_dir(path, None)
+        .map_err(|e| anyhow!("loading Kokoro from {}: {e}", path.display()))
 }
 
 #[cfg(test)]

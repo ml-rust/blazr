@@ -13,6 +13,8 @@ mod disaggregated;
 mod disaggregated_forward;
 mod info;
 mod list;
+#[cfg(feature = "audio")]
+mod narration;
 mod ps;
 mod pull;
 mod run;
@@ -34,6 +36,8 @@ pub use convert::convert;
 pub use disaggregated::{run_disagg_decode_worker, run_disagg_prefill_worker, run_disagg_router};
 pub use info::info;
 pub use list::list;
+#[cfg(feature = "audio")]
+pub use narration::{speak, transcribe, SpeakArgs, TranscribeArgs};
 pub use ps::ps;
 pub use pull::pull;
 pub use run::run;

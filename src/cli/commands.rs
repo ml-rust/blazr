@@ -378,6 +378,19 @@ pub enum Commands {
         port: u16,
     },
 
+    /// Narration from a script: the voiceover WAV, its script, its phrase
+    /// spans, and every phrase heard back with Whisper. Exits 1 when a
+    /// problem remains, 2 on a bad input.
+    #[cfg(feature = "audio")]
+    #[command(allow_negative_numbers = true)]
+    Speak(super::narration::SpeakArgs),
+
+    /// Word timings for narration from a local Whisper model: one words
+    /// file per narration, and the video timeline from a manifest. Exits 2
+    /// on a bad input.
+    #[cfg(feature = "audio")]
+    Transcribe(super::narration::TranscribeArgs),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for

@@ -4,18 +4,36 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use blazr::cli::{Cli, Commands};
 
+/// Whether `command` logs to standard error: the narration commands print
+/// their report on standard output.
+fn logs_to_stderr(command: &Commands) -> bool {
+    #[cfg(feature = "audio")]
+    if matches!(command, Commands::Speak(_) | Commands::Transcribe(_)) {
+        return true;
+    }
+    let _ = command;
+    false
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "blazr=info,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let cli = Cli::parse();
+
+    // Initialize logging. The narration commands keep standard output for
+    // their report, so their logs go to standard error.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "blazr=info,tower_http=debug".into());
+    if logs_to_stderr(&cli.command) {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     match cli.command {
         Commands::Run {
@@ -219,6 +237,10 @@ async fn main() -> Result<()> {
                 &mut std::io::stdout(),
             );
         }
+        #[cfg(feature = "audio")]
+        Commands::Speak(args) => std::process::exit(blazr::cli::speak(&args)),
+        #[cfg(feature = "audio")]
+        Commands::Transcribe(args) => std::process::exit(blazr::cli::transcribe(&args)),
         Commands::Decode { model: _, input: _ } => {
             eprintln!("Decode command not yet implemented");
         }

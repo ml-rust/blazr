@@ -51,7 +51,6 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P, synth: VoxCpm2SynthOptions) ->
     }
 
     let config_path = path.join("config.json");
-    let vocab_path = path.join("vocab.json");
 
     // No config.json: a lone VoxCPM2 GGUF still loads, since compressr
     // embeds everything the engine needs. Anything else falls back to the
@@ -79,7 +78,7 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P, synth: VoxCpm2SynthOptions) ->
         return load_vits_from_dir(path)
             .with_context(|| format!("loading VITS model from {}", path.display()));
     }
-    load_kokoro(path, &config_path, &vocab_path)
+    load_kokoro(path)
 }
 
 /// Whether `config.json` is a VoxCPM2 config: it carries the DiT sub-model's

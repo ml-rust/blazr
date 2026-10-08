@@ -11,3 +11,5 @@ mod voxcpm;
 
 pub use args::parse_tts_model_arg;
 pub use dispatch::load_tts_from_dir;
+pub use kokoro::load_kokoro_engine;
+pub use voxcpm::{voxcpm2_source, voxcpm2_source_at, Voxcpm2Source};

@@ -77,6 +77,17 @@ fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(single_adapter_file(&adapters_dir)?))
 }
 
+/// Where a VoxCPM2 engine loads from: the weights, the separate AudioVAE,
+/// the voices directory and the one LoRA adapter.
+pub struct Voxcpm2Source {
+    weights: VoxCpm2Weights,
+    audiovae: Option<PathBuf>,
+    voices_dir: Option<PathBuf>,
+    adapter: Option<PathBuf>,
+    /// The directory or file, for messages.
+    origin: PathBuf,
+}
+
 /// The AudioVAE file is looked for and passed when present; the engine
 /// decides — an embedded copy wins, and a bundle with neither is refused by
 /// the loader with an error naming both ways to supply it.
@@ -89,11 +100,7 @@ fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
 /// model for its lifetime, chosen at load time, not per request. Serving
 /// several adapters means several `--tts-model NAME=DIR` bundles, each with
 /// its own `adapters/` directory.
-pub(super) fn load_voxcpm2(
-    dir: &Path,
-    config_path: Option<&Path>,
-    synth: VoxCpm2SynthOptions,
-) -> Result<TtsBundle> {
+pub fn voxcpm2_source(dir: &Path, config_path: Option<&Path>) -> Result<Voxcpm2Source> {
     let weights = if let Some(tcf) = single_file_with_ext(dir, "tcf")? {
         let config = config_path.ok_or_else(|| {
             anyhow!(
@@ -118,68 +125,124 @@ pub(super) fn load_voxcpm2(
         .iter()
         .map(|name| dir.join(name))
         .find(|p| p.is_file());
-    let voices_dir = dir.join("voices");
     // `Some` only when `voices/` actually exists: `VoxCpm2Engine::load`
     // treats `None` and a missing/empty directory identically (zero
     // encoded voices, zero-shot still available), so this guard is a
     // clarity choice, not a correctness one.
-    let voices_dir = voices_dir.is_dir().then_some(voices_dir.as_path());
+    let voices_dir = Some(dir.join("voices")).filter(|d| d.is_dir());
     let adapter = discover_adapter(dir)?;
-
-    // The AudioVAE decoder runs in F16 on CUDA: every decoder kernel has a
-    // half variant, the transposed convolutions fold from an F32 product,
-    // and the output stays within the F32 decoder's tolerance while the
-    // decoder's weights take half the memory. The CPU backend keeps the
-    // checkpoint's F32.
-    #[cfg(feature = "cuda")]
-    let vae_decoder_dtype = Some(boostr::DType::F16);
-    #[cfg(not(feature = "cuda"))]
-    let vae_decoder_dtype = None;
-
-    let load_options = VoxCpm2LoadOptions {
-        dtype: None,
-        vae_decoder_dtype,
-        synth,
+    Ok(Voxcpm2Source {
+        weights,
+        audiovae,
+        voices_dir,
         adapter,
-    };
+        origin: dir.to_path_buf(),
+    })
+}
 
-    #[cfg(feature = "cuda")]
-    let engine: Arc<dyn voxr::TtsEngine> = {
-        use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
-        use boostr::Runtime;
-        let device = CudaDevice::new(0);
-        let client = Arc::new(CudaRuntime::default_client(&device));
-        let engine = VoxCpm2Engine::<CudaRuntime>::load(
-            &weights,
-            audiovae.as_deref(),
-            voices_dir,
-            &device,
-            client,
-            load_options,
-        )
-        .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?;
-        log_adapter_report(dir, engine.adapter());
-        Arc::new(engine)
-    };
-    #[cfg(not(feature = "cuda"))]
-    let engine: Arc<dyn voxr::TtsEngine> = {
+/// A VoxCPM2 checkpoint at `path`: a directory as [`voxcpm2_source`]
+/// reads it, or a single `.gguf` file that embeds its config, tokenizer
+/// and AudioVAE.
+pub fn voxcpm2_source_at(path: &Path) -> Result<Voxcpm2Source> {
+    if path.is_file() {
+        return Ok(Voxcpm2Source {
+            weights: VoxCpm2Weights::Gguf {
+                path: path.to_path_buf(),
+                config: None,
+            },
+            audiovae: None,
+            voices_dir: None,
+            adapter: None,
+            origin: path.to_path_buf(),
+        });
+    }
+    let config = path.join("config.json");
+    voxcpm2_source(path, config.is_file().then_some(config.as_path()))
+}
+
+impl Voxcpm2Source {
+    /// The load options: the AudioVAE decoder in F16 on CUDA, the
+    /// checkpoint's own dtype elsewhere, and this source's adapter.
+    fn options(&self, synth: VoxCpm2SynthOptions, cuda: bool) -> VoxCpm2LoadOptions {
+        // The AudioVAE decoder runs in F16 on CUDA: every decoder kernel has a
+        // half variant, the transposed convolutions fold from an F32 product,
+        // and the output stays within the F32 decoder's tolerance while the
+        // decoder's weights take half the memory. The CPU backend keeps the
+        // checkpoint's F32.
+        #[cfg(feature = "cuda")]
+        let vae_decoder_dtype = cuda.then_some(boostr::DType::F16);
+        #[cfg(not(feature = "cuda"))]
+        let vae_decoder_dtype = {
+            let _ = cuda;
+            None
+        };
+        VoxCpm2LoadOptions {
+            dtype: None,
+            vae_decoder_dtype,
+            synth,
+            adapter: self.adapter.clone(),
+        }
+    }
+
+    /// Loads the engine on the CPU.
+    pub fn load_cpu(
+        &self,
+        synth: VoxCpm2SynthOptions,
+    ) -> Result<VoxCpm2Engine<boostr::runtime::cpu::CpuRuntime>> {
         use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
         use boostr::Runtime;
         let device = CpuDevice::new();
         let client = Arc::new(CpuRuntime::default_client(&device));
         let engine = VoxCpm2Engine::<CpuRuntime>::load(
-            &weights,
-            audiovae.as_deref(),
-            voices_dir,
+            &self.weights,
+            self.audiovae.as_deref(),
+            self.voices_dir.as_deref(),
             &device,
             client,
-            load_options,
+            self.options(synth, false),
         )
-        .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", dir.display()))?;
-        log_adapter_report(dir, engine.adapter());
-        Arc::new(engine)
-    };
+        .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", self.origin.display()))?;
+        log_adapter_report(&self.origin, engine.adapter());
+        Ok(engine)
+    }
 
+    /// Loads the engine on CUDA device `index`.
+    #[cfg(feature = "cuda")]
+    pub fn load_cuda(
+        &self,
+        synth: VoxCpm2SynthOptions,
+        index: usize,
+    ) -> Result<VoxCpm2Engine<boostr::runtime::cuda::CudaRuntime>> {
+        use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
+        use boostr::Runtime;
+        let device = CudaDevice::new(index);
+        let client = Arc::new(CudaRuntime::default_client(&device));
+        let engine = VoxCpm2Engine::<CudaRuntime>::load(
+            &self.weights,
+            self.audiovae.as_deref(),
+            self.voices_dir.as_deref(),
+            &device,
+            client,
+            self.options(synth, true),
+        )
+        .map_err(|e| anyhow!("loading VoxCPM2 from {}: {e}", self.origin.display()))?;
+        log_adapter_report(&self.origin, engine.adapter());
+        Ok(engine)
+    }
+}
+
+/// The VoxCPM2 bundle a `--tts-model` directory serves: the engine on CUDA
+/// device 0 when this binary is built with CUDA, else on the CPU.
+pub(super) fn load_voxcpm2(
+    dir: &Path,
+    config_path: Option<&Path>,
+    synth: VoxCpm2SynthOptions,
+) -> Result<TtsBundle> {
+    let source = voxcpm2_source(dir, config_path)?;
+    #[cfg(feature = "cuda")]
+    let engine: Arc<dyn voxr::TtsEngine> = Arc::new(source.load_cuda(synth, 0)?);
+    #[cfg(not(feature = "cuda"))]
+    let engine: Arc<dyn voxr::TtsEngine> = Arc::new(source.load_cpu(synth)?);
     let voices = engine.voices();
     let sample_rate = engine.sample_rate();
     Ok(TtsBundle::scaffolding(voices, sample_rate).with_engine(engine))

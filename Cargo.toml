@@ -13,15 +13,16 @@ categories = ["science", "web-programming"]
 [features]
 default = ["f16"]
 f16 = ["boostr/f16"]
-cuda = ["boostr/cuda"]
+cuda = ["boostr/cuda", "voxr-narrate?/cuda"]
 nccl = ["boostr/nccl"]
 distributed = ["boostr/distributed", "dep:nexar"]
 
-# Speech: text-to-speech synthesis and audio transcription endpoints, plus the
-# TTS/Whisper loaders they need. Off by default — a text-only inference server
-# has no use for the audio pipelines or their four codec decoders. The Whisper
-# weights and mel front end come from boostr; the bundle (tokenizer, generation
-# config) and the TTS engines come from voxr.
+# Speech: text-to-speech synthesis and audio transcription endpoints, the
+# `speak` and `transcribe` commands, plus the TTS/Whisper loaders they need.
+# Off by default — a text-only inference server has no use for the audio
+# pipelines or their four codec decoders. The Whisper weights and mel front
+# end come from boostr; the bundle (tokenizer, generation config) and the TTS
+# engines come from voxr; the narration logic comes from voxr-narrate.
 audio = [
   "dep:voxr",
   "voxr/kokoro",
@@ -29,6 +30,12 @@ audio = [
   "voxr/vits",
   "voxr/whisper",
   "boostr/whisper",
+  "dep:voxr-narrate",
+  "voxr-narrate/whisper",
+  "voxr-narrate/kokoro",
+  "voxr-narrate/vits",
+  "voxr-narrate/voxcpm",
+  "voxr-narrate/stretch",
 ]
 
 [dependencies]
@@ -36,6 +43,9 @@ audio = [
 boostr = { version = "0.3" }
 # Sample-level audio: codecs, resampling, WAV encoding, TTS engines.
 voxr = { version = "0.1", optional = true }
+# Narration: `speak` and `transcribe`, the take loop, the speech check and
+# every line, file and exit code they hold.
+voxr-narrate = { version = "0.1", optional = true }
 
 # Tokenization
 splintr = { version = "0.20", features = [
@@ -133,6 +143,8 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+# Scratch directories for the narration command tests.
+tempfile = "3"
 # `ServiceExt::oneshot`, for driving the axum router in-process against a
 # built request instead of a live socket (server route integration tests).
 tower = { version = "0.5", features = ["util"] }

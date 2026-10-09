@@ -67,7 +67,7 @@ pub struct WorkloadProfile {
 /// Hardware context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareContext {
-    /// GPU model (e.g., "RTX 4090", "A100 80GB")
+    /// GPU model name, as the CUDA driver reports it
     pub gpu: Option<String>,
     /// CPU model
     pub cpu: Option<String>,

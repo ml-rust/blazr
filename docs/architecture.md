@@ -206,7 +206,7 @@ checkpoint_dir/
 
 ## Tokenization
 
-blazr uses [splintr](https://github.com/farhan/splintr) for tokenization:
+blazr uses [splintr](https://github.com/ml-rust/splintr) for tokenization:
 
 - BPE tokenizer compatible with Llama 3 vocabulary
 - ~128k tokens

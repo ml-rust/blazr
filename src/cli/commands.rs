@@ -69,11 +69,11 @@ pub enum Commands {
         api_key_file: Option<std::path::PathBuf>,
 
         /// TLS certificate file (PEM format) — enables HTTPS
-        #[arg(long)]
+        #[arg(long, requires = "tls_key")]
         tls_cert: Option<std::path::PathBuf>,
 
         /// TLS private key file (PEM format)
-        #[arg(long)]
+        #[arg(long, requires = "tls_cert")]
         tls_key: Option<std::path::PathBuf>,
 
         /// Register a standalone vision embedder (SigLIP/CLIP) for `/v1/embeddings`
@@ -148,13 +148,11 @@ pub enum Commands {
         )]
         tts_continuous_capacity: usize,
 
-        /// Directory containing TTS voice files (`.safetensors`, `.pt`, or
-        /// `.pth`). Overrides the bundled `assets/kokoro_voices/` that ships
-        /// with blazr. Also overridable via `$BLAZR_VOICE_DIR`. The `--voice`
-        /// CLI flags on synthesis requests and the OpenAI-compatible `voice`
-        /// field in `/v1/audio/speech` resolve against this directory. Bare
-        /// voice IDs (e.g. `af_alloy`) are looked up here; absolute paths
-        /// bypass the resolver.
+        /// Directory of Kokoro voice files (`.safetensors`, `.pt`, or
+        /// `.pth`), searched before the model directory's `voices/`. Falls
+        /// back to `$BLAZR_VOICE_DIR`. A bare `voice` id in
+        /// `/v1/audio/speech` (e.g. `af_alloy`) is looked up here; a path
+        /// is read as given.
         #[arg(long = "voice-dir", value_name = "DIR")]
         voice_dir: Option<std::path::PathBuf>,
 
@@ -309,7 +307,7 @@ pub enum Commands {
         #[arg(long, short)]
         quantization: Option<String>,
 
-        /// Verbose output
+        /// Debug-level compressr logs (a `RUST_LOG` already set wins)
         #[arg(long, short)]
         verbose: bool,
     },
@@ -380,20 +378,22 @@ pub enum Commands {
 
     /// Narration from a script: the voiceover WAV, its script, its phrase
     /// spans, and every phrase heard back with Whisper. Exits 1 when a
-    /// problem remains, 2 on a bad input.
+    /// problem remains or the run fails, 2 on a bad input, 3 on a model
+    /// that blazr does not run.
     #[cfg(feature = "audio")]
     Speak(super::narration::SpeakArgs),
 
     /// Word timings for narration from a local Whisper model: one words
-    /// file per narration, and the video timeline from a manifest. Exits 2
-    /// on a bad input.
+    /// file per narration, and the video timeline from a manifest. Exits 1
+    /// when the run fails, 2 on a bad input.
     #[cfg(feature = "audio")]
     Transcribe(super::narration::TranscribeArgs),
 
     /// The motion-video skill's developer sound review: sharpness, hiss,
     /// tail and true peak of every rendered sound, and a CLAP ranking of the
     /// base variants against their `says` texts (`--no-model` skips it).
-    /// Exits 1 when a sound fails a limit, 2 with no directory.
+    /// Exits 1 when a sound fails a limit or the run fails, 2 with no
+    /// directory.
     #[cfg(feature = "audio")]
     SoundReview(super::narration::SoundReviewArgs),
 

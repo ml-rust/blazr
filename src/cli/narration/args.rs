@@ -1,10 +1,11 @@
 //! `blazr speak` and `blazr transcribe` arguments: read as the narration
 //! skill's `parseArgs` reads them ([`parse_skill_args`]), so the skill
 //! hands its own arguments on unchanged. Each command takes every flag of
-//! the skill's CLI, and leaves the ones it does not read.
+//! the skill's CLI, and ignores the ones it does not read.
 
 use clap::Args;
-use voxr_narrate::{FlagKind, SKILL_FLAGS};
+#[cfg(test)]
+use voxr_narrate::SKILL_FLAGS;
 
 /// `blazr speak` arguments, as given.
 #[derive(Args, Debug, Clone)]
@@ -86,30 +87,24 @@ const TRANSCRIBE_FLAGS: &[(&str, &str)] = &[
     ("--json", "Print one JSON object on standard output: every words file. Every other line goes to standard error."),
 ];
 
-/// A command's help: its usage, the flags it reads, and the skill's other
-/// flags it takes and leaves.
+/// The help line for the skill's flags a command does not read.
+const IGNORED_FLAGS: &str = "The motion-video skill's other global flags are accepted and ignored.";
+
+/// A command's help: its usage and the flags it reads, in one column
+/// as wide as the longest flag.
 fn help(usage: &str, about: &str, flags: &[(&str, &str)]) -> String {
+    const HELP_FLAG: &str = "-h, --help";
+    let width = flags
+        .iter()
+        .map(|(name, _)| name.len())
+        .chain([HELP_FLAG.len()])
+        .max()
+        .unwrap_or(HELP_FLAG.len());
     let mut out = format!("{about}\n\nUsage: {usage}\n\nOptions:\n");
-    for (name, what) in flags {
-        out.push_str(&format!("  {name:<20} {what}\n"));
+    for (name, what) in flags.iter().chain([&(HELP_FLAG, "Print this help.")]) {
+        out.push_str(&format!("  {name:<width$}  {what}\n"));
     }
-    out.push_str("  -h, --help           Print this help.\n");
-    let read: Vec<&str> = flags
-        .iter()
-        .filter_map(|(f, _)| f.split(' ').next())
-        .collect();
-    let left: Vec<String> = SKILL_FLAGS
-        .iter()
-        .filter(|f| f.skill && !read.contains(&f.name) && f.name != "-h" && f.name != "--help")
-        .map(|f| match f.kind {
-            FlagKind::Switch => f.name.to_string(),
-            _ => format!("{} V", f.name),
-        })
-        .collect();
-    out.push_str(&format!(
-        "\nTaken and left, as the narration skill takes them for its other commands:\n  {}",
-        left.join(", ")
-    ));
+    out.push_str(&format!("\n{IGNORED_FLAGS}"));
     out
 }
 
@@ -117,7 +112,7 @@ fn help(usage: &str, about: &str, flags: &[(&str, &str)]) -> String {
 pub fn speak_help() -> String {
     help(
         "blazr speak [TEXT|FILE]... [OPTIONS]",
-        "Narration from a script: the voiceover WAV, its script, its phrase spans, and every phrase heard back with Whisper. The script is a text file, or the words. A script with times per line places each line at its time. Exits 1 when a problem remains, 2 on a bad input, 3 on a model that runs elsewhere.",
+        "Narration from a script: the voiceover WAV, its script, its phrase spans, and every phrase heard back with Whisper. The script is a text file, or the words. A script with times per line places each line at its time. Exits 0 when every phrase is heard as written, 1 when a problem remains or the run fails, 2 on a bad input, 3 on a model that blazr does not run.",
         SPEAK_FLAGS,
     )
 }
@@ -126,7 +121,7 @@ pub fn speak_help() -> String {
 pub fn transcribe_help() -> String {
     help(
         "blazr transcribe [FILE]... [OPTIONS]",
-        "Word timings for narration from a local Whisper model: one words file per narration, and the video timeline from a manifest. With no FILE: the manifest's voiceover and every scene audio, on the video clock. Exits 2 on a bad input.",
+        "Word timings for narration from a local Whisper model: one words file per narration, and the video timeline from a manifest. With no FILE: the manifest's voiceover and every scene audio, on the video clock. Exits 0 when every narration is read, 1 when the run fails, 2 on a bad input.",
         TRANSCRIBE_FLAGS,
     )
 }
@@ -144,9 +139,15 @@ mod tests {
                 "{flag} is in the help, not in the parser"
             );
         }
-        let text = speak_help();
-        assert!(text.contains("  --voice V            A Kokoro voice"));
-        assert!(text.contains("--manifest V, --scene V, --draft,"));
-        assert!(!transcribe_help().contains(" --manifest V,"));
+        let speak = speak_help();
+        let transcribe = transcribe_help();
+        for text in [&speak, &transcribe] {
+            assert!(text.ends_with(IGNORED_FLAGS), "{text}");
+            assert!(!text.contains("--countries"), "{text}");
+        }
+        assert!(speak.contains("  --voice V               A Kokoro voice"));
+        assert!(speak.contains("  --engine kokoro|voxcpm  The engine."));
+        assert!(speak.contains("  -h, --help              Print this help."));
+        assert!(transcribe.contains("  --model M        The recognizer"));
     }
 }

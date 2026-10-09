@@ -45,7 +45,7 @@ pub fn voxcpm_readiness(gpu: Option<(String, f64)>) -> Readiness {
         let why = if cfg!(feature = "cuda") {
             "needs an NVIDIA GPU with 8 GB of memory (none found)".to_string()
         } else {
-            "needs an NVIDIA GPU with 8 GB of memory, and this blazr is built without CUDA (rebuild it with --features audio,cuda)".to_string()
+            "needs an NVIDIA GPU with 8 GB of memory, and this blazr is built without CUDA (use the CUDA build of blazr, or build with --features audio,cuda)".to_string()
         };
         return Readiness { ok: false, why };
     };

@@ -3,9 +3,9 @@
 //! own source, is taken by both commands, and a value flag given last
 //! reads as the skill reads it.
 //!
-//! The skill's source is `$NARRATION_JS_DIR/../video.mjs`, else
-//! `~/.claude/skills/motion-video/scripts/video.mjs`. Without it the
-//! source check skips with a notice.
+//! The skill's source is `$NARRATION_JS_DIR/../video.mjs`. With
+//! `NARRATION_JS_DIR` unset, the source check skips with a notice. Set,
+//! a missing `video.mjs` fails it.
 
 use std::path::PathBuf;
 
@@ -13,18 +13,17 @@ use voxr_narrate::{FlagKind, SKILL_FLAGS};
 
 use super::sandbox::Sandbox;
 
-/// The skill's `video.mjs`, when it is on disk.
+/// The skill's `video.mjs` beside `$NARRATION_JS_DIR`, `None` when the
+/// variable is unset.
 fn skill_source() -> Option<String> {
-    let from_env = std::env::var_os("NARRATION_JS_DIR")
-        .filter(|d| !d.is_empty())
-        .map(|d| PathBuf::from(d).join("..").join("video.mjs"));
-    let from_home = std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".claude/skills/motion-video/scripts/video.mjs"));
-    from_env
-        .into_iter()
-        .chain(from_home)
-        .find(|p| p.is_file())
-        .and_then(|p| std::fs::read_to_string(p).ok())
+    let dir = std::env::var_os("NARRATION_JS_DIR").filter(|d| !d.is_empty())?;
+    let path = PathBuf::from(dir).join("..").join("video.mjs");
+    Some(std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e}. Set NARRATION_JS_DIR to the skill's scripts/lib.",
+            path.display()
+        )
+    }))
 }
 
 /// Every flag `parseArgs` names, with how it reads its value, from the

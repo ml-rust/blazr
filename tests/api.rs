@@ -8,7 +8,7 @@
 //! **Live server tests** — require env vars, test real API endpoints.
 //! Set these environment variables to enable:
 //!   - `BLAZR_TEST_SERVER` — server URL (e.g. `http://localhost:8080`)
-//!   - `BLAZR_TEST_MODEL`  — model path as loaded on that server (e.g. `/home/user/models/llama-3.2-1b`)
+//!   - `BLAZR_TEST_MODEL`  — model path as loaded on that server (e.g. `models/llama-3.2-1b`)
 //!
 //! Run: `BLAZR_TEST_SERVER=http://localhost:8080 BLAZR_TEST_MODEL=/path/to/model cargo test -- --ignored`
 

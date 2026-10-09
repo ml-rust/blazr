@@ -21,6 +21,7 @@ use super::config_watch;
 use super::handlers::{self, AppState};
 use super::metrics;
 use super::routes::api_routes;
+use super::tls::build_tls_config;
 
 #[cfg(feature = "cuda")]
 type ServerRuntime = boostr::CudaRuntime;
@@ -288,10 +289,10 @@ pub async fn start_with_batch(
         .with_state(state);
 
     let addr = config.addr();
-    let tls_config = if config.tls_enabled() {
-        Some(build_tls_config(&config)?)
-    } else {
-        None
+    let tls_config = match (&config.tls_cert, &config.tls_key) {
+        (Some(cert), Some(key)) => Some(build_tls_config(cert, key)?),
+        (None, None) => None,
+        _ => anyhow::bail!("HTTPS needs both a TLS certificate and a TLS private key"),
     };
 
     let listener = TcpListener::bind(&addr).await?;
@@ -304,13 +305,13 @@ pub async fn start_with_batch(
     log_startup_info(scheme, &addr, &config, &api_keys);
 
     // Graceful shutdown on SIGTERM/SIGINT
-    let shutdown = async {
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| anyhow::anyhow!("Failed to install the SIGTERM handler: {e}"))?;
+    let shutdown = async move {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
         {
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("failed to install SIGTERM handler");
             tokio::select! {
                 _ = ctrl_c => tracing::info!("Received SIGINT, shutting down..."),
                 _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down..."),
@@ -367,28 +368,6 @@ pub async fn start_with_batch(
 
     tracing::info!("Server shut down gracefully");
     Ok(())
-}
-
-fn build_tls_config(config: &ServerConfig) -> Result<rustls::ServerConfig> {
-    let cert_path = config.tls_cert.as_ref().unwrap();
-    let key_path = config.tls_key.as_ref().unwrap();
-
-    let cert_pem = std::fs::read(cert_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read TLS cert {:?}: {}", cert_path, e))?;
-    let key_pem = std::fs::read(key_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read TLS key {:?}: {}", key_path, e))?;
-
-    let certs = rustls_pemfile::certs(&mut &cert_pem[..])
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse TLS certificates: {}", e))?;
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
-        .map_err(|e| anyhow::anyhow!("Failed to parse TLS private key: {}", e))?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in {:?}", key_path))?;
-
-    rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| anyhow::anyhow!("Failed to build TLS config: {}", e))
 }
 
 fn log_startup_info(scheme: &str, addr: &str, config: &ServerConfig, api_keys: &[String]) {

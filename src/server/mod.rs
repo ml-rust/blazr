@@ -38,6 +38,7 @@ mod routes;
 pub mod slo;
 mod startup;
 mod streaming;
+mod tls;
 mod tool_calls;
 mod tools;
 

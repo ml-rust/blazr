@@ -156,6 +156,7 @@ pub async fn decode_image(url: &str) -> Result<DecodedImage, String> {
         decode_base64_image(mime_type, data)
     } else if url.starts_with("http://") || url.starts_with("https://") {
         // Remote URL
+        crate::tls::install_crypto_provider();
         let response = reqwest::get(url)
             .await
             .map_err(|e| format!("Failed to fetch image from {}: {}", url, e))?;

@@ -35,6 +35,7 @@ pub mod engine;
 pub mod loader;
 pub mod model;
 pub mod server;
+pub mod tls;
 pub mod tokenizer;
 
 // Re-export key types

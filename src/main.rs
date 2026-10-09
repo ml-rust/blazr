@@ -35,6 +35,7 @@ fn narration_argv(command: &str) -> Vec<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    blazr::tls::install_crypto_provider();
     let cli = Cli::parse();
 
     // Initialize logging. The narration commands keep standard output for

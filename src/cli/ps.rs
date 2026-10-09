@@ -7,6 +7,7 @@ use colored::Colorize;
 pub async fn ps(server: String) -> Result<()> {
     let url = format!("{}/api/ps", server.trim_end_matches('/'));
 
+    crate::tls::install_crypto_provider();
     let client = reqwest::Client::new();
     let response = match client.get(&url).send().await {
         Ok(r) => r,

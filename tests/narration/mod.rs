@@ -5,6 +5,7 @@ mod flags;
 mod kokoro_g2p;
 mod models;
 mod sandbox;
+mod sound_review;
 mod speak_kokoro;
 mod speak_vits;
 mod speak_voxcpm;

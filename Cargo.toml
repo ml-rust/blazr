@@ -18,7 +18,8 @@ nccl = ["boostr/nccl"]
 distributed = ["boostr/distributed", "dep:nexar"]
 
 # Speech: text-to-speech synthesis and audio transcription endpoints, the
-# `speak` and `transcribe` commands, plus the TTS/Whisper loaders they need.
+# `speak`, `transcribe` and `sound-review` commands, plus the TTS, Whisper
+# and CLAP loaders they need.
 # Off by default — a text-only inference server has no use for the audio
 # pipelines or their four codec decoders. The Whisper weights and mel front
 # end come from boostr; the bundle (tokenizer, generation config) and the TTS
@@ -29,6 +30,7 @@ audio = [
   "voxr/voxcpm",
   "voxr/vits",
   "voxr/whisper",
+  "voxr/clap",
   "boostr/whisper",
   "dep:voxr-narrate",
   "voxr-narrate/whisper",

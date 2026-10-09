@@ -62,21 +62,20 @@ impl Sandbox {
     /// A sandbox whose model folder links `whisper-base`, `whisper-small`
     /// and each of `models` (name, target).
     pub fn new(base: &Path, small: &Path, models: &[(&str, &Path)]) -> Self {
-        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("sandbox: {e}"));
-        let dir = root.path();
-        for sub in ["models", "config/motion-video", "cache", "hf", "project"] {
-            std::fs::create_dir_all(dir.join(sub)).unwrap_or_else(|e| panic!("{e}"));
-        }
-        let link = |name: &str, target: &Path| {
+        let mut all = vec![("whisper-base", base), ("whisper-small", small)];
+        all.extend_from_slice(models);
+        Self::with_models(&all)
+    }
+
+    /// A sandbox whose model folder links each of `models` (name, target).
+    pub fn with_models(models: &[(&str, &Path)]) -> Self {
+        let sb = Self::empty();
+        let dir = sb.root.path();
+        for (name, target) in models {
             std::os::unix::fs::symlink(target, dir.join("models").join(name))
                 .unwrap_or_else(|e| panic!("linking {name}: {e}"));
-        };
-        link("whisper-base", base);
-        link("whisper-small", small);
-        for (name, target) in models {
-            link(name, target);
         }
-        Self { root }
+        sb
     }
 
     /// A sandbox with no model in its model folder.

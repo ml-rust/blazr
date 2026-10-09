@@ -37,7 +37,7 @@ pub use disaggregated::{run_disagg_decode_worker, run_disagg_prefill_worker, run
 pub use info::info;
 pub use list::list;
 #[cfg(feature = "audio")]
-pub use narration::{speak, transcribe, SpeakArgs, TranscribeArgs};
+pub use narration::{sound_review, speak, transcribe, SoundReviewArgs, SpeakArgs, TranscribeArgs};
 pub use ps::ps;
 pub use pull::pull;
 pub use run::run;

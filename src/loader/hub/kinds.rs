@@ -18,6 +18,8 @@ pub enum ModelKind {
     /// Kokoro's G2P models: the spaCy tagger under `tagger/`, the
     /// out-of-vocabulary model under `oov/`.
     KokoroG2p,
+    /// A CLAP audio-text model: its configs, tokenizer and weights.
+    Clap,
 }
 
 impl ModelKind {
@@ -28,10 +30,13 @@ impl ModelKind {
             Self::Vits => "VITS",
             Self::Voxcpm => "VoxCPM2",
             Self::KokoroG2p => "Kokoro G2P",
+            Self::Clap => "CLAP",
         }
     }
 }
 
+/// The CLAP model the sound review ranks with.
+pub const CLAP_ID: &str = "laion/larger_clap_general";
 /// VoxCPM2's Hugging Face id.
 pub const VOXCPM_ID: &str = "openbmb/VoxCPM2";
 /// Kokoro's PyTorch checkpoint, the one voxr loads.
@@ -98,6 +103,11 @@ pub fn missing_file(path: &Path, kind: ModelKind) -> Option<String> {
             let oov = OOV_FILES.map(|f| format!("oov/{f}"));
             tagger.into_iter().chain(oov).find(|f| !has(f))
         }
+        ModelKind::Clap => first(&["config.json", "preprocessor_config.json", "tokenizer.json"])
+            .or_else(|| {
+                (!has("model.safetensors") && !has("pytorch_model.bin"))
+                    .then(|| "model.safetensors".to_string())
+            }),
         ModelKind::Voxcpm => {
             if path.is_file() || any("gguf") {
                 None

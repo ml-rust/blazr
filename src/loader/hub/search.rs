@@ -135,8 +135,9 @@ impl ModelSearch {
                 id: Some(id),
             });
         }
-        // A Kokoro checkpoint's G2P models are found, never passed.
-        let pass = if kind == ModelKind::KokoroG2p {
+        // A Kokoro checkpoint's G2P models and the review's CLAP model are
+        // found, never passed.
+        let pass = if matches!(kind, ModelKind::KokoroG2p | ModelKind::Clap) {
             ""
         } else {
             ", or pass its directory"
@@ -319,6 +320,31 @@ mod tests {
         );
         touch(d, &["one.gguf"]);
         assert_eq!(missing_file(d, ModelKind::Voxcpm), None);
+        // config.json and tokenizer.json are on disk from above.
+        assert_eq!(
+            missing_file(d, ModelKind::Clap).as_deref(),
+            Some("preprocessor_config.json")
+        );
+        touch(d, &["preprocessor_config.json"]);
+        // model.safetensors is on disk from above; the PyTorch weights serve
+        // as well.
+        assert_eq!(missing_file(d, ModelKind::Clap), None);
+        let bin = tmp.path().join("bin");
+        touch(
+            &bin,
+            &[
+                "config.json",
+                "preprocessor_config.json",
+                "tokenizer.json",
+                "pytorch_model.bin",
+            ],
+        );
+        assert_eq!(missing_file(&bin, ModelKind::Clap), None);
+        std::fs::remove_file(bin.join("pytorch_model.bin")).unwrap();
+        assert_eq!(
+            missing_file(&bin, ModelKind::Clap).as_deref(),
+            Some("model.safetensors")
+        );
     }
 
     #[test]

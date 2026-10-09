@@ -8,7 +8,10 @@ use blazr::cli::{Cli, Commands};
 /// their report on standard output.
 fn logs_to_stderr(command: &Commands) -> bool {
     #[cfg(feature = "audio")]
-    if matches!(command, Commands::Speak(_) | Commands::Transcribe(_)) {
+    if matches!(
+        command,
+        Commands::Speak(_) | Commands::Transcribe(_) | Commands::SoundReview(_)
+    ) {
         return true;
     }
     let _ = command;
@@ -257,6 +260,10 @@ async fn main() -> Result<()> {
         #[cfg(feature = "audio")]
         Commands::Transcribe(_) => {
             std::process::exit(blazr::cli::transcribe(&narration_argv("transcribe")))
+        }
+        #[cfg(feature = "audio")]
+        Commands::SoundReview(_) => {
+            std::process::exit(blazr::cli::sound_review(&narration_argv("sound-review")))
         }
         Commands::Decode { model: _, input: _ } => {
             eprintln!("Decode command not yet implemented");

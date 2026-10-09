@@ -390,6 +390,13 @@ pub enum Commands {
     #[cfg(feature = "audio")]
     Transcribe(super::narration::TranscribeArgs),
 
+    /// The motion-video skill's developer sound review: sharpness, hiss,
+    /// tail and true peak of every rendered sound, and a CLAP ranking of the
+    /// base variants against their `says` texts (`--no-model` skips it).
+    /// Exits 1 when a sound fails a limit, 2 with no directory.
+    #[cfg(feature = "audio")]
+    SoundReview(super::narration::SoundReviewArgs),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for

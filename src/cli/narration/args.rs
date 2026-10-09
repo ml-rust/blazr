@@ -36,6 +36,22 @@ pub struct TranscribeArgs {
     pub argv: Vec<String>,
 }
 
+/// `blazr sound-review` arguments, as given: the rendered catalog's
+/// directory and `--no-model`, read as the skill's script reads them.
+#[derive(Args, Debug, Clone)]
+#[command(disable_help_flag = true)]
+pub struct SoundReviewArgs {
+    /// The directory `render-sounds.mjs` wrote, then `--no-model` to skip
+    /// the CLAP ranking.
+    #[arg(
+        value_name = "ARGS",
+        num_args = 0..,
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub argv: Vec<String>,
+}
+
 /// The flags `speak` reads, with what each does.
 const SPEAK_FLAGS: &[(&str, &str)] = &[
     ("--engine kokoro|voxcpm", "The engine. Default: VoxCPM2 with its GPU and checkpoint, else Kokoro."),

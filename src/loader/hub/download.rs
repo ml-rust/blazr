@@ -31,6 +31,7 @@ pub fn wanted(name: &str, kind: ModelKind) -> bool {
             }
             ModelKind::Voxcpm => name == "model.safetensors" || name == "audiovae.pth",
             ModelKind::KokoroG2p => name.starts_with("tagger/") || name.starts_with("oov/"),
+            ModelKind::Clap => name == "model.safetensors" || name == "pytorch_model.bin",
         }
 }
 
@@ -46,12 +47,16 @@ pub fn download(id: &str, kind: ModelKind, hub: &Path) -> Result<PathBuf, String
         .map_err(|e| e.to_string())?;
     let repo = api.model(id.to_string());
     let info = repo.info().map_err(|e| e.to_string())?;
-    let names: Vec<String> = info
+    let mut names: Vec<String> = info
         .siblings
         .into_iter()
         .map(|s| s.rfilename)
         .filter(|n| wanted(n, kind))
         .collect();
+    // A repo with both weights files needs one: the SafeTensors copy.
+    if names.iter().any(|n| n == "model.safetensors") {
+        names.retain(|n| n != "pytorch_model.bin");
+    }
     if names.is_empty() {
         return Err(format!(
             "{id} holds none of the files a {kind:?} model needs"
@@ -119,5 +124,8 @@ mod tests {
         assert!(wanted("tagger/tagger.json", ModelKind::KokoroG2p));
         assert!(wanted("oov/model.safetensors", ModelKind::KokoroG2p));
         assert!(!wanted("README.md", ModelKind::KokoroG2p));
+        assert!(wanted("preprocessor_config.json", ModelKind::Clap));
+        assert!(wanted("pytorch_model.bin", ModelKind::Clap));
+        assert!(!wanted("pytorch_model.bin", ModelKind::Whisper));
     }
 }

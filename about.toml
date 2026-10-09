@@ -1,0 +1,37 @@
+# cargo-about: the licence of every crate compiled into a release binary.
+# Accepted ids match deny.toml's allow list.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "LicenseRef-Llama-3.1-Community",
+]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# splintr's Llama 3 vocabulary ships under the Llama 3.1 Community License,
+# which has no SPDX id. cargo-about drops the text of a LicenseRef licence,
+# so scripts/ci/third_party.sh adds that section itself.
+[splintr-vocab-llama3.clarify]
+license = "LicenseRef-Llama-3.1-Community"
+
+[[splintr-vocab-llama3.clarify.files]]
+path = "LICENSE"
+license = "LicenseRef-Llama-3.1-Community"
+checksum = "bf2eac60b81e5c5f779fc3b4849d3bfacfd63f97f3eb68b44e9c6868c5801712"

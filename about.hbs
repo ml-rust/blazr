@@ -1,0 +1,21 @@
+Third-party licences in the blazr binary
+
+The blazr binary compiles in the crates below. Each section gives a licence's
+full text and the crates under it. The source of every crate is on crates.io
+at https://crates.io/crates/<name>/<version>.
+
+{{#each overview}}
+- {{{name}}}: {{count}} crate{{#if (ne count 1)}}s{{/if}}
+{{/each}}
+{{#each licenses}}
+
+================================================================================
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

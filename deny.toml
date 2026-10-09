@@ -1,0 +1,87 @@
+# cargo-deny config.
+#
+# Run locally: `cargo deny --exclude-dev check`
+# CI gate:     .github/workflows/ci.yml :: audit job
+#
+# Dev-dependencies are excluded in CI. They link tests only, and a finding in
+# a crate no user links is not a release gate.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-apple-darwin" },
+]
+# Every gate, `cuda` and `distributed` included: each one adds dependencies a
+# user can link.
+all-features = true
+
+# ────────────────────────────────────────────────────────────────────────
+# Security advisories. Any RustSec advisory against a dependency, direct or
+# transitive, fails CI. A yanked version fails too.
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+# ────────────────────────────────────────────────────────────────────────
+# Licences: an allow-list. A transitive bump cannot add a stronger
+# obligation for a user without an edit here.
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    # webpki-roots: the Mozilla root store's data licence.
+    "CDLA-Permissive-2.0",
+    # symphonia (through voxr), colored, dynasm. MPL-2.0 is file-level
+    # copyleft: it binds changes to those crates' own files and nothing in a
+    # crate that links them.
+    "MPL-2.0",
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+
+# splintr's Llama 3 vocabulary ships under the Llama 3.1 Community License,
+# which has no SPDX id. A binary that embeds it carries that licence's terms.
+[[licenses.clarify]]
+crate = "splintr-vocab-llama3"
+expression = "LicenseRef-Llama-3.1-Community"
+license-files = [{ path = "LICENSE", hash = 0xbb3fc207 }]
+
+[[licenses.exceptions]]
+crate = "splintr-vocab-llama3"
+allow = ["LicenseRef-Llama-3.1-Community"]
+
+# ────────────────────────────────────────────────────────────────────────
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = [
+    # One rustls crypto provider, ring. A second one makes
+    # `rustls::*Config::builder()` panic at run time.
+    { crate = "aws-lc-rs", reason = "blazr links ring as its only rustls provider" },
+    # No system OpenSSL in the binaries.
+    { crate = "openssl-sys", reason = "TLS goes through rustls" },
+    { crate = "native-tls", reason = "TLS goes through rustls" },
+]
+skip-tree = []
+
+# ────────────────────────────────────────────────────────────────────────
+# crates.io only. A git dependency is one no advisory or yank reaches.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

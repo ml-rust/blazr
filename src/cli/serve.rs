@@ -282,8 +282,8 @@ pub async fn serve(
         (loaded_asr, loaded_tts)
     };
 
-    // Resolve effective voice directory (CLI flag > env var > None; bundled
-    // fallback is handled inside `VoiceResolver` when None is passed).
+    // The voice directory: the CLI flag, else the env var. The model
+    // directory's `voices/` is searched after it.
     let effective_voice_dir =
         voice_dir.or_else(|| std::env::var("BLAZR_VOICE_DIR").ok().map(PathBuf::from));
     if let Some(dir) = &effective_voice_dir {

@@ -64,10 +64,9 @@ pub struct AppState {
     /// Source directory each TTS bundle was loaded from, keyed by model name.
     #[cfg(feature = "audio")]
     pub(super) tts_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
-    /// Directory searched for TTS voice files when the request specifies a
-    /// bare voice ID (e.g. `af_alloy`). Resolved once at startup in this
-    /// priority order: `--voice-dir` CLI flag, `$BLAZR_VOICE_DIR`, bundled
-    /// `assets/kokoro_voices/` shipped with the binary.
+    /// Directory searched first for Kokoro voice files when the request
+    /// names a bare voice ID (e.g. `af_alloy`): `--voice-dir`, else
+    /// `$BLAZR_VOICE_DIR`. The model directory's `voices/` comes after it.
     pub voice_dir: Option<PathBuf>,
     /// `reasoning_format` for chat requests that do not set one.
     pub reasoning_format: ReasoningFormat,
@@ -176,6 +175,12 @@ impl AppState {
     #[cfg(feature = "audio")]
     pub async fn tts_model(&self, model_name: &str) -> Option<Arc<TtsBundle>> {
         self.tts_models.read().await.get(model_name).cloned()
+    }
+
+    /// The directory a TTS model was loaded from, by model name.
+    #[cfg(feature = "audio")]
+    pub async fn tts_path(&self, model_name: &str) -> Option<PathBuf> {
+        self.tts_paths.read().await.get(model_name).cloned()
     }
 
     pub fn with_max_inflight_tokens(mut self, max: usize) -> Self {

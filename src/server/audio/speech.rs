@@ -145,7 +145,17 @@ async fn prologue(
         }
     };
 
-    let voice_id = resolve_voice(state, &bundle, request.voice.as_deref(), &request.model)?;
+    let model_voices = state
+        .tts_path(&request.model)
+        .await
+        .map(|dir| dir.join("voices"));
+    let voice_id = resolve_voice(
+        state,
+        &bundle,
+        request.voice.as_deref(),
+        &request.model,
+        model_voices.as_deref(),
+    )?;
     Ok((bundle, voice_id))
 }
 

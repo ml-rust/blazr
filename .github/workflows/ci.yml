@@ -185,8 +185,11 @@ jobs:
         with:
           prefix-key: cuda
 
+      # numr's and boostr's build scripts each run one nvcc per CPU, up to 8,
+      # and one boostr kernel takes 3.6 GB. Two CPUs keep the runner's
+      # 16 GB from running out, which kills the runner without a log.
       - name: Clippy (audio,cuda)
-        run: cargo clippy --all-targets --features audio,cuda -- -D warnings
+        run: taskset -c 0,1 cargo clippy --all-targets --features audio,cuda -- -D warnings
 
   # ─────────────────────────────────────────────────────────────────────────
   # `--exclude-dev`: dev-dependencies link tests only, which no user runs.

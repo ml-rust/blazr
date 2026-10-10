@@ -49,9 +49,9 @@ fn spawn(line: &str, json: bool) -> Result<Option<i32>> {
 }
 
 /// Runs `blazr speak` on `argv`, the arguments after the command, and
-/// returns its exit code: 0 when every phrase was heard back as written,
-/// 1 when a problem remains or the run failed, 2 on a bad input, 3 on a
-/// model that runs elsewhere.
+/// returns its exit code: 0 when no problem remains, parts marked `ok ?`
+/// included, 1 when a problem remains or the run failed, 2 on a bad input,
+/// 3 on a model that runs elsewhere.
 pub fn speak(argv: &[String]) -> i32 {
     let args = match parse_skill_args(argv, &speak_help()) {
         Ok(args) => args,

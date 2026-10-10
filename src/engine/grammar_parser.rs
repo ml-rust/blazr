@@ -19,9 +19,9 @@ pub enum GbnfElement {
     Literal(String),
     /// Reference to another rule
     RuleRef(String),
-    /// Character class [a-z0-9]
+    /// Character class `[a-z0-9]`
     CharClass(Vec<CharRange>),
-    /// Negated character class [^...]
+    /// Negated character class `[^...]`
     NegCharClass(Vec<CharRange>),
     /// Repetition: element*
     Repeat(Box<GbnfElement>, RepeatKind),

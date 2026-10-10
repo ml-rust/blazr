@@ -2,8 +2,8 @@
 //!
 //! Supports OpenAI-compatible content arrays where each message can contain
 //! a mix of text, image, and audio content parts. Also handles image URL
-//! fetching and base64 decoding. Audio samples come from
-//! [`super::multimodal_audio`].
+//! fetching and base64 decoding. Audio samples come from the private
+//! `multimodal_audio` module.
 
 use serde::{Deserialize, Serialize};
 

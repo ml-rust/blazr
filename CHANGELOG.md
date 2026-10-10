@@ -10,6 +10,25 @@ preview on crates.io that shares no code with it.
 
 ---
 
+## [0.1.1] - 2026-10-10
+
+### Added
+
+- **`--version`** names the optional features the binary is built with,
+  such as `blazr 0.1.1 (audio, cuda)`.
+
+### Changed
+
+- **`speak`** — a build without CUDA reads the GPU with `nvidia-smi`, so it
+  picks the same default engine as the motion-video skill. A run that
+  resolves to VoxCPM2 on a GPU that fits it, with no `--device`, exits 3, so
+  the caller runs VoxCPM2 another way.
+- **`speak` and `transcribe`** — a Whisper model that holds only ONNX or
+  `.bin` weights, named by `--model` or the config's `asr.model`, exits 3
+  instead of 1.
+
+---
+
 ## [0.1.0] - 2026-10-09
 
 blazr runs on boostr and numr, serves an OpenAI-, Anthropic- and

@@ -16,6 +16,7 @@ use super::config::read_config;
 use super::hearing::{load_whisper, Loaded, Placement};
 use super::paths::{model_search, working_dir};
 use super::print::Printer;
+use super::weights::refuse_other_whisper_weights;
 use crate::loader::hub::ModelKind;
 
 /// Runs `blazr transcribe` on `argv`, the arguments after the command,
@@ -61,6 +62,18 @@ fn run(args: &SkillArgs, printer: Printer) -> Result<i32, CommandError> {
         config.asr_model.as_deref(),
     );
     let search = model_search(&config, &cwd);
+    // A model the user chose, by flag or config, is refused before any
+    // narration is read when it holds other weights only.
+    let chosen_by = if flags.model.is_some() {
+        Some(format!("transcribe --model {model}"))
+    } else if config.asr_model.is_some() {
+        Some(format!("transcribe: asr.model {model}"))
+    } else {
+        None
+    };
+    if let Some(what) = chosen_by {
+        refuse_other_whisper_weights(&search, &what, &model)?;
+    }
     let options = TranscribeOptions {
         language: flags.language.clone(),
     };

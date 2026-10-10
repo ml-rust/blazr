@@ -99,7 +99,7 @@ pub fn refuse_foreign_model(
             return Err(not_vits(model));
         }
     }
-    if holds_safetensors(search, model) == Some(false) {
+    if holds_safetensors(search, model, ModelKind::Vits) == Some(false) {
         return Err(not_native(model));
     }
     Ok(())

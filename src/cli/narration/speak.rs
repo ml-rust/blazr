@@ -19,6 +19,7 @@ use super::gpu::{gpu, voxcpm_readiness, Readiness};
 use super::hearing::{hearing, Placement};
 use super::paths::{model_search, take_cache, working_dir};
 use super::print::Printer;
+use super::weights::refuse_other_whisper_weights;
 use crate::loader::hub::ModelSearch;
 
 /// Runs `line` in the shell, as Node's `spawnSync(cmd, { shell: true })`
@@ -95,7 +96,14 @@ fn run(args: &SkillArgs, printer: Printer) -> std::result::Result<i32, CommandEr
     // A run that happens elsewhere is refused before the review prints: the
     // caller then speaks the script another way, review included.
     if !prepared.review_only {
-        refuse_elsewhere_first(&flags, &prepared, &tts, &ready, &search)?;
+        refuse_elsewhere_first(
+            &flags,
+            &prepared,
+            &tts,
+            &ready,
+            &search,
+            config.asr_model.as_deref(),
+        )?;
     }
     printer.lines(&lines);
     if prepared.review_only {
@@ -138,30 +146,35 @@ fn run(args: &SkillArgs, printer: Printer) -> std::result::Result<i32, CommandEr
 /// - the run's `--model`, or the config's `tts.model`, when it is no VITS
 ///   checkpoint with `model.safetensors`;
 /// - a VoxCPM2 run with no `--device` on a GPU that fits it, in a build
-///   without CUDA.
+///   without CUDA;
+/// - the config's `asr.model`, when it holds other weights only.
 ///
-/// A run that resolves to another engine, or does not resolve, passes: the
-/// run itself reports its error.
+/// A run that does not resolve passes: the run itself reports its error.
+/// A run that resolves to another engine passes the engine refusals.
 fn refuse_elsewhere_first(
     flags: &SpeakFlags,
     prepared: &PreparedSpeak,
     tts: &TtsConfig<'_>,
     ready: &Readiness,
     search: &ModelSearch,
+    asr_model: Option<&str>,
 ) -> std::result::Result<(), CommandError> {
     let opts = prepared.opts(flags);
-    match resolve_speak(&prepared.script, &opts, tts, ready.ok, &ready.why) {
-        Ok(r) => match &r.engine {
-            EngineChoice::Model { model } => refuse_foreign_model(search, model),
-            EngineChoice::Voxcpm { .. } if ready.ok && !ready.native && opts.device.is_none() => {
-                Err(CommandError::Unsupported(
-                    "speak: VoxCPM2 runs on the GPU, and this blazr is built without CUDA. Install blazr with --features audio,cuda, run the skill's own runner, or pass --device cpu (very slow).".to_string(),
-                ))
-            }
-            _ => Ok(()),
-        },
-        Err(_) => Ok(()),
+    let Ok(r) = resolve_speak(&prepared.script, &opts, tts, ready.ok, &ready.why) else {
+        return Ok(());
+    };
+    match &r.engine {
+        EngineChoice::Model { model } => refuse_foreign_model(search, model)?,
+        EngineChoice::Voxcpm { .. } if ready.ok && !ready.native && opts.device.is_none() => {
+            return Err(CommandError::Unsupported(
+                "speak: VoxCPM2 runs on the GPU, and this blazr is built without CUDA. Install blazr with --features audio,cuda, run the skill's own runner, or pass --device cpu (very slow).".to_string(),
+            ));
+        }
+        _ => {}
     }
+    asr_model.map_or(Ok(()), |model| {
+        refuse_other_whisper_weights(search, &format!("speak: asr.model {model}"), model)
+    })
 }
 
 /// Loads what the run speaks and hears with, and speaks the script.

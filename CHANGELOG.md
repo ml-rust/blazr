@@ -10,6 +10,22 @@ preview on crates.io that shares no code with it.
 
 ---
 
+## [0.1.2] - 2026-10-11
+
+### Changed
+
+- **`speak`** — the speech check summary counts the parts marked `ok ?`,
+  with their part numbers and kinds, instead of saying every phrase was
+  heard back as written. The exit code stays 0.
+- **`speak`** — a VoxCPM2 stray pause advises `--reroll` for its part, and
+  each stray pause counts against a take, so retries and re-rolls keep the
+  take with fewer.
+- **`speak`** — a voice designed from an opening of fewer than 25 words
+  prints that its reference is short.
+- **Dependencies** — voxr and voxr-narrate 0.3.
+
+---
+
 ## [0.1.1] - 2026-10-10
 
 ### Added

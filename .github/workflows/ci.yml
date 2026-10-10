@@ -1,5 +1,7 @@
-# CI: format, lint, tests on three platforms, the MSRV, a CUDA compile, and
-# the dependency audit.
+# CI: format, lint, tests on three platforms, the MSRV, and the dependency
+# audit. The CUDA code compiles in release.yml's linux-x64-cuda build, which
+# gates the publish: numr's and boostr's kernels take too long to build on
+# every push.
 #
 # Called by release.yml as its gate, so a tag runs the same checks as a PR.
 #
@@ -154,42 +156,6 @@ jobs:
       # contract.
       - name: Check MSRV (audio)
         run: cargo check --features audio
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Compile only: no runner has a GPU. The CUDA toolkit comes from NVIDIA's
-  # image, the oldest toolkit the `cuda` feature supports. One SASS arch keeps
-  # the kernel build short. The release build compiles every arch.
-  cuda:
-    name: CUDA compile (audio,cuda)
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-22.04
-    container: nvidia/cuda:12.8.1-devel-ubuntu22.04
-    env:
-      NUMR_CUDA_ARCH: "86"
-    steps:
-      - name: Install build tools
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: cuda
-
-      # numr's and boostr's build scripts each run one nvcc per CPU, up to 8,
-      # and one boostr kernel takes 3.6 GB. Two CPUs keep the runner's
-      # 16 GB from running out, which kills the runner without a log.
-      - name: Clippy (audio,cuda)
-        run: taskset -c 0,1 cargo clippy --all-targets --features audio,cuda -- -D warnings
 
   # ─────────────────────────────────────────────────────────────────────────
   # `--exclude-dev`: dev-dependencies link tests only, which no user runs.

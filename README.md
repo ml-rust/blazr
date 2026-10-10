@@ -30,7 +30,6 @@ All of them include the `audio` feature.
 | Archive                   | Platform                       |
 | ------------------------- | ------------------------------ |
 | `blazr-linux-x64.tar.gz`      | Linux x86_64, CPU              |
-| `blazr-linux-x64-cuda.tar.gz` | Linux x86_64, NVIDIA CUDA      |
 | `blazr-linux-arm64.tar.gz`    | Linux aarch64, CPU             |
 | `blazr-macos-arm64.tar.gz`    | macOS on Apple silicon, CPU    |
 | `blazr-windows-x64.zip`       | Windows x86_64, CPU            |
@@ -48,11 +47,9 @@ tar xzf blazr-linux-x64.tar.gz
 `SHA256SUMS` lists the SHA-256 of every archive in the release. On macOS, use
 `shasum -a 256 --check --ignore-missing SHA256SUMS`.
 
-The Linux x86_64 archives need glibc 2.35 or newer, and the aarch64 archive
-glibc 2.39 or newer. The CUDA archive needs an NVIDIA
-driver for CUDA 12.8 or newer and the CUDA 12 cuBLAS library
-(`libcublas.so.12`) on the library path. Its kernels cover compute
-capability 7.5 (Turing) and newer.
+The Linux x86_64 archive needs glibc 2.35 or newer, and the aarch64 archive
+glibc 2.39 or newer. No archive includes CUDA. Install with `--features
+audio,cuda` for GPU inference: the build needs the CUDA toolkit, 12.8 or newer.
 
 #### From crates.io
 
@@ -381,8 +378,8 @@ every download: a missing model then fails with its name and the
 ### CPU and CUDA builds
 
 Kokoro, VITS, Whisper and CLAP run on the CPU in every build. `speak` picks
-VoxCPM2 by default only on the CUDA build (`--features audio,cuda`, or the
-`linux-x64-cuda` archive) with an NVIDIA GPU with 8 GB of memory. Elsewhere it
+VoxCPM2 by default only on the CUDA build (`--features audio,cuda`) with an
+NVIDIA GPU with 8 GB of memory. Elsewhere it
 picks Kokoro. `--engine voxcpm --device cpu` runs VoxCPM2 on the CPU, at a
 small fraction of GPU speed.
 

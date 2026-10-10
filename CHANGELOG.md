@@ -16,8 +16,8 @@ entry is a delta against the one below it.
 blazr runs on boostr and numr, serves an OpenAI-, Anthropic- and
 Ollama-compatible API, and adds speech behind the `audio` feature: TTS and
 ASR routes, and the `speak`, `transcribe` and `sound-review` commands.
-Prebuilt binaries ship for Linux, macOS and Windows, with a CUDA build for
-Linux.
+Prebuilt CPU binaries ship for Linux, macOS and Windows. The CUDA build
+installs from crates.io.
 
 ### Breaking
 
@@ -101,8 +101,8 @@ Linux.
   HTTPS (`--tls-cert`, `--tls-key`), Prometheus metrics, inference slots,
   per-request `keep_alive` with model eviction, an in-flight token budget,
   and a hot-reloaded user config at `~/.blazr/config.yaml`.
-- **Releases** — prebuilt archives for `linux-x64`, `linux-x64-cuda`,
-  `linux-arm64`, `macos-arm64` and `windows-x64`, with `SHA256SUMS`.
+- **Releases** — prebuilt archives for `linux-x64`, `linux-arm64`,
+  `macos-arm64` and `windows-x64`, with `SHA256SUMS`.
 
 ### Changed
 

@@ -1,7 +1,6 @@
 # CI: format, lint, tests on three platforms, the MSRV, and the dependency
-# audit. The CUDA code compiles in release.yml's linux-x64-cuda build, which
-# gates the publish: numr's and boostr's kernels take too long to build on
-# every push.
+# audit. No job builds the `cuda` feature: numr's and boostr's kernels take
+# hours on a hosted runner.
 #
 # Called by release.yml as its gate, so a tag runs the same checks as a PR.
 #

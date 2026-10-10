@@ -128,8 +128,8 @@ jobs:
       ref: ${{ inputs.tag || github.ref_name }}
 
   # ── Third-party files ───────────────────────────────────────────────────────
-  # One set for every archive, from the CUDA build's crate graph: the widest
-  # one, so no archive carries fewer licences than it compiles in.
+  # One set for every archive, from the `audio` crate graph that each one
+  # compiles.
   third-party:
     name: Third-party licences
     needs: validate
@@ -146,7 +146,7 @@ jobs:
         run: cargo install cargo-about --locked --version 0.9.2 --features cli
 
       - name: Write licences and notices
-        run: bash scripts/ci/third_party.sh audio,cuda third-party
+        run: bash scripts/ci/third_party.sh audio third-party
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -168,17 +168,6 @@ jobs:
             runs-on: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: audio
-          - label: linux-x64-cuda
-            runs-on: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            features: audio,cuda
-            # numr's and boostr's build scripts each run one nvcc per CPU,
-            # and ptxas takes several GB on boostr's attention kernels. A
-            # runner that runs out of memory stops answering and is lost.
-            # Two CPUs for the build leave two for the runner, and the CUDA
-            # host step adds swap.
-            pin-cpus: "0,1"
-            cuda: "12-8"
           - label: linux-arm64
             runs-on: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -191,36 +180,7 @@ jobs:
             runs-on: windows-latest
             target: x86_64-pc-windows-msvc
             features: audio
-    env:
-      # Every SASS arch, so the CUDA binary runs on GPUs other than the
-      # (absent) build machine's. Ignored without `cuda`.
-      NUMR_CUDA_ARCH: all
     steps:
-      # On the host, not in a CUDA container: a container job cannot add
-      # swap. The 22.04 host keeps the glibc floor of the CPU archive.
-      - name: Prepare the CUDA host
-        if: matrix.cuda
-        env:
-          CUDA: ${{ matrix.cuda }}
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo swapoff -a
-          sudo rm -f /mnt/swapfile
-          sudo fallocate -l 24G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          rm cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            "cuda-nvcc-$CUDA" "cuda-cudart-dev-$CUDA" "cuda-cccl-$CUDA"
-          echo "/usr/local/cuda-${CUDA//-/.}/bin" >> "$GITHUB_PATH"
-          free -m
-          df -h / /mnt
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
@@ -239,12 +199,7 @@ jobs:
         env:
           FEATURES: ${{ matrix.features }}
           TARGET: ${{ matrix.target }}
-          PIN_CPUS: ${{ matrix.pin-cpus }}
-        run: |
-          set -euo pipefail
-          set -- cargo build --release --locked --features "$FEATURES" --target "$TARGET"
-          if [[ -n "$PIN_CPUS" ]]; then set -- taskset -c "$PIN_CPUS" "$@"; fi
-          "$@"
+        run: cargo build --release --locked --features "$FEATURES" --target "$TARGET"
 
       - name: Download third-party files
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

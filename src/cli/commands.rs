@@ -2,10 +2,33 @@ use clap::{Parser, Subcommand};
 
 use super::args::{RuntimeArgs, SamplingArgs, VisionArgs};
 
+/// The optional features this binary is built with, as `--version` lists
+/// them after the version: `0.1.1 (audio, cuda)`.
+const FEATURES: [(&str, bool); 4] = [
+    ("audio", cfg!(feature = "audio")),
+    ("cuda", cfg!(feature = "cuda")),
+    ("nccl", cfg!(feature = "nccl")),
+    ("distributed", cfg!(feature = "distributed")),
+];
+
+/// The `--version` text: the crate version, then the built features.
+static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let built: Vec<&str> = FEATURES
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| *name)
+        .collect();
+    if built.is_empty() {
+        env!("CARGO_PKG_VERSION").to_string()
+    } else {
+        format!("{} ({})", env!("CARGO_PKG_VERSION"), built.join(", "))
+    }
+});
+
 /// Blazr - Blazing-fast inference server for LLMs
 #[derive(Parser)]
 #[command(name = "blazr")]
-#[command(version, about, long_about = None)]
+#[command(version = VERSION.as_str(), about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -414,4 +437,17 @@ pub enum Commands {
         /// Input file
         input: std::path::PathBuf,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_names_each_built_feature() {
+        assert!(VERSION.starts_with(env!("CARGO_PKG_VERSION")));
+        assert_eq!(VERSION.contains("(audio"), cfg!(feature = "audio"));
+        assert_eq!(VERSION.contains("cuda"), cfg!(feature = "cuda"));
+        assert_eq!(VERSION.contains('('), FEATURES.iter().any(|(_, on)| *on));
+    }
 }

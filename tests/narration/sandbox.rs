@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use crate::common::{model_fixture, skip_notice};
+use crate::common::{model_fixture, skip_notice, symlink};
 
 /// The built binary.
 const BLAZR: &str = env!("CARGO_BIN_EXE_blazr");
@@ -72,8 +72,7 @@ impl Sandbox {
         let sb = Self::empty();
         let dir = sb.root.path();
         for (name, target) in models {
-            std::os::unix::fs::symlink(target, dir.join("models").join(name))
-                .unwrap_or_else(|e| panic!("linking {name}: {e}"));
+            symlink(target, &dir.join("models").join(name));
         }
         sb
     }

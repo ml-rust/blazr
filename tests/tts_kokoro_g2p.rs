@@ -11,7 +11,7 @@
 mod common;
 
 use blazr::loader::load_tts_from_dir;
-use common::{hub_online, model_fixture, skip_notice};
+use common::{hub_online, model_fixture, skip_notice, symlink};
 use voxr::voxcpm::VoxCpm2SynthOptions;
 use voxr::SynthesizeOptions;
 
@@ -27,8 +27,7 @@ fn the_serve_loader_resolves_kokoro_g2p_without_a_g2p_folder() {
     }
     let bare = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
     for name in ["config.json", "kokoro-v1_0.pth", "voices"] {
-        std::os::unix::fs::symlink(kokoro.join(name), bare.path().join(name))
-            .unwrap_or_else(|e| panic!("linking {name}: {e}"));
+        symlink(&kokoro.join(name), &bare.path().join(name));
     }
     // This file holds one test, so it owns its process's environment: the
     // hub cache is fresh, and no model folder holds the repo.

@@ -60,6 +60,21 @@ pub fn model_fixture(specific_var: &str, relative: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// Symlink `link` to `target`, a file or a directory. Windows needs
+/// Developer Mode or an elevated shell to create a symlink.
+#[cfg(feature = "audio")]
+pub fn symlink(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let made = if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+    made.unwrap_or_else(|e| panic!("linking {} to {}: {e}", link.display(), target.display()));
+}
+
 /// Print the standard skip notice naming both the specific env var and
 /// `BOOSTR_MODELS_DIR`, so the reader knows how to enable the test.
 pub fn skip_notice(what: &str, specific_var: &str) {

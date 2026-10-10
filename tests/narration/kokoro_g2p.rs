@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use super::sandbox::{whisper, Sandbox};
-use crate::common::{hub_online, model_fixture, skip_notice};
+use crate::common::{hub_online, model_fixture, skip_notice, symlink};
 
 const SCRIPT: &str = "The river runs north past the old mill.";
 const REPO: &str = "fs90/kokoro-g2p";
@@ -19,8 +19,7 @@ const REPO: &str = "fs90/kokoro-g2p";
 fn bare_kokoro(kokoro: &Path) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
     for name in ["config.json", "kokoro-v1_0.pth", "voices"] {
-        std::os::unix::fs::symlink(kokoro.join(name), dir.path().join(name))
-            .unwrap_or_else(|e| panic!("linking {name}: {e}"));
+        symlink(&kokoro.join(name), &dir.path().join(name));
     }
     dir
 }

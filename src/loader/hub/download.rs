@@ -4,9 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use hf_hub::api::sync::ApiBuilder;
-
 use super::kinds::ModelKind;
+use crate::loader::hub_client::{sync_client, sync_get, sync_model};
 
 /// Whether the hub is off limits: `$HF_HUB_OFFLINE` set to anything but
 /// `0` or `false`.
@@ -40,15 +39,12 @@ pub fn wanted(name: &str, kind: ModelKind) -> bool {
 /// returns the snapshot directory. The error is the hub's reason.
 pub fn download(id: &str, kind: ModelKind, hub: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(hub).map_err(|e| format!("creating {}: {e}", hub.display()))?;
-    let api = ApiBuilder::from_env()
-        .with_cache_dir(hub.to_path_buf())
-        .with_progress(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-    let repo = api.model(id.to_string());
-    let info = repo.info().map_err(|e| e.to_string())?;
+    let client = sync_client(Some(hub)).map_err(|e| e.to_string())?;
+    let repo = sync_model(&client, id);
+    let info = repo.info().send().map_err(|e| e.to_string())?;
     let mut names: Vec<String> = info
         .siblings
+        .unwrap_or_default()
         .into_iter()
         .map(|s| s.rfilename)
         .filter(|n| wanted(n, kind))
@@ -64,7 +60,7 @@ pub fn download(id: &str, kind: ModelKind, hub: &Path) -> Result<PathBuf, String
     }
     let mut snapshot = None;
     for name in &names {
-        let path = repo.get(name).map_err(|e| format!("{name}: {e}"))?;
+        let path = sync_get(&repo, name, true).map_err(|e| format!("{name}: {e}"))?;
         // The snapshot directory holds the file as the repo does: one
         // directory up for each part of its repo path.
         snapshot = snapshot.or_else(|| {
@@ -79,29 +75,25 @@ pub fn download(id: &str, kind: ModelKind, hub: &Path) -> Result<PathBuf, String
 /// Every file of the repo `id` on the hub, as paths in the repo. The error
 /// is the hub's reason.
 pub fn repo_files(id: &str) -> Result<Vec<String>, String> {
-    let api = ApiBuilder::from_env()
-        .with_progress(false)
-        .build()
-        .map_err(|e| e.to_string())?;
-    let info = api
-        .model(id.to_string())
+    let client = sync_client(None).map_err(|e| e.to_string())?;
+    let info = sync_model(&client, id)
         .info()
+        .send()
         .map_err(|e| e.to_string())?;
-    Ok(info.siblings.into_iter().map(|s| s.rfilename).collect())
+    Ok(info
+        .siblings
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.rfilename)
+        .collect())
 }
 
 /// Downloads the one repo file `name` of `id` into the hub cache `hub`
 /// and returns its path.
 pub fn download_file(id: &str, name: &str, hub: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(hub).map_err(|e| format!("creating {}: {e}", hub.display()))?;
-    let api = ApiBuilder::from_env()
-        .with_cache_dir(hub.to_path_buf())
-        .with_progress(false)
-        .build()
-        .map_err(|e| e.to_string())?;
-    api.model(id.to_string())
-        .get(name)
-        .map_err(|e| format!("{name}: {e}"))
+    let client = sync_client(Some(hub)).map_err(|e| e.to_string())?;
+    sync_get(&sync_model(&client, id), name, false).map_err(|e| format!("{name}: {e}"))
 }
 
 #[cfg(test)]

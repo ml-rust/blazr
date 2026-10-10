@@ -1,6 +1,6 @@
 # blazr
 
-[![CI](https://github.com/ml-rust/blazr/actions/workflows/ci.yml/badge.svg)](https://github.com/ml-rust/blazr/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/blazr.svg)](https://crates.io/crates/blazr) [![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![CI](https://github.com/ml-rust/blazr/actions/workflows/ci.yml/badge.svg)](https://github.com/ml-rust/blazr/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/blazr.svg)](https://crates.io/crates/blazr) [![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 Inference server for LLMs, with speech synthesis (TTS) and transcription (ASR). Supports standard HuggingFace models (Llama, Mistral, Qwen, Phi, Gemma, DeepSeek) and custom hybrid architectures (Mamba2, MLA, MoE). Loads SafeTensors, AWQ, GPTQ, and GGUF formats.
 
@@ -417,7 +417,7 @@ numr (tensors + linalg + multi-backend: CPU/CUDA/WebGPU)
 
 ## Requirements
 
-- Rust 1.89+ to build from source
+- Rust 1.95+ to build from source
 - (Optional) CUDA 12.8+ or 13.x for GPU acceleration
 
 ## License

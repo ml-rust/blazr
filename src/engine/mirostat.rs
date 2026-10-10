@@ -21,7 +21,7 @@ impl MirostatState {
         use rand::SeedableRng;
         let rng = match seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-            None => rand::rngs::StdRng::from_entropy(),
+            None => rand::make_rng(),
         };
         // Initialize mu = 2 * tau (standard initialization)
         Self {
@@ -38,7 +38,7 @@ impl MirostatState {
     /// computes softmax, truncates candidates to those with surprise ≤ mu,
     /// samples, and updates mu.
     pub fn sample(&mut self, logits: &[f32], temperature: f32) -> (u32, f32) {
-        use rand::Rng;
+        use rand::RngExt;
 
         let scaled: Vec<f32> = if temperature != 1.0 && temperature > 0.0 {
             let inv_t = 1.0 / temperature;
@@ -83,7 +83,7 @@ impl MirostatState {
 
         // Renormalize and sample
         let total: f32 = candidates.iter().map(|(_, p)| p).sum();
-        let r: f32 = self.rng.gen();
+        let r: f32 = self.rng.random();
         let mut cumsum = 0.0f32;
         let mut chosen = candidates[0].0;
         let mut chosen_prob = candidates[0].1;

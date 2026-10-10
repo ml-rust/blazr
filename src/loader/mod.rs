@@ -14,6 +14,7 @@ mod gguf_info;
 mod gguf_template;
 #[cfg(feature = "audio")]
 pub mod hub;
+pub(crate) mod hub_client;
 mod safetensors;
 #[cfg(feature = "audio")]
 mod tts;

@@ -8,7 +8,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use minijinja::value::{Kwargs, Value};
+use minijinja::value::{Kwargs, Serde, Value};
 use minijinja::{Environment, Error, ErrorKind};
 use splintr::{AnyTokenizer, FxHashSet};
 
@@ -119,8 +119,14 @@ impl JinjaTemplate {
         eos_token: &str,
     ) -> Result<Self, TemplateError> {
         let mut env = Environment::new();
-        env.set_trim_blocks(true);
-        env.set_lstrip_blocks(true);
+        let syntax = env
+            .syntax()
+            .to_builder()
+            .trim_blocks(true)
+            .lstrip_blocks(true)
+            .build()
+            .map_err(|e| TemplateError::from_minijinja(origin, &e))?;
+        env.set_syntax(syntax);
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         env.add_function("raise_exception", raise_exception);
         env.add_function("strftime_now", strftime_now);
@@ -187,7 +193,7 @@ impl JinjaTemplate {
             .map_err(|e| TemplateError::from_minijinja(self.origin, &e))?;
         let context = render_context(messages, options, &self.bos_token, &self.eos_token);
         template
-            .render(context)
+            .render(Serde(&context))
             .map_err(|e| TemplateError::from_minijinja(self.origin, &e))
     }
 }

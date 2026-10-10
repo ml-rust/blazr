@@ -68,10 +68,10 @@ allow = ["LicenseRef-Llama-3.1-Community"]
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+# hf-hub's reqwest and Xet client link aws-lc-rs beside ring. blazr installs
+# ring as the process default at start and names it in every rustls config
+# it builds, so the second provider never panics a builder.
 deny = [
-    # One rustls crypto provider, ring. A second one makes
-    # `rustls::*Config::builder()` panic at run time.
-    { crate = "aws-lc-rs", reason = "blazr links ring as its only rustls provider" },
     # No system OpenSSL in the binaries.
     { crate = "openssl-sys", reason = "TLS goes through rustls" },
     { crate = "native-tls", reason = "TLS goes through rustls" },

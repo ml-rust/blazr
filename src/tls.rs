@@ -1,7 +1,8 @@
 //! The process's rustls crypto provider.
 //!
-//! blazr links one provider, ring: hf-hub's ureq client hard-wires it, and
-//! reqwest and the HTTPS listener use the same one.
+//! ring is the process-wide provider. hf-hub's reqwest and Xet client also
+//! link aws-lc-rs, but read the installed default first. The HTTPS listener
+//! names ring itself.
 
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use rustls::crypto::CryptoProvider;
 
 /// Installs ring as the process-wide rustls provider.
 ///
-/// reqwest is built without a bundled provider and reads this default.
+/// reqwest and hf-hub read this default before any provider they link.
 /// A provider the embedding program installed first stays in place.
 pub fn install_crypto_provider() {
     // `Err` means a provider is already installed, which is the goal.

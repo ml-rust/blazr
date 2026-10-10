@@ -10,7 +10,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tokio::net::TcpListener;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{preflight_request_headers, AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
@@ -234,7 +234,9 @@ pub async fn start_with_batch(
         });
     }
 
-    // CORS: respect cors_enabled and cors_origins config
+    // CORS: respect cors_enabled and cors_origins config. `Vary` names the
+    // three preflight request headers on every response, whatever the
+    // origin policy.
     let cors = if config.cors_enabled {
         if config.cors_origins.is_empty() {
             CorsLayer::new()
@@ -254,7 +256,8 @@ pub async fn start_with_batch(
         }
     } else {
         CorsLayer::new()
-    };
+    }
+    .vary(preflight_request_headers().collect::<Vec<_>>());
 
     // Protected routes (require auth if api_key is set)
     let protected = api_routes().route_layer(middleware::from_fn(auth_middleware));

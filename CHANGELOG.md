@@ -37,7 +37,7 @@ installs from crates.io.
   `decode --model <MODEL> <INPUT>`. `--ids` and `--vocab` are gone.
 - **Speech is opt-in** — the audio routes and commands build only with
   `--features audio`. The prebuilt binaries include it.
-- **Minimum Rust** — 1.89.
+- **Minimum Rust** — 1.95.
 - **Repository** — `github.com/ml-rust/blazr`.
 
 ### Added
@@ -108,12 +108,13 @@ installs from crates.io.
 
 - **Audio stack** — audio decoding, the TTS engines and Whisper moved from
   boostr-audio to voxr. The narration logic comes from voxr-narrate.
-- **Dependencies** — boostr 0.3, numr 0.8, splintr 0.21, voxr 0.1 and
-  voxr-narrate 0.1.
-- **TLS** — one rustls crypto provider, ring, for the whole process.
-  Hugging Face downloads go over rustls, so the Linux binary needs no system
-  OpenSSL. The archived `rustls-pemfile` is replaced by `rustls-pki-types`'
-  PEM parser.
+- **Dependencies** — boostr 0.5, numr 0.10, splintr 0.21, voxr 0.2 and
+  voxr-narrate 0.2.
+- **TLS** — ring is the process-wide rustls crypto provider. hf-hub also
+  links aws-lc-rs, and reads the installed default first. Hugging Face
+  downloads go over rustls, so the Linux binary needs no system OpenSSL.
+  The archived `rustls-pemfile` is replaced by `rustls-pki-types`' PEM
+  parser.
 - **`--voice-dir`** is searched before the TTS model directory's `voices/`.
   The voice directory that the beta bundled under `assets/` is gone: Kokoro
   voices come from the model directory.

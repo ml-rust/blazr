@@ -5,8 +5,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use colored::Colorize;
-use hf_hub::api::sync::Api;
+use hf_hub::repository::RepoTypeModel;
+use hf_hub::HFRepositorySync;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
+
+use crate::loader::hub_client::{sync_client, sync_get, sync_model};
 
 /// Threshold above which we show a byte-level copy progress bar (10 MB)
 const PROGRESS_BAR_THRESHOLD: u64 = 10 * 1024 * 1024;
@@ -23,8 +26,8 @@ pub async fn pull(repo: String, file: Option<String>, output: Option<PathBuf>) -
 
     eprintln!("{} from {}", "Downloading".green().bold(), repo.bold());
 
-    let api = Api::new()?;
-    let repo_api = api.model(repo.clone());
+    let client = sync_client(None)?;
+    let repo_api = sync_model(&client, &repo);
     let mut total_bytes = 0u64;
     let mut file_count = 0usize;
 
@@ -82,7 +85,7 @@ pub async fn pull(repo: String, file: Option<String>, output: Option<PathBuf>) -
 /// Download a single file with progress indication.
 /// Returns the file size in bytes on success.
 fn download_file(
-    repo_api: &hf_hub::api::sync::ApiRepo,
+    repo_api: &HFRepositorySync<RepoTypeModel>,
     filename: &str,
     dest_dir: &std::path::Path,
 ) -> Result<u64> {
@@ -95,7 +98,7 @@ fn download_file(
     spinner.set_message(format!("Fetching {}", filename));
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let cached_path = repo_api.get(filename)?;
+    let cached_path = sync_get(repo_api, filename, true)?;
     spinner.finish_and_clear();
 
     let size = std::fs::metadata(&cached_path)
@@ -103,6 +106,9 @@ fn download_file(
         .unwrap_or(0);
 
     let dest = dest_dir.join(filename);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     // For large files, show a byte-level progress bar during copy
     if size >= PROGRESS_BAR_THRESHOLD {
@@ -155,13 +161,13 @@ fn copy_with_progress(
 
 /// Try to download sharded safetensors files. Returns (total_bytes, file_count).
 fn download_sharded_safetensors(
-    repo_api: &hf_hub::api::sync::ApiRepo,
+    repo_api: &HFRepositorySync<RepoTypeModel>,
     model_dir: &std::path::Path,
 ) -> (u64, usize) {
     let mut total = 0u64;
     let mut count = 0usize;
 
-    if let Ok(cached) = repo_api.get("model.safetensors.index.json") {
+    if let Ok(cached) = sync_get(repo_api, "model.safetensors.index.json", true) {
         let dest = model_dir.join("model.safetensors.index.json");
         let _ = std::fs::copy(&cached, &dest);
 
@@ -196,7 +202,7 @@ fn download_sharded_safetensors(
 
 /// Try to download GGUF files from the repo. Returns (total_bytes, file_count).
 fn download_gguf_files(
-    repo_api: &hf_hub::api::sync::ApiRepo,
+    repo_api: &HFRepositorySync<RepoTypeModel>,
     model_dir: &std::path::Path,
     repo: &str,
 ) -> (u64, usize) {

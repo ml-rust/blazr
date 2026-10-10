@@ -2,7 +2,7 @@
 //! config, finds and loads the models, checks VoxCPM2's readiness, runs
 //! the user's TTS command, and prints. voxr-narrate does the rest.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use serde_json::json;
@@ -15,7 +15,7 @@ use voxr_narrate::{
 use super::args::speak_help;
 use super::config::{read_config, MotionConfig};
 use super::engines::{load_engines, refuse_foreign_model, run_speak, voxcpm_checkpoint, RunInput};
-use super::gpu::{gpu, voxcpm_readiness};
+use super::gpu::{gpu, voxcpm_readiness, Readiness};
 use super::hearing::{hearing, Placement};
 use super::paths::{model_search, take_cache, working_dir};
 use super::print::Printer;
@@ -92,10 +92,10 @@ fn run(args: &SkillArgs, printer: Printer) -> std::result::Result<i32, CommandEr
             return Err(e);
         }
     };
-    // A model that runs elsewhere is refused before the review prints: the
+    // A run that happens elsewhere is refused before the review prints: the
     // caller then speaks the script another way, review included.
     if !prepared.review_only {
-        refuse_model_first(&flags, &prepared, &tts, &ready, &search)?;
+        refuse_elsewhere_first(&flags, &prepared, &tts, &ready, &search)?;
     }
     printer.lines(&lines);
     if prepared.review_only {
@@ -121,7 +121,7 @@ fn run(args: &SkillArgs, printer: Printer) -> std::result::Result<i32, CommandEr
         cwd: &cwd,
     };
     let mut lines = Vec::new();
-    let mut decode = |p: &Path| decode_48k(p);
+    let mut decode = decode_48k;
     let outcome = finish_speak(&spoken, &inputs, &mut decode, &mut lines);
     printer.lines(&lines);
     let outcome = outcome?;
@@ -134,21 +134,30 @@ fn run(args: &SkillArgs, printer: Printer) -> std::result::Result<i32, CommandEr
     Ok(outcome.code)
 }
 
-/// The exit-3 refusal of the run's `--model`, or of the config's
-/// `tts.model`, when it is no VITS checkpoint with `model.safetensors`. A
-/// run that resolves to another engine, or does not resolve, passes: the
+/// The exit-3 refusal of a run that happens elsewhere:
+/// - the run's `--model`, or the config's `tts.model`, when it is no VITS
+///   checkpoint with `model.safetensors`;
+/// - a VoxCPM2 run with no `--device` on a GPU that fits it, in a build
+///   without CUDA.
+///
+/// A run that resolves to another engine, or does not resolve, passes: the
 /// run itself reports its error.
-fn refuse_model_first(
+fn refuse_elsewhere_first(
     flags: &SpeakFlags,
     prepared: &PreparedSpeak,
     tts: &TtsConfig<'_>,
-    ready: &super::gpu::Readiness,
+    ready: &Readiness,
     search: &ModelSearch,
 ) -> std::result::Result<(), CommandError> {
     let opts = prepared.opts(flags);
     match resolve_speak(&prepared.script, &opts, tts, ready.ok, &ready.why) {
         Ok(r) => match &r.engine {
             EngineChoice::Model { model } => refuse_foreign_model(search, model),
+            EngineChoice::Voxcpm { .. } if ready.ok && !ready.native && opts.device.is_none() => {
+                Err(CommandError::Unsupported(
+                    "speak: VoxCPM2 runs on the GPU, and this blazr is built without CUDA. Install blazr with --features audio,cuda, run the skill's own runner, or pass --device cpu (very slow).".to_string(),
+                ))
+            }
             _ => Ok(()),
         },
         Err(_) => Ok(()),
@@ -161,8 +170,8 @@ fn speak_run(
     prepared: &PreparedSpeak,
     config: &MotionConfig,
     search: &ModelSearch,
-    checkpoint: &std::result::Result<std::path::PathBuf, String>,
-    ready: &super::gpu::Readiness,
+    checkpoint: &std::result::Result<PathBuf, String>,
+    ready: &Readiness,
     printer: Printer,
 ) -> std::result::Result<voxr_narrate::SpokenScript, CommandError> {
     let tts: TtsConfig<'_> = config.tts.config();

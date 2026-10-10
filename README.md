@@ -12,7 +12,7 @@ Inference server for LLMs, with speech synthesis (TTS) and transcription (ASR). 
 - **OpenAI-Compatible API** - Drop-in replacement with `/v1/completions` and `/v1/chat/completions`
 - **Streaming** - Server-Sent Events (SSE) for real-time token generation
 - **HuggingFace Hub** - Pull models directly from HuggingFace
-- **Production Features** - Rate limiting, request timeouts, graceful shutdown, CORS, error handling
+- **Operations** - API-key auth, native TLS, Prometheus `/metrics`, request timeout, graceful shutdown on SIGTERM
 - **CUDA Acceleration** - Optional GPU inference with optimized quantization kernels
 - **Speech** - Text-to-speech (Kokoro, VoxCPM2, VITS) and Whisper transcription with word timestamps, over HTTP and the `speak`, `transcribe` and `sound-review` commands (`audio` feature)
 
@@ -27,12 +27,12 @@ archive per platform. Each holds the `blazr` binary, `LICENSE`, `README.md`,
 `NOTICE`, `LICENSE-LLAMA` and `THIRD-PARTY-LICENSES.txt`.
 All of them include the `audio` feature.
 
-| Archive                   | Platform                       |
-| ------------------------- | ------------------------------ |
-| `blazr-linux-x64.tar.gz`      | Linux x86_64, CPU              |
-| `blazr-linux-arm64.tar.gz`    | Linux aarch64, CPU             |
-| `blazr-macos-arm64.tar.gz`    | macOS on Apple silicon, CPU    |
-| `blazr-windows-x64.zip`       | Windows x86_64, CPU            |
+| Archive                    | Platform                    |
+| -------------------------- | --------------------------- |
+| `blazr-linux-x64.tar.gz`   | Linux x86_64, CPU           |
+| `blazr-linux-arm64.tar.gz` | Linux aarch64, CPU          |
+| `blazr-macos-arm64.tar.gz` | macOS on Apple silicon, CPU |
+| `blazr-windows-x64.zip`    | Windows x86_64, CPU         |
 
 The names carry no version, so the latest release always has the same URL:
 
@@ -85,8 +85,11 @@ blazr run meta-llama/Llama-3.2-1B
 
 ### Start Server
 
+`blazr serve` does not fetch models. Run `blazr pull` first, then serve the pulled name. `blazr list` shows the names.
+
 ```bash
-blazr serve --model meta-llama/Llama-3.2-1B --port 8080
+blazr pull Qwen/Qwen2.5-0.5B
+blazr serve --model <name> --port 8080
 ```
 
 ```bash
@@ -119,23 +122,15 @@ blazr pull Qwen/Qwen2.5-0.5B               # Download from HuggingFace
 
 ## Supported Models
 
-### Tested
+[docs/models.md](docs/models.md) holds the full matrix with an evidence level per cell.
 
-| Model                       | SafeTensors | AWQ | GPTQ | GGUF |
-| --------------------------- | ----------- | --- | ---- | ---- |
-| Llama 3.2 1B                | x           | x   | x    | x    |
-| Mistral 7B                  | x           | x   | x    | x    |
-| Mamba2 (oxidizr)            | x           | -   | -    |      |
-| DeepSeek-V2/V3 (MLA+MoE)    | x           |     |      |      |
-| Hybrid Mamba+Attn (oxidizr) | x           | -   | -    |      |
-
-### Expected Compatible (route to Llama)
-
-Qwen2/2.5, Phi-3/3.5/4, Gemma/Gemma2, StarCoder2, Yi, InternLM2, CodeLlama, Solar
-
-### Planned
-
-Mixtral (MoE), Falcon (ALiBi), Command-R, GPT-NeoX/Pythia, DBRX
+| Family                                                                        | Evidence                                                   |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Llama 3.x                                                                     | SafeTensors tested                                         |
+| Mistral 7B                                                                    | SafeTensors, AWQ, GPTQ, GGUF tested (production checklist) |
+| Qwen3.5 hybrid                                                                | GGUF tested                                                |
+| Mamba2, Mamba3, DeepSeek-V2/V3, Mamba+attention hybrids                       | Supported in code, no test names a checkpoint              |
+| Qwen2/2.5, Phi, Gemma, StarCoder2, Mixtral, Falcon, Command-R, GPT-NeoX, DBRX | Routed to the Llama path, untested                         |
 
 ## Model Formats
 
@@ -164,30 +159,30 @@ checkpoint_dir/
 model.gguf                     # Single file: weights + tokenizer + config
 ```
 
-Supports all 23 GGUF quantization levels (Q2_K through Q8_0, IQ series, TQ series). CPU has dedicated kernels for all formats. CUDA has optimized dp4a kernels for Q4_K, Q6_K, Q8_0 with generic fallback for the rest.
+GGUF quantization formats run from Q2_K through Q8_0, plus the IQ and TQ series. [docs/models.md](docs/models.md) lists the CPU and CUDA kernel for each format.
 
 ## API Reference
 
 ### Endpoints
 
-| Method | Path                         | Description                                   |
-| ------ | ---------------------------- | --------------------------------------------- |
-| GET    | `/health`                    | Health check                                  |
-| GET    | `/v1/models`                 | List loaded models                            |
-| POST   | `/v1/completions`            | Text completion                               |
-| POST   | `/v1/chat/completions`       | Chat completion                               |
-| POST   | `/v1/embeddings`             | Embeddings                                    |
-| POST   | `/v1/responses`              | OpenAI Responses API                          |
-| POST   | `/v1/messages`               | Anthropic Messages API                        |
-| POST   | `/v1/infill`                 | Fill-in-the-middle                            |
-| POST   | `/v1/rerank`                 | Rerank documents                              |
-| POST   | `/tokenize`, `/detokenize`   | Tokenizer round trip                          |
-| POST   | `/v1/audio/speech`           | Text to speech (`audio`)                      |
-| POST   | `/v1/audio/transcriptions`   | Speech to text, with word timestamps (`audio`) |
-| POST   | `/v1/audio/translations`     | Speech to English text (`audio`)              |
-| GET    | `/v1/audio/voices`           | A TTS model's voices (`audio`)                |
-| GET    | `/api/tags`, `/api/ps`       | Ollama-compatible model listing               |
-| GET    | `/metrics`                   | Prometheus metrics                            |
+| Method | Path                       | Description                                    |
+| ------ | -------------------------- | ---------------------------------------------- |
+| GET    | `/health`                  | Health check                                   |
+| GET    | `/v1/models`               | List loaded models                             |
+| POST   | `/v1/completions`          | Text completion                                |
+| POST   | `/v1/chat/completions`     | Chat completion                                |
+| POST   | `/v1/embeddings`           | Embeddings                                     |
+| POST   | `/v1/responses`            | OpenAI Responses API                           |
+| POST   | `/v1/messages`             | Anthropic Messages API                         |
+| POST   | `/v1/infill`               | Fill-in-the-middle                             |
+| POST   | `/v1/rerank`               | Rerank documents                               |
+| POST   | `/tokenize`, `/detokenize` | Tokenizer round trip                           |
+| POST   | `/v1/audio/speech`         | Text to speech (`audio`)                       |
+| POST   | `/v1/audio/transcriptions` | Speech to text, with word timestamps (`audio`) |
+| POST   | `/v1/audio/translations`   | Speech to English text (`audio`)               |
+| GET    | `/v1/audio/voices`         | A TTS model's voices (`audio`)                 |
+| GET    | `/api/tags`, `/api/ps`     | Ollama-compatible model listing                |
+| GET    | `/metrics`                 | Prometheus metrics                             |
 
 ### Request Parameters
 
@@ -251,34 +246,33 @@ blazr sound-review  Review rendered sound effects (audio)
 
 ### Generation Options
 
-| Flag            | Default  | Description                                     |
-| --------------- | -------- | ----------------------------------------------- |
-| `--model`       | required | Local path or HuggingFace model ID              |
-| `--prompt`      | required | Input text                                      |
-| `--max-tokens`  | 2048     | Maximum tokens to generate                      |
-| `--temperature` | 0.7      | Sampling temperature (0 = greedy)               |
-| `--top-p`       | 0.9      | Nucleus sampling threshold                      |
-| `--top-k`       | 0        | Top-k sampling (0 = off)                        |
-| `--cpu`         | false    | Force CPU inference                             |
-| `--mmproj`      | none     | Qwen3-VL mmproj GGUF for image inputs (`qwen35` models only) |
+| Flag            | Default  | Description                                                       |
+| --------------- | -------- | ----------------------------------------------------------------- |
+| `--model`       | required | Local path or HuggingFace model ID                                |
+| `--prompt`      | required | Input text                                                        |
+| `--max-tokens`  | 2048     | Maximum tokens to generate                                        |
+| `--temperature` | 0.7      | Sampling temperature (0 = greedy)                                 |
+| `--top-p`       | 0.9      | Nucleus sampling threshold                                        |
+| `--top-k`       | 0        | Top-k sampling (0 = off)                                          |
+| `--cpu`         | false    | Force CPU inference                                               |
+| `--mmproj`      | none     | Qwen3-VL mmproj GGUF for image inputs (`qwen35` models only)      |
 | `--image`       | none     | Image file placed before the prompt; needs `--mmproj`; repeatable |
 
 ### Server Options
 
-| Flag      | Default  | Description                        |
-| --------- | -------- | ---------------------------------- |
-| `--model` | none     | Local path or HuggingFace model ID; without it, models load on demand |
-| `--port`  | 8080     | Port to listen on                  |
-| `--host`  | 0.0.0.0  | Host to bind to                    |
-| `--cpu`   | false    | Force CPU inference                |
-| `--chat-template` | model's own | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file |
-| `--mmproj` | none | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model; enables `image_url` parts in `/v1/chat/completions` |
-| `--image-min-tokens` / `--image-max-tokens` | mmproj values | Token range every image is resized into |
-| `--tls-cert` / `--tls-key` | none | PEM certificate chain and private key; both together serve HTTPS |
-| `--api-key` / `--api-key-file` | none | Require a bearer key; also reads `BLAZR_API_KEY` |
-| `--asr-model` | none | `NAME=DIR` Whisper model for `/v1/audio/transcriptions` (`audio`); repeatable |
-| `--tts-model` | none | `NAME=DIR` Kokoro, VoxCPM2 or VITS model for `/v1/audio/speech` (`audio`); repeatable |
-| `--voice-dir` | `$BLAZR_VOICE_DIR` | Kokoro voice files searched before the model's `voices/` (`audio`) |
+| Flag                                        | Default            | Description                                                                                                    |
+| ------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `--model`                                   | none               | Local path or name under `$BLAZR_MODEL_DIR` (default `./models`); without it, models load on demand            |
+| `--port`                                    | 8080               | Port to listen on                                                                                              |
+| `--host`                                    | 0.0.0.0            | Host to bind to                                                                                                |
+| `--chat-template`                           | model's own        | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file |
+| `--mmproj`                                  | none               | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model; enables `image_url` parts in `/v1/chat/completions`       |
+| `--image-min-tokens` / `--image-max-tokens` | mmproj values      | Token range every image is resized into                                                                        |
+| `--tls-cert` / `--tls-key`                  | none               | PEM certificate chain and private key; both together serve HTTPS                                               |
+| `--api-key` / `--api-key-file`              | none               | Require a bearer key; also reads `BLAZR_API_KEY`                                                               |
+| `--asr-model`                               | none               | `NAME=DIR` Whisper model for `/v1/audio/transcriptions` (`audio`); repeatable                                  |
+| `--tts-model`                               | none               | `NAME=DIR` Kokoro, VoxCPM2 or VITS model for `/v1/audio/speech` (`audio`); repeatable                          |
+| `--voice-dir`                               | `$BLAZR_VOICE_DIR` | Kokoro voice files searched before the model's `voices/` (`audio`)                                             |
 
 ## Image Inputs
 
@@ -288,11 +282,11 @@ the place of its own part in the prompt; the reply describes it. Without
 error shape. `blazr chat` attaches an image to the next turn with
 `/image <path>`.
 
-| Route                  | Image part                                                       |
-| ---------------------- | ---------------------------------------------------------------- |
-| `/v1/chat/completions` | `image_url` part: data URI, `http(s)` URL, or base64             |
-| `/v1/responses`        | `input_image` part: `image_url` as a data URL or `http(s)` URL   |
-| `/v1/messages`         | `image` block: a `base64` source, or a `url` source              |
+| Route                  | Image part                                                     |
+| ---------------------- | -------------------------------------------------------------- |
+| `/v1/chat/completions` | `image_url` part: data URI, `http(s)` URL, or base64           |
+| `/v1/responses`        | `input_image` part: `image_url` as a data URL or `http(s)` URL |
+| `/v1/messages`         | `image` block: a `base64` source, or a `url` source            |
 
 ## Chat Templates
 
@@ -346,25 +340,25 @@ Each command prints its full flag list with `--help`.
 
 ### Exit codes
 
-| Code | Meaning                                                                  |
-| ---- | ------------------------------------------------------------------------ |
+| Code | Meaning                                                                       |
+| ---- | ----------------------------------------------------------------------------- |
 | 0    | Done: every phrase heard as written, every narration read, every sound passed |
-| 1    | A problem remains, or the run failed                                    |
-| 2    | A bad input: a missing file, a flag out of range, a bad manifest        |
-| 3    | `speak --model` names a model blazr does not run; run it another way    |
+| 1    | A problem remains, or the run failed                                          |
+| 2    | A bad input: a missing file, a flag out of range, a bad manifest              |
+| 3    | `speak --model` names a model blazr does not run; run it another way          |
 
 ### Models on first use
 
 A model the commands need and do not find on disk downloads from the
 Hugging Face hub on first use, once:
 
-| Model                                     | Used by                                      |
-| ----------------------------------------- | -------------------------------------------- |
-| `openai/whisper-base`                     | `transcribe` and `speak` for English         |
-| `openai/whisper-small`                    | `transcribe` and `speak` for other languages |
-| `hexgrad/Kokoro-82M`, `fs90/kokoro-g2p`   | `speak` with Kokoro                          |
-| `openbmb/VoxCPM2`                         | `speak` with VoxCPM2 (CUDA build with a GPU) |
-| `laion/larger_clap_general`               | `sound-review`                               |
+| Model                                   | Used by                                      |
+| --------------------------------------- | -------------------------------------------- |
+| `openai/whisper-base`                   | `transcribe` and `speak` for English         |
+| `openai/whisper-small`                  | `transcribe` and `speak` for other languages |
+| `hexgrad/Kokoro-82M`, `fs90/kokoro-g2p` | `speak` with Kokoro                          |
+| `openbmb/VoxCPM2`                       | `speak` with VoxCPM2 (CUDA build with a GPU) |
+| `laion/larger_clap_general`             | `sound-review`                               |
 
 Downloads land in hub layout in the model folder: `$MOTION_VIDEO_MODELS`,
 else the `models` entry of `~/.config/motion-video/config.json`, else
@@ -394,14 +388,28 @@ is missing or exits 3, the skill falls back to its own path.
 
 Uses [splintr](https://github.com/ml-rust/splintr) for BPE tokenization. The vocabulary is detected from the model.
 
-| Vocabulary    | Models               | Vocab Size |
-| ------------- | -------------------- | ---------- |
-| `llama3`      | Llama 3.x, Mistral   | ~128k      |
-| `cl100k_base` | GPT-4, GPT-3.5-turbo | ~100k      |
-| `o200k_base`  | GPT-4o               | ~200k      |
-| `deepseek_v3` | DeepSeek V3/R1       | ~129k      |
+| Vocabulary    | Models                         | Vocab Size |
+| ------------- | ------------------------------ | ---------- |
+| `llama3`      | Llama 3.x                      | ~128k      |
+| `mistral_v1`  | Mistral 7B v0.1, v0.2, Mixtral | 32k        |
+| `mistral_v2`  | Mistral 7B v0.3, Codestral     | ~33k       |
+| `mistral_v3`  | Mistral NeMo, Large 2, Pixtral | ~131k      |
+| `cl100k_base` | GPT-4, GPT-3.5-turbo           | ~100k      |
+| `o200k_base`  | GPT-4o                         | ~200k      |
+| `deepseek_v3` | DeepSeek V3/R1                 | ~129k      |
 
 GGUF files include an embedded tokenizer which is extracted automatically.
+
+## Documentation
+
+| Doc                                            | Content                                               |
+| ---------------------------------------------- | ----------------------------------------------------- |
+| [docs/api.md](docs/api.md)                     | Every HTTP endpoint, request field, and error         |
+| [docs/configuration.md](docs/configuration.md) | Config file, CLI flags, environment variables         |
+| [docs/deployment.md](docs/deployment.md)       | Install, systemd, Docker, reverse proxy, TLS, metrics |
+| [docs/models.md](docs/models.md)               | Architecture, format, and quantization matrix         |
+| [docs/tuning.md](docs/tuning.md)               | Batching, caching, parallelism knobs                  |
+| [docs/architecture.md](docs/architecture.md)   | Layers, request path, modules                         |
 
 ## Architecture
 

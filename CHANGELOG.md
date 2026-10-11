@@ -10,6 +10,70 @@ preview on crates.io that shares no code with it.
 
 ---
 
+## [0.2.0] - 2026-10-11
+
+### Added
+
+- **`wgpu` feature** — the WebGPU runtime over Metal, Vulkan, DX12 and
+  WebGPU. Select it with `device: wgpu` or `device: wgpu:N`. `--version`
+  lists it. With `cuda` also on, CUDA wins.
+- **`device` key** — takes `wgpu` and `wgpu:N` beside `cpu`, `cuda` and
+  `cuda:N`.
+- **`cli`, `server` and `hub` features** — `cli` holds the command-line
+  front end. `server` holds the HTTP front end. `hub` holds the Hugging
+  Face client that both enable.
+- **Engine library** — `--no-default-features` builds the engine alone,
+  without the CLI and the HTTP stack.
+- **C API** — the `capi` feature builds `libblazr.a` and `libblazr.so`
+  with the C ABI in `include/blazr.h`. `examples/capi/` shows the link
+  steps. No Kotlin or Swift bindings exist.
+- **Engine entry point** — `engine::load_executor_from_bytes` loads a GGUF
+  file, or a SafeTensors file plus its JSON, from memory.
+- **Compute dtype** — the `--dtype f32|bf16|f16` flag of `run`, `generate`,
+  `chat`, `bench` and `serve` sets the compute dtype. So does the
+  `inference.dtype` user file key. The flag wins over the key. Without
+  either, each model's `torch_dtype` applies, else `f32`.
+- **SafeTensors BOS** — a SafeTensors checkpoint prepends BOS by the rule
+  in its own files: `tokenizer_config.json` `add_bos_token`, then the
+  Llama-family `tokenizer_class` default, then the `tokenizer.json`
+  post-processor.
+- **Token text streaming** — each request decodes its generated tokens
+  through one streaming decoder primed with the prompt. A SentencePiece
+  token keeps its leading space, and a character split over several ids
+  streams whole.
+- **Release archives** — `release.yml` builds `linux-x64`, `linux-x64-gpu`,
+  `linux-arm64`, `macos-arm64`, `windows-x64`, `windows-x64-gpu`,
+  `android-arm64` and `ios-arm64` archives, with `SHA256SUMS`. The `-gpu`
+  archives add `wgpu`. The macOS archive runs `wgpu` on Metal. No archive
+  includes CUDA.
+- **Target builds** — `aarch64-linux-android` compiles with `capi`.
+  `wasm32-unknown-unknown` compiles with `wgpu`. No model has run on a
+  device or in a browser.
+
+### Changed
+
+- **Dependencies** — boostr 0.7, numr 0.12, splintr 0.21.1, and voxr and voxr-narrate 0.5.
+- **Default features** — the default set is `f16`, `cli` and `server`. The
+  `blazr` binary requires `cli` and `server`. `info`, `list`, `pull`,
+  `run`, `chat`, `bench` and `convert` need `cli`. `serve` and `ps` need
+  `server`.
+- **Server dependencies** — axum, tower-http, TLS, reqwest, the Prometheus
+  exporter and tokio's `full` feature set sit behind `server`. Without it,
+  tokio uses `sync`, `time` and `rt`.
+- **Metrics** — the engine records through the `metrics` facade. The
+  Prometheus exporter moves behind `server`. Metrics, SLO checks and the
+  test recorder move into the `telemetry` module.
+- **GGUF loader** — GGUF files load through mmap on every target except
+  `wasm32`. For Llama 3.2 1B Q4_K_M on x86_64 Linux, peak RSS fell from
+  2,977,316 kB to 1,929,888 kB.
+- **Pooling** — the embedding pooling helpers move from `server` to
+  `engine::pooling`.
+- **Browser builds** — on `wasm32-unknown-unknown`, `getrandom` uses the
+  `wasm_js` backend and `uuid` uses the `js` feature.
+- **Dependencies** — `dotenvy` is removed.
+
+---
+
 ## [0.1.3] - 2026-10-11
 
 ### Added
@@ -68,33 +132,6 @@ preview on crates.io that shares no code with it.
 - **Flags** — `swarm --host` and `disagg --host` set the HTTP API address.
   `swarm --api-key` sets the leader's API key, with `BLAZR_API_KEY` as the
   fallback.
-- **`wgpu` feature** — the WebGPU runtime over Metal, Vulkan, DX12 and
-  WebGPU. Select it with `device: wgpu` or `device: wgpu:N`. `--version`
-  lists it. With `cuda` also on, CUDA wins.
-- **`device` key** — takes `wgpu` and `wgpu:N` beside `cpu`, `cuda` and
-  `cuda:N`.
-- **`cli`, `server` and `hub` features** — `cli` holds the command-line
-  front end. `server` holds the HTTP front end. `hub` holds the Hugging
-  Face client that both enable.
-- **Engine library** — `--no-default-features` builds the engine alone,
-  without the CLI and the HTTP stack.
-- **C API** — the `capi` feature builds `libblazr.a` and `libblazr.so`
-  with the C ABI in `include/blazr.h`. `examples/capi/` shows the link
-  steps. No Kotlin or Swift bindings exist.
-- **Engine entry point** — `engine::load_executor_from_bytes` loads a GGUF
-  file, or a SafeTensors file plus its JSON, from memory.
-- **Compute dtype** — the `--dtype f32|bf16|f16` flag of `run`, `generate`,
-  `chat`, `bench` and `serve` sets the compute dtype. So does the
-  `inference.dtype` user file key. The flag wins over the key. Without
-  either, each model's `torch_dtype` applies, else `f32`.
-- **Release archives** — `release.yml` builds `linux-x64`, `linux-x64-gpu`,
-  `linux-arm64`, `macos-arm64`, `windows-x64`, `windows-x64-gpu`,
-  `android-arm64` and `ios-arm64` archives, with `SHA256SUMS`. The `-gpu`
-  archives add `wgpu`. The macOS archive runs `wgpu` on Metal. No archive
-  includes CUDA.
-- **Target builds** — `aarch64-linux-android` compiles with `capi`.
-  `wasm32-unknown-unknown` compiles with `wgpu`. No model has run on a
-  device or in a browser.
 
 ### Changed
 
@@ -156,23 +193,6 @@ preview on crates.io that shares no code with it.
 - **`serve`** — `--tts-model` loads Kokoro, VITS and VoxCPM2 on the server's
   device, as `--asr-model` loads Whisper. A CUDA build serves them from the
   configured CUDA device instead of the CPU or device 0.
-- **Default features** — the default set is `f16`, `cli` and `server`. The
-  `blazr` binary requires `cli` and `server`. `info`, `list`, `pull`,
-  `run`, `chat`, `bench` and `convert` need `cli`. `serve` and `ps` need
-  `server`.
-- **Server dependencies** — axum, tower-http, TLS, reqwest, the Prometheus
-  exporter and tokio's `full` feature set sit behind `server`. Without it,
-  tokio uses `sync`, `time` and `rt`.
-- **Metrics** — the engine records through the `metrics` facade. The
-  Prometheus exporter moves behind `server`.
-- **GGUF loader** — GGUF files load through mmap on every target except
-  `wasm32`. For Llama 3.2 1B Q4_K_M on x86_64 Linux, peak RSS fell from
-  2,977,316 kB to 1,929,888 kB.
-- **Pooling** — the embedding pooling helpers move from `server` to
-  `engine::pooling`.
-- **Browser builds** — on `wasm32-unknown-unknown`, `getrandom` uses the
-  `wasm_js` backend and `uuid` uses the `js` feature.
-- **Dependencies** — `dotenvy` is removed.
 
 ### Removed
 
@@ -182,9 +202,9 @@ preview on crates.io that shares no code with it.
   `inference.moe_gpu_experts` keys. A config that still sets either key
   parses and ignores it. In `config.yaml` each logs an unknown-key warning.
 - **Unused `inference` keys** — `weights_path`, `device`, `flash_attention`
-  and `kv_cache` had no reader and are gone. A model `config.json` that
-  sets them still parses and ignores them. In `config.yaml` each logs an
-  unknown-key warning.
+  and `kv_cache` had no reader and are gone. `dtype` is no longer a config
+  key. A model `config.json` that sets them still parses and ignores them.
+  In `config.yaml` each logs an unknown-key warning.
 
 ### Fixed
 

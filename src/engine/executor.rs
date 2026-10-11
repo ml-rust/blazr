@@ -23,7 +23,6 @@ use crate::config::BlazrConfig;
 use crate::model::chat_template::ChatTemplate;
 
 use super::lora::{load_lora_adapter, LoraAdapterRegistry};
-use super::moe_offload::{LayerExpertPlacement, MoeOffloadConfig, MoeOffloadManager};
 use super::vision_tower::{ImageTokenLimits, VisionTower};
 
 /// Inference executor
@@ -51,10 +50,6 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) model_dir: Option<PathBuf>,
     /// Lazily-loaded draft model for speculative decoding
     pub(crate) draft_model: std::sync::Mutex<Option<Arc<LoadedModel<R>>>>,
-    /// MoE expert offload manager (present only for MoE models)
-    pub(crate) moe_offload: Option<std::sync::Mutex<MoeOffloadManager>>,
-    /// Current per-layer expert placements, updated after each rebalance step.
-    pub(crate) expert_placements: Arc<std::sync::RwLock<Option<Vec<LayerExpertPlacement>>>>,
     /// LoRA adapter registry — holds all named adapters loaded for this model instance
     pub(crate) lora_registry: Arc<LoraAdapterRegistry<R>>,
     /// Vision tower for image inputs, loaded from `inference.mmproj`.
@@ -170,39 +165,6 @@ where
             None
         };
 
-        // MoE offload manager
-        let moe_offload = {
-            let moe_cfg = MoeOffloadConfig::from_inference_config(&config.inference);
-            match (model.moe_config(), moe_cfg) {
-                (Some(moe), Some(offload_cfg)) => {
-                    let num_experts = moe.num_experts;
-                    // Estimate expert size: 3 matrices * intermediate * hidden * dtype_bytes
-                    let intermediate = moe
-                        .intermediate_size
-                        .unwrap_or(config.inference.max_context_len.unwrap_or(4096));
-                    let hidden = model.num_layers(); // approximation; real hidden comes from config
-                    let expert_bytes = 3 * intermediate * hidden * 4; // assume F32
-                    let available_vram = 0; // CPU-only: 0 VRAM → auto resolves to CPU or hybrid
-                    let placement =
-                        offload_cfg.resolve_strategy(num_experts, expert_bytes, available_vram);
-                    tracing::info!(
-                        "MoE offload: {} experts, {} on GPU, {} on CPU (strategy: {:?})",
-                        num_experts,
-                        placement.gpu_expert_count,
-                        placement.cpu_expert_count,
-                        offload_cfg.strategy
-                    );
-                    Some(std::sync::Mutex::new(MoeOffloadManager::new(
-                        offload_cfg,
-                        model.num_layers(),
-                        num_experts,
-                        &placement,
-                    )))
-                }
-                _ => None,
-            }
-        };
-
         // GPU prefix cache (CUDA only, opt-in)
         #[cfg(feature = "cuda")]
         let gpu_prefix_cache = if config.inference.gpu_prefix_cache
@@ -246,8 +208,6 @@ where
             prefix_cache,
             model_dir: None,
             draft_model: std::sync::Mutex::new(None),
-            moe_offload,
-            expert_placements: Arc::new(std::sync::RwLock::new(None)),
             lora_registry: Arc::new(LoraAdapterRegistry::new()),
             vision_tower: None,
             #[cfg(feature = "cuda")]

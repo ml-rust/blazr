@@ -375,7 +375,6 @@ where
                         &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
                         new_seq_len_k, cur_seq_len, None, None,
                     ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
-                    Self::moe_offload_step(&self.moe_offload, &self.expert_placements, &self.model, &self.device);
                     let fwd_time = t1.elapsed();
 
                     let t2 = std::time::Instant::now();
@@ -439,7 +438,6 @@ where
                     let position = kv_cache.seq_len();
                     let next_logits = self.model.forward_with_kv_cache(&next_input, &mut kv_cache, position)
                         .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
-                    Self::moe_offload_step(&self.moe_offload, &self.expert_placements, &self.model, &self.device);
                     let fwd_time = t1.elapsed();
 
                     let t2 = std::time::Instant::now();

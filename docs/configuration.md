@@ -177,8 +177,6 @@ Blazr reads this section from `config.json`. The defaults are the `InferenceConf
 | `speculative.num_speculative_tokens` | integer          | `5`                 | No           | Tokens speculated per step. No reader found.                                                   |
 | `speculative.adaptive_depth`         | boolean          | `false`             | No           | Adjusts speculation depth from the acceptance rate. No reader found.                           |
 | `tensor_parallel_size`               | integer          | `1`                 | No           | Parsed. No caller reads it. Tensor parallelism reads `BLAZR_TP_SIZE`.                          |
-| `moe_offload`                        | string           | unset               | No           | MoE offload strategy                                                                           |
-| `moe_gpu_experts`                    | integer          | `0`                 | No           | MoE experts kept on GPU                                                                        |
 | `graphs`                             | boolean          | `false`             | No           | CUDA graph capture for greedy decode. Set by `run --graphs`. No other reader found.            |
 | `mmproj`                             | path             | unset               | Yes          | Qwen3-VL mmproj GGUF for image inputs                                                          |
 | `image_min_tokens`                   | integer          | unset               | Yes          | Fewest output tokens per image. Unset keeps the mmproj value.                                  |

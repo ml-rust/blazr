@@ -124,13 +124,6 @@ The CUDA graph path needs a CUDA build. The key `inference.graphs` has no reader
 | Swarm (pipeline)                 | `blazr swarm --role`, `--leader`, `--swarm-port`, `--port`, `--token` or env `BLAZR_SWARM_TOKEN` | `--role worker` | Assigns model layers to nodes with a pipeline schedule. Requires the `distributed` feature.                      |
 | Disaggregated prefill and decode | `blazr disagg --role` (`router`, `prefill`, `decode`)                                            | `router`        | Runs prefill and decode on separate nodes. The router takes `--prefill` and `--decode` worker addresses.         |
 
-## MoE expert offload
-
-| Knob             | Where set                   | Default     | Effect                                                                                                                                            |
-| ---------------- | --------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Offload strategy | `inference.moe_offload`     | unset (off) | Accepts `gpu`, `cpu`, `hybrid`, or `auto`. Any other value, or no value, disables offload.                                                        |
-| GPU experts      | `inference.moe_gpu_experts` | `0`         | Sets the experts kept on GPU in `hybrid` mode. The code comment says `0` sizes the set from free VRAM. This guide does not confirm that behavior. |
-
 ## Layer offload to CPU
 
 | Knob       | Where set                               | Default | Effect                                                                                      |

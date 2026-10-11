@@ -157,17 +157,6 @@ pub struct InferenceConfig {
     #[serde(default = "default_tensor_parallel")]
     pub tensor_parallel_size: usize,
 
-    /// MoE expert offloading strategy.
-    /// Only used for Mixture-of-Experts models (DeepSeek-V2/V3, Mixtral).
-    /// Values: "auto" (default), "gpu", "cpu", "hybrid"
-    #[serde(default)]
-    pub moe_offload: Option<String>,
-
-    /// Number of MoE experts to keep on GPU in hybrid offloading mode.
-    /// If 0, auto-computed from available VRAM.
-    #[serde(default)]
-    pub moe_gpu_experts: usize,
-
     /// Enable graph capture for greedy decode (backend-agnostic).
     ///
     /// After prompt prefill, captures the single-token decode forward pass as a
@@ -257,8 +246,6 @@ impl Default for InferenceConfig {
             kv_pool_blocks: 0,
             speculative: None,
             tensor_parallel_size: 1,
-            moe_offload: None,
-            moe_gpu_experts: 0,
             graphs: false,
             mmproj: None,
             image_min_tokens: None,

@@ -202,15 +202,6 @@ where
                     config.model_type(),
                     self.chat_template.as_deref(),
                 )?;
-                if let Some(ref moe_config) =
-                    super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)
-                {
-                    tracing::info!(
-                        strategy = ?moe_config.strategy,
-                        gpu_experts = moe_config.gpu_experts,
-                        "MoE expert offloading configured"
-                    );
-                }
                 Arc::new(
                     Executor::new_tensor_parallel(
                         model,
@@ -251,15 +242,6 @@ where
                 config.model_type(),
                 self.chat_template.as_deref(),
             )?;
-            if let Some(ref moe_config) =
-                super::moe_offload::MoeOffloadConfig::from_inference_config(&config.inference)
-            {
-                tracing::info!(
-                    strategy = ?moe_config.strategy,
-                    gpu_experts = moe_config.gpu_experts,
-                    "MoE expert offloading configured"
-                );
-            }
             Arc::new(
                 Executor::new(model, config, tokenizer, self.device.clone(), self.num_ctx)?
                     .with_chat_template(chat_template)

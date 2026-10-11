@@ -33,8 +33,6 @@ mod lane_scheduler;
 mod lane_session;
 pub mod lora;
 pub(crate) mod mirostat;
-pub mod moe_offload;
-pub mod moe_offload_types;
 pub mod request_registry;
 pub mod request_scheduler;
 pub(crate) mod sampling;

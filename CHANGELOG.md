@@ -10,7 +10,7 @@ preview on crates.io that shares no code with it.
 
 ---
 
-## [Unreleased]
+## [0.1.3] - 2026-10-11
 
 ### Added
 
@@ -71,6 +71,7 @@ preview on crates.io that shares no code with it.
 
 ### Changed
 
+- **Dependencies** — boostr 0.6, voxr and voxr-narrate 0.4, and through them numr 0.11.
 - **CLI sampling defaults** — with no flag and no config, `--temperature`
   now falls back to `1.0` instead of `0.7`. `--top-p` falls back to `1.0`
   instead of `0.9`. This applies to `run`, `generate` and `chat`. The

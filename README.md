@@ -371,11 +371,19 @@ every download: a missing model then fails with its name and the
 
 ### CPU and CUDA builds
 
-Kokoro, VITS, Whisper and CLAP run on the CPU in every build. `speak` picks
-VoxCPM2 by default only on the CUDA build (`--features audio,cuda`) with an
-NVIDIA GPU with 8 GB of memory. Elsewhere it
-picks Kokoro. `--engine voxcpm --device cpu` runs VoxCPM2 on the CPU, at a
-small fraction of GPU speed.
+On the CUDA build (`--features audio,cuda`) with an NVIDIA GPU, `speak` runs
+Kokoro, VITS, VoxCPM2 and Whisper on the first GPU. `transcribe` runs
+Whisper there, and `sound-review` runs CLAP there. `speak --device cpu` keeps
+every model of the run on the CPU. Every other build runs them all on the
+CPU. A Kokoro or VITS take follows `--seed`: one seed gives the same take on
+one device, and a different take on the CPU and the GPU.
+
+`blazr serve` loads every `--asr-model` and `--tts-model` on the server's
+device: the configured CUDA device on the CUDA build, else the CPU.
+
+`speak` picks VoxCPM2 by default only on the CUDA build with an NVIDIA GPU
+with 8 GB of memory. Elsewhere it picks Kokoro. `--engine voxcpm --device
+cpu` runs VoxCPM2 on the CPU, at a small fraction of GPU speed.
 
 ### The motion-video skill
 

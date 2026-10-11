@@ -130,6 +130,11 @@ where
         }
     }
 
+    /// The device this scheduler loads onto: the server's device.
+    pub fn device(&self) -> &R::Device {
+        &self.device
+    }
+
     /// Load the vision tower `overrides` names beside every model, with its
     /// image token limits.
     pub fn with_vision(mut self, overrides: VisionOverrides) -> Self {

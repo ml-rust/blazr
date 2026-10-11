@@ -1,10 +1,10 @@
-//! The speech engine a speak run resolves to, found on disk and loaded:
-//! Kokoro, a VITS (MMS-TTS) model, or VoxCPM2 on the device the run picks.
-//! A command needs no model.
+//! The speech engine a speak run resolves to, found on disk and loaded on
+//! the device the run picks: Kokoro, a VITS (MMS-TTS) model, or VoxCPM2. A
+//! command needs no model.
 
 use std::path::{Path, PathBuf};
 
-use boostr::runtime::cpu::CpuRuntime;
+use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
 use voxr::kokoro::KokoroEngine;
 use voxr::tts::{is_vits_config, VitsEngine};
 use voxr::voxcpm::{VoxCpm2Engine, VoxCpm2SynthOptions};
@@ -19,6 +19,24 @@ use super::weights::holds_safetensors;
 use crate::loader::hub::{missing_file, ModelKind, ModelSearch, VOXCPM_ID};
 use crate::loader::{load_kokoro_engine, voxcpm2_source_at};
 
+/// A Kokoro engine on either runtime.
+pub enum LoadedKokoro {
+    /// On the CPU.
+    Cpu(KokoroEngine<CpuRuntime>),
+    /// On CUDA device 0.
+    #[cfg(feature = "cuda")]
+    Cuda(KokoroEngine<boostr::runtime::cuda::CudaRuntime>),
+}
+
+/// A VITS engine on either runtime.
+pub enum LoadedVits {
+    /// On the CPU.
+    Cpu(VitsEngine<CpuRuntime>),
+    /// On CUDA device 0.
+    #[cfg(feature = "cuda")]
+    Cuda(VitsEngine<boostr::runtime::cuda::CudaRuntime>),
+}
+
 /// A VoxCPM2 engine on either runtime.
 pub enum LoadedVoxcpm {
     /// On the CPU.
@@ -31,8 +49,8 @@ pub enum LoadedVoxcpm {
 /// The engines a run speaks with. A run loads at most one.
 #[derive(Default)]
 pub struct Engines {
-    kokoro: Option<KokoroEngine>,
-    vits: Option<(String, VitsEngine)>,
+    kokoro: Option<LoadedKokoro>,
+    vits: Option<(String, LoadedVits)>,
     voxcpm: Option<LoadedVoxcpm>,
     /// The VoxCPM2 checkpoint this run downloaded first. The skill speaks
     /// such a run with no checkpoint named: its cache keys and notes say
@@ -105,6 +123,43 @@ pub fn refuse_foreign_model(
     Ok(())
 }
 
+/// Loads the Kokoro checkpoint at `dir` on `at`.
+fn load_kokoro(
+    dir: &Path,
+    search: &ModelSearch,
+    at: Placement,
+) -> std::result::Result<LoadedKokoro, CommandError> {
+    Ok(match at {
+        Placement::Cpu => LoadedKokoro::Cpu(
+            load_kokoro_engine::<CpuRuntime>(dir, search, "speak", &CpuDevice::new())
+                .map_err(CommandError::Failed)?,
+        ),
+        #[cfg(feature = "cuda")]
+        Placement::Cuda => {
+            use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
+            LoadedKokoro::Cuda(
+                load_kokoro_engine::<CudaRuntime>(dir, search, "speak", &CudaDevice::new(0))
+                    .map_err(CommandError::Failed)?,
+            )
+        }
+    })
+}
+
+/// Loads the VITS checkpoint at `dir` on `at`.
+fn load_vits(dir: &Path, at: Placement) -> voxr::Result<LoadedVits> {
+    Ok(match at {
+        Placement::Cpu => LoadedVits::Cpu(VitsEngine::from_dir_on(dir, &CpuDevice::new())?),
+        #[cfg(feature = "cuda")]
+        Placement::Cuda => {
+            use boostr::runtime::cuda::{CudaDevice, CudaRuntime};
+            LoadedVits::Cuda(VitsEngine::<CudaRuntime>::from_dir_on(
+                dir,
+                &CudaDevice::new(0),
+            )?)
+        }
+    })
+}
+
 /// Loads the engine `choice` speaks with. A Hugging Face model not on
 /// disk is downloaded first. VoxCPM2's is too, unless the config's
 /// `tts.checkpoint` names one that is not there.
@@ -122,8 +177,7 @@ pub fn load_engines(
             let dir = search
                 .obtain("speak", model, ModelKind::Kokoro, None)
                 .map_err(CommandError::Failed)?;
-            engines.kokoro =
-                Some(load_kokoro_engine(&dir, search, "speak").map_err(CommandError::Failed)?);
+            engines.kokoro = Some(load_kokoro(&dir, search, at)?);
         }
         EngineChoice::Model { model } => {
             refuse_foreign_model(search, model)?;
@@ -133,7 +187,7 @@ pub fn load_engines(
             if !is_vits_config(&dir.join("config.json")).map_err(|e| load_failed(model, e))? {
                 return Err(not_vits(model));
             }
-            let engine = VitsEngine::from_dir(&dir).map_err(|e| load_failed(model, e))?;
+            let engine = load_vits(&dir, at).map_err(|e| load_failed(model, e))?;
             engines.vits = Some((model.clone(), engine));
         }
         EngineChoice::Voxcpm { .. } => {
@@ -199,11 +253,17 @@ pub fn run_speak<'a, H: Hearing>(
             eprintln!("{line}");
         }
     });
-    if let Some(k) = &engines.kokoro {
-        runs = runs.with_kokoro(KokoroSpeech::new(k));
+    match &engines.kokoro {
+        None => {}
+        Some(LoadedKokoro::Cpu(k)) => runs = runs.with_kokoro(KokoroSpeech::new(k)),
+        #[cfg(feature = "cuda")]
+        Some(LoadedKokoro::Cuda(k)) => runs = runs.with_kokoro(KokoroSpeech::new(k)),
     }
-    if let Some((id, v)) = &engines.vits {
-        runs = runs.with_model(id.clone(), VitsSpeech::new(v)?);
+    match &engines.vits {
+        None => {}
+        Some((id, LoadedVits::Cpu(v))) => runs = runs.with_model(id.clone(), VitsSpeech::new(v)?),
+        #[cfg(feature = "cuda")]
+        Some((id, LoadedVits::Cuda(v))) => runs = runs.with_model(id.clone(), VitsSpeech::new(v)?),
     }
     let RunInput {
         script,

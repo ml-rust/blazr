@@ -11,6 +11,8 @@
 mod common;
 
 use blazr::loader::load_tts_from_dir;
+use blazr::server::handlers::ServerRuntime;
+use boostr::Runtime;
 use common::{hub_online, model_fixture, skip_notice, symlink};
 use voxr::voxcpm::VoxCpm2SynthOptions;
 use voxr::SynthesizeOptions;
@@ -38,7 +40,8 @@ fn the_serve_loader_resolves_kokoro_g2p_without_a_g2p_folder() {
     std::env::remove_var("HF_HUB_CACHE");
     std::env::remove_var("HF_HUB_OFFLINE");
 
-    let first = load_tts_from_dir(bare.path(), VoxCpm2SynthOptions::default())
+    let device = ServerRuntime::default_device();
+    let first = load_tts_from_dir(bare.path(), VoxCpm2SynthOptions::default(), &device)
         .unwrap_or_else(|e| panic!("loading Kokoro with the repo downloaded: {e:#}"));
     assert!(first.has_engine());
     let snapshots = hub.path().join("hub/models--fs90--kokoro-g2p/snapshots");
@@ -54,7 +57,7 @@ fn the_serve_loader_resolves_kokoro_g2p_without_a_g2p_folder() {
 
     // Offline, the repo is found where it was downloaded.
     std::env::set_var("HF_HUB_OFFLINE", "1");
-    let again = load_tts_from_dir(bare.path(), VoxCpm2SynthOptions::default())
+    let again = load_tts_from_dir(bare.path(), VoxCpm2SynthOptions::default(), &device)
         .unwrap_or_else(|e| panic!("loading Kokoro with the repo on disk: {e:#}"));
     let audio = again
         .synthesize(

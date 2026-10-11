@@ -6,11 +6,11 @@
 //! and stitches the per-window results back together with their time ranges.
 
 use anyhow::{anyhow, Result};
-
 use boostr::Runtime;
+
 use voxr::{TranscribeOptions, WhisperBundle, WordTiming};
 
-use super::handlers::ServerRuntime;
+use super::handlers::{ServerDevice, ServerRuntime};
 
 /// Sample rate the audio must arrive at.
 pub const WHISPER_SAMPLE_RATE: usize = 16_000;
@@ -34,6 +34,8 @@ pub struct ChunkTranscript {
 /// windows and concatenating results. Each chunk is processed independently
 /// (no context carryover yet — that's a prompt-tokens improvement for later).
 ///
+/// - `device`: the server's device, which holds `bundle`. Its context is
+///   made current on the calling thread first.
 /// - `samples`: 16 kHz mono f32 in `[-1, 1]`.
 /// - `language`: BCP-47 code like `"en"`; `None` detects it per chunk.
 /// - `translate`: `true` emits `<|translate|>` (to English) instead of `<|transcribe|>`.
@@ -43,6 +45,7 @@ pub struct ChunkTranscript {
 ///   so every timestamp lands on the input's clock, not the chunk's.
 pub fn transcribe_chunks(
     bundle: &WhisperBundle<ServerRuntime>,
+    device: &ServerDevice,
     samples: &[f32],
     language: Option<&str>,
     translate: bool,
@@ -52,8 +55,7 @@ pub fn transcribe_chunks(
     if samples.is_empty() {
         return Err(anyhow!("no audio samples to transcribe"));
     }
-    let device = <ServerRuntime as Runtime>::default_device();
-    let client = <ServerRuntime as Runtime>::default_client(&device);
+    let client = ServerRuntime::default_client(device);
     let budget = bundle.generate_options().max_new_tokens.min(max_new_tokens);
     let opts = TranscribeOptions {
         language,

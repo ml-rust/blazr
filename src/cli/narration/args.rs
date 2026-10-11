@@ -69,7 +69,7 @@ const SPEAK_FLAGS: &[(&str, &str)] = &[
     ("--written FILE", "The written script: the same words, punctuated for captions."),
     ("--review", "Print the script review and stop, before any audio."),
     ("--raw", "Skip the voice polish."),
-    ("--device D", "The device, such as cpu. Set, VoxCPM2 runs where it is not ready."),
+    ("--device D", "The device Kokoro, VITS, Whisper and VoxCPM2 run on, such as cpu. Default: the first GPU in a CUDA build, else the CPU. Set, VoxCPM2 runs where it is not ready."),
     ("--language L", "The script's language, which picks the recognizer."),
     ("--model HF_ID", "A Hugging Face TTS model: a VITS (MMS-TTS) id or directory. Any other exits 3."),
     ("--command TEMPLATE", "Any TTS, run once per phrase: {text}, {text_file}, {out}, {voice} and {reference} are filled in."),

@@ -38,7 +38,7 @@ pub async fn speech(
         return stream_speech(bundle, request.input, voice_id, request.speed, format).await;
     }
 
-    // Run synthesis off the reactor — neural inference is CPU-bound.
+    // Run synthesis off the reactor on a blocking worker.
     let input = request.input.clone();
     let speed = request.speed;
     let synth_bundle = Arc::clone(&bundle);

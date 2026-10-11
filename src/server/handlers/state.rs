@@ -17,6 +17,9 @@ pub type ServerRuntime = boostr::CudaRuntime;
 #[cfg(not(feature = "cuda"))]
 pub type ServerRuntime = boostr::CpuRuntime;
 
+/// The device the server loads every model onto.
+pub type ServerDevice = <ServerRuntime as boostr::Runtime>::Device;
+
 /// Standalone vision embedder (SigLIP/CLIP) keyed by model name.
 pub type VisionEmbedder = boostr::model::vision::ImageEmbedder<ServerRuntime>;
 

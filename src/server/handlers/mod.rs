@@ -20,6 +20,6 @@ pub use slots::{create_slot, delete_slot, list_slots};
 pub use state::AsrBundle;
 #[cfg(feature = "audio")]
 pub use state::TtsBundle;
-pub use state::{AppState, ServerRuntime, VisionEmbedder};
+pub use state::{AppState, ServerDevice, ServerRuntime, VisionEmbedder};
 pub use template::apply_template;
 pub use tokenize::{detokenize, tokenize};

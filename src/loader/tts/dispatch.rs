@@ -3,17 +3,19 @@
 //! The directory's `config.json` decides the engine:
 //!
 //! - a VoxCPM2 config (it carries `dit_config`) loads a `VoxCpm2Engine` —
-//!   voice cloning from the reference recordings in `voices/`, on CUDA when
-//!   this binary was built with it;
+//!   voice cloning from the reference recordings in `voices/`;
 //! - a VITS config (`model_type` is `vits`, as in every MMS-TTS checkpoint)
-//!   loads a `VitsEngine` on the CPU, one voice per checkpoint;
+//!   loads a `VitsEngine`, one voice per checkpoint;
 //! - a Kokoro config (`vocab.json` or an inlined `vocab`, safetensors
-//!   weights) loads a `KokoroEngine` on the CPU;
+//!   weights) loads a `KokoroEngine`;
 //! - no `config.json`, but one `.gguf` whose `general.architecture` is
 //!   `voxcpm2`, loads a `VoxCpm2Engine` from that file alone: a GGUF written
 //!   by compressr embeds its config, tokenizer and AudioVAE;
 //! - nothing else gives a scaffolding bundle whose `synthesize` returns
 //!   `NotImplemented`.
+//!
+//! Every engine loads on the server's device: the CUDA device a CUDA build
+//! serves on, else the CPU.
 //!
 //! All engine logic lives in boostr; this file only recognises the layout
 //! and picks the device.
@@ -24,12 +26,13 @@ use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
 use boostr::format::gguf::Gguf;
-use voxr::tts::{is_vits_config, load_vits_from_dir};
+use voxr::tts::{is_vits_config, load_vits_from_dir_on};
 use voxr::voxcpm::VoxCpm2SynthOptions;
 use voxr::{default_kokoro_voices, TtsBundle};
 
 use super::kokoro::load_kokoro;
 use super::voxcpm::load_voxcpm2;
+use crate::server::handlers::{ServerDevice, ServerRuntime};
 
 /// Kokoro's native sample rate (used as the sample rate advertised by a
 /// scaffolding bundle when no real checkpoint is present).
@@ -44,7 +47,13 @@ const KOKORO_SAMPLE_RATE: u32 = 24_000;
 /// `synth` carries the per-request generation defaults (batching included)
 /// for a VoxCPM2 engine. A Kokoro bundle ignores it — Kokoro has no batching
 /// knobs of its own.
-pub fn load_tts_from_dir<P: AsRef<Path>>(path: P, synth: VoxCpm2SynthOptions) -> Result<TtsBundle> {
+///
+/// `device` is the server's device. Every engine loads onto it.
+pub fn load_tts_from_dir<P: AsRef<Path>>(
+    path: P,
+    synth: VoxCpm2SynthOptions,
+    device: &ServerDevice,
+) -> Result<TtsBundle> {
     let path = path.as_ref();
     if !path.exists() {
         return Err(anyhow!("tts model directory not found: {}", path.display()));
@@ -58,7 +67,7 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P, synth: VoxCpm2SynthOptions) ->
     if !config_path.exists() {
         if let Some(gguf) = single_file_with_ext(path, "gguf")? {
             if is_voxcpm2_gguf(&gguf)? {
-                return load_voxcpm2(path, None, synth);
+                return load_voxcpm2(path, None, synth, device);
             }
         }
         eprintln!(
@@ -72,13 +81,13 @@ pub fn load_tts_from_dir<P: AsRef<Path>>(path: P, synth: VoxCpm2SynthOptions) ->
         ));
     }
     if is_voxcpm2_config(&config_path)? {
-        return load_voxcpm2(path, Some(&config_path), synth);
+        return load_voxcpm2(path, Some(&config_path), synth, device);
     }
     if is_vits_config(&config_path).with_context(|| format!("reading {}", config_path.display()))? {
-        return load_vits_from_dir(path)
+        return load_vits_from_dir_on::<ServerRuntime>(path, device)
             .with_context(|| format!("loading VITS model from {}", path.display()));
     }
-    load_kokoro(path)
+    load_kokoro(path, device)
 }
 
 /// Whether `config.json` is a VoxCPM2 config: it carries the DiT sub-model's
@@ -124,13 +133,20 @@ pub(super) fn single_file_with_ext(dir: &Path, ext: &str) -> Result<Option<PathB
 
 #[cfg(test)]
 mod tests {
+    use boostr::Runtime;
+
     use super::*;
+
+    fn device() -> ServerDevice {
+        ServerRuntime::default_device()
+    }
 
     #[test]
     fn load_errors_on_missing_dir() {
         assert!(load_tts_from_dir(
             "/nonexistent-kokoro-path-xyz",
-            VoxCpm2SynthOptions::default()
+            VoxCpm2SynthOptions::default(),
+            &device(),
         )
         .is_err());
     }
@@ -140,7 +156,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("blazr_tts_loader_no_config");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let bundle = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).unwrap();
+        let bundle = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default(), &device()).unwrap();
         assert!(!bundle.has_engine());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -176,7 +192,7 @@ mod tests {
         let gguf = tmp.join("model.gguf");
         std::fs::write(&gguf, gguf_with_architecture("voxcpm2")).unwrap();
         assert!(is_voxcpm2_gguf(&gguf).unwrap());
-        assert!(load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).is_err());
+        assert!(load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default(), &device()).is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -191,7 +207,7 @@ mod tests {
         let config = tmp.join("config.json");
         std::fs::write(&config, r#"{"model_type": "vits"}"#).unwrap();
         assert!(is_vits_config(&config).unwrap());
-        let Err(err) = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()) else {
+        let Err(err) = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default(), &device()) else {
             panic!("a VITS directory without weights loaded");
         };
         assert!(
@@ -211,7 +227,7 @@ mod tests {
         let gguf = tmp.join("model.gguf");
         std::fs::write(&gguf, gguf_with_architecture("llama")).unwrap();
         assert!(!is_voxcpm2_gguf(&gguf).unwrap());
-        let bundle = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default()).unwrap();
+        let bundle = load_tts_from_dir(&tmp, VoxCpm2SynthOptions::default(), &device()).unwrap();
         assert!(!bundle.has_engine());
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -78,10 +78,10 @@ impl StreamFormat {
 /// Chunks the producer hands the body, in order.
 type Chunk = Result<Bytes, TtsError>;
 
-/// Render `input` in `voice_id` on a blocking worker and stream the encoded
-/// chunks. Resolves once the engine has produced its first chunk or failed
-/// before doing so; the status and headers of the returned response reflect
-/// that first outcome.
+/// Render `input` in `voice_id` on a blocking worker and stream the
+/// encoded chunks. Resolves once the engine has produced its first chunk or
+/// failed before doing so. The status and headers of the returned response
+/// reflect that first outcome.
 pub(super) async fn stream_speech(
     bundle: Arc<TtsBundle>,
     input: String,

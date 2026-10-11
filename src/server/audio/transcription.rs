@@ -202,22 +202,38 @@ async fn run_audio_pipeline(
         }
     };
 
-    // Run the Whisper pipeline per 30-second chunk, concatenating segments.
+    // Run the Whisper pipeline per 30-second chunk, concatenating segments,
+    // off the reactor: the model runs on a blocking worker thread.
     use crate::server::audio_transcribe::{transcribe_chunks, ChunkTranscript};
+    let sample_count = samples.len();
     let language_for_pipeline = language.clone();
-    let chunks: Vec<ChunkTranscript> = match transcribe_chunks(
-        bundle.as_ref(),
-        &samples,
-        language_for_pipeline.as_deref(),
-        translate,
-        bundle.config.max_target_positions,
-        granularities.want_words,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
+    let device = state.scheduler.device().clone();
+    let want_words = granularities.want_words;
+    let chunks: Vec<ChunkTranscript> = match tokio::task::spawn_blocking(move || {
+        transcribe_chunks(
+            bundle.as_ref(),
+            &device,
+            &samples,
+            language_for_pipeline.as_deref(),
+            translate,
+            bundle.config.max_target_positions,
+            want_words,
+        )
+    })
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Transcription failed: {e}"),
+                "server_error",
+            );
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Transcription task join error: {e}"),
                 "server_error",
             );
         }
@@ -231,7 +247,7 @@ async fn run_audio_pipeline(
         .trim()
         .to_string();
     let total_duration =
-        samples.len() as f64 / crate::server::audio_transcribe::WHISPER_SAMPLE_RATE as f64;
+        sample_count as f64 / crate::server::audio_transcribe::WHISPER_SAMPLE_RATE as f64;
     let segments: Vec<TranscriptionSegment> = chunks
         .iter()
         .enumerate()

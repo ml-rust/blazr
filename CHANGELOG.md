@@ -10,6 +10,27 @@ preview on crates.io that shares no code with it.
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **`speak`** — the CUDA build runs Kokoro and VITS on the GPU, as it runs
+  Whisper and VoxCPM2. `--device cpu` keeps them on the CPU.
+- **`speak`** — a Kokoro take follows `--seed`: one seed gives the same take
+  on one device.
+- **`serve`** — `--tts-model` loads Kokoro, VITS and VoxCPM2 on the server's
+  device, as `--asr-model` loads Whisper. A CUDA build serves them from the
+  configured CUDA device instead of the CPU or device 0.
+
+### Fixed
+
+- **`serve`** — `/v1/audio/transcriptions` and `/v1/audio/speech` make the
+  server's CUDA device current on the worker thread before they run a
+  model. Transcription runs on a blocking worker instead of the request's
+  async task, and on the configured CUDA device instead of device 0.
+
+---
+
 ## [0.1.2] - 2026-10-11
 
 ### Changed

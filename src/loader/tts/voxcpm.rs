@@ -30,6 +30,7 @@ use voxr::voxcpm::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions};
 use voxr::TtsBundle;
 
 use super::dispatch::single_file_with_ext;
+use crate::server::handlers::ServerDevice;
 
 /// The one `.safetensors` file in `dir`, required (unlike
 /// [`single_file_with_ext`], which allows zero). Mirrors its
@@ -231,18 +232,24 @@ impl Voxcpm2Source {
     }
 }
 
-/// The VoxCPM2 bundle a `--tts-model` directory serves: the engine on CUDA
-/// device 0 when this binary is built with CUDA, else on the CPU.
+/// The VoxCPM2 bundle a `--tts-model` directory serves, its engine on the
+/// server's `device`: a CUDA device when this binary is built with CUDA,
+/// else the CPU.
 pub(super) fn load_voxcpm2(
     dir: &Path,
     config_path: Option<&Path>,
     synth: VoxCpm2SynthOptions,
+    device: &ServerDevice,
 ) -> Result<TtsBundle> {
     let source = voxcpm2_source(dir, config_path)?;
     #[cfg(feature = "cuda")]
-    let engine: Arc<dyn voxr::TtsEngine> = Arc::new(source.load_cuda(synth, 0)?);
+    let engine: Arc<dyn voxr::TtsEngine> =
+        Arc::new(source.load_cuda(synth, boostr::runtime::Device::id(device))?);
     #[cfg(not(feature = "cuda"))]
-    let engine: Arc<dyn voxr::TtsEngine> = Arc::new(source.load_cpu(synth)?);
+    let engine: Arc<dyn voxr::TtsEngine> = {
+        let _ = device;
+        Arc::new(source.load_cpu(synth)?)
+    };
     let voices = engine.voices();
     let sample_rate = engine.sample_rate();
     Ok(TtsBundle::scaffolding(voices, sample_rate).with_engine(engine))

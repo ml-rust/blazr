@@ -43,17 +43,21 @@ cargo install blazr --locked --features audio          # CPU
 cargo install blazr --locked --features audio,cuda     # NVIDIA CUDA
 ```
 
+The default features are `f16`, `cli`, and `server`. `cargo install` keeps them.
+
 | Feature       | Adds                                                                            |
 | ------------- | ------------------------------------------------------------------------------- |
-| `audio`       | `/v1/audio/*` routes and the `speak`, `transcribe`, and `sound-review` commands |
+| `audio`       | `/v1/audio/*` routes and the `speak`, `transcribe`, and `sound-review` commands. Implies `server` and `cli`. |
 | `cuda`        | CUDA backend. Needs the CUDA toolkit 12.8 or newer, including 13.x.             |
-| `distributed` | The `swarm` and `disagg` commands. See [Multi-node](#multi-node).               |
+| `wgpu`        | WebGPU backend over Metal, Vulkan, or DX12. Select it with `device: wgpu`.      |
+| `distributed` | The `swarm` and `disagg` commands. Also needs `server`. See [Multi-node](#multi-node). |
 
 Create the binary from a source checkout:
 
 ```bash
 cargo build --release --features audio         # CPU
 cargo build --release --features audio,cuda    # CUDA
+cargo build --release --features wgpu          # WebGPU
 ```
 
 The binary is `target/release/blazr`. Run `blazr --version` to list the built features, for example `<version> (audio, cuda)`.
@@ -80,7 +84,7 @@ The binary is `target/release/blazr`. Run `blazr --version` to list the built fe
 | `--asr-model`, `--tts-model`               | none                     | `NAME=PATH` Whisper or TTS bundle. Available in `audio` builds only.               |
 | `--voice-dir`                              | `$BLAZR_VOICE_DIR`       | Kokoro voice directory. Available in `audio` builds only.                          |
 
-The startup output prints the listen address, the model, and `Backend: CUDA` or `Backend: CPU`.
+The startup output prints the listen address, the model, and the backend: `Backend: CUDA`, `Backend: wgpu`, or `Backend: CPU`.
 
 ### Start a fixed model
 
@@ -136,19 +140,22 @@ Set `HF_HUB_OFFLINE=1` on hosts without outbound network access. Any non-empty v
 
 ### GPU and CPU
 
-The build selects the backend. The `device` key in `config.yaml` selects the CUDA index.
+The build selects the backend. Priority is `cuda`, then `wgpu`, then the CPU. The `device` key in `config.yaml` selects the device index: `cuda:N` or `wgpu:N`.
 
 - A `cuda` build runs on the CUDA device from `device`, or device 0 when the key is unset.
+- A `wgpu` build runs on the adapter from `device`, or adapter 0 when the key is unset.
 - A default build runs on the CPU. `blazr serve` has no `--cpu` flag.
-- A `cuda` build refuses `device: cpu` for `serve`. Remove the key or set a CUDA index.
+- A `cuda` or `wgpu` build refuses `device: cpu` for `serve`. Remove the key or set a GPU index.
+- A `wgpu` build exits at startup when no adapter opens at the index. The error names the adapter and the next action.
 
-Check the startup output for `Backend: CUDA` or `Backend: CPU` after each start.
+Check the startup output for `Backend: CUDA`, `Backend: wgpu`, or `Backend: CPU` after each start.
 
 ### Data-parallel replicas
 
 Set `inference.data_parallel` in `config.yaml`, or pass `--data-parallel`, to load one copy of the start model per device.
 
 - A CUDA build places copy `i` on CUDA device `device + i`.
+- A wgpu build places copy `i` on wgpu adapter `device + i`.
 - A CPU build loads one CPU copy for each replica.
 - Each copy runs its own batching engine.
 - The chat, completions, responses, Anthropic messages, and infill handlers route through the group.
@@ -507,7 +514,7 @@ All roles default to `0.0.0.0:9190`. Set a distinct `--listen-addr` on each node
 
 ### Tensor parallelism
 
-Set `BLAZR_TP_SIZE`, or `inference.tensor_parallel_size` in `config.yaml`, above `1` to split one model across GPUs. The variable wins over the key, and the key wins over the model's `config.json`. The default is `1`. Such a run needs a build with both `cuda` and `nccl`. `blazr serve` fails at startup in any other build. The loader checks that the head counts divide by the size before it reads weights. Set `BLAZR_TP_RANK` on each process to its rank. The rank defaults to `0`.
+Set `BLAZR_TP_SIZE`, or `inference.tensor_parallel_size` in `config.yaml`, above `1` to split one model across GPUs. The variable wins over the key, and the key wins over the model's `config.json`. The default is `1`. Such a run needs a build with both `cuda` and `nccl`. `blazr serve` fails at startup in any other build. The loader checks that the head counts divide by the size before it reads weights. One blazr process runs every rank, each as a thread on GPU `device + rank`. Do not set `BLAZR_TP_RANK`: blazr refuses it, because it shares no NCCL id across processes. A tensor-parallel model decodes one sequence at a time with a contiguous KV cache. Paged attention, speculative decoding and the prefix caches are off for it. No multi-GPU run has tested this path.
 
 ## Environment variables
 
@@ -519,7 +526,7 @@ Blazr reads no `.env` file. Export these variables before the command runs.
 | `BLAZR_API_KEY`                  | `serve`, `swarm`                | API key, when `--api-key` is absent.                   |
 | `BLAZR_VOICE_DIR`                | `serve`                         | Kokoro voice directory, when `--voice-dir` is absent.  |
 | `BLAZR_SWARM_TOKEN`              | `swarm`                         | Swarm membership token.                                |
-| `BLAZR_TP_SIZE`, `BLAZR_TP_RANK` | `serve`, model loader           | Tensor parallel size and rank.                         |
+| `BLAZR_TP_SIZE`, `BLAZR_TP_RANK` | `serve`, model loader           | Tensor parallel size. A set rank is refused.           |
 | `HF_HOME`, `HF_HUB_CACHE`        | `serve`, `pull`                 | Hugging Face cache location.                           |
 | `HF_HUB_OFFLINE`                 | `serve`                         | Blocks Hugging Face fetches when set.                  |
 | `RUST_LOG`                       | all commands                    | Log filter. Defaults to `blazr=info,tower_http=debug`. |

@@ -21,7 +21,7 @@ Exceptions to the order:
 - `--voice-dir` wins over `BLAZR_VOICE_DIR`.
 - `pull --output` wins over `BLAZR_MODEL_DIR`, then `model_dir`.
 - `--mmproj`, `--image-min-tokens`, and `--image-max-tokens` replace the matching `inference` values when set.
-- The `dtype` value comes from the checkpoint's `torch_dtype`. No config key sets it. See [Model config.json](#model-configjson).
+- The compute dtype has its own order. See [Compute dtype](#compute-dtype).
 
 ## User config file
 
@@ -59,7 +59,7 @@ generation:
 | Key             | Type    | Default  | Meaning                                                                                                                  |
 | --------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `default_model` | string  | unset    | Model that a command uses when it names none                                                                             |
-| `device`        | string  | `cuda:0` | `cpu`, `cuda`, or `cuda:N`. `run` with `cpu` uses the CPU. `serve`, `chat`, `bench`, `swarm`, and `disagg` refuse `cpu` in a `cuda` build. |
+| `device`        | string  | GPU 0 of the build, else `cpu` | `cpu`, `cuda`, `cuda:N`, `wgpu`, or `wgpu:N`. `run` and `generate` with `cpu` use the CPU. `serve`, `chat`, `bench`, `swarm`, and `disagg` refuse `cpu` in a `cuda` or `wgpu` build. A value for a backend the build lacks is an error. |
 | `num_ctx`       | integer | `2048`   | Initial KV cache size in tokens for `run`, `generate`, `chat`, `bench`, and `serve`                                      |
 | `model_dir`     | string  | `./models` | Model search directory. `BLAZR_MODEL_DIR` overrides it.                                                               |
 | `port`          | integer | unset    | Older name of `server.port`                                                                                              |
@@ -67,6 +67,39 @@ generation:
 | `max_tokens`    | integer | unset    | Older name of `generation.max_tokens`                                                                                    |
 
 The `server`, `inference`, and `generation` sections hold the other keys. Old top-level keys still parse. Setting an old key and its section key together is an error.
+
+### Compute dtype
+
+The compute dtype is the one dtype of the float weights, the activations, and the KV cache. Blazr resolves it once per model, before any weight loads. It casts every F32, F16, and BF16 weight to it.
+
+| Order | Source                                  | Commands                                            |
+| ----- | --------------------------------------- | --------------------------------------------------- |
+| 1     | `--dtype <f32\|bf16\|f16>`               | `run`, `generate`, `chat`, `bench`, and `serve`     |
+| 2     | `inference.dtype` in `config.yaml`      | every command that loads a model                    |
+| 3     | `torch_dtype` in the model `config.json` | SafeTensors loads. See [torch_dtype](#torch_dtype). |
+| 4     | `f32`                                   | the backend default                                 |
+
+```yaml
+inference:
+  dtype: f32
+```
+
+| Value  | Meaning                                       |
+| ------ | --------------------------------------------- |
+| `f32`  | 32-bit float. Every backend runs it.          |
+| `bf16` | bfloat16. Needs the `f16` build feature.      |
+| `f16`  | IEEE half. Needs the `f16` build feature.     |
+
+Long names `float32`, `bfloat16`, and `float16` also parse.
+
+Rules:
+
+- An unknown value exits with an error. The error names the key or flag and the accepted values.
+- `bf16` or `f16` in a build without the `f16` feature exits with an error that names the feature.
+- wgpu computes in `f32` only. A request for `bf16` or `f16` logs a warning that names its flag or key. The model then runs `f32`.
+- A GGUF model runs `f32`. An AWQ or GPTQ model runs `f16`. A request for another dtype logs a warning, and the model keeps its own dtype.
+- A speculative draft model loads at the dtype of its target model.
+- The CPU runs `f32`, `bf16`, and `f16`. CUDA runs all three.
 
 ### Validation
 
@@ -87,7 +120,6 @@ These keys no longer apply. Each one logs an unknown-key warning in `config.yaml
 | `inference.moe_gpu_experts` | Removed with the MoE expert offload subsystem           |
 | `inference.weights_path`    | Removed                                                 |
 | `inference.device`          | Removed. Use the top-level `device` key.                |
-| `inference.dtype`           | Not a config key. The loader sets it from `torch_dtype`. |
 
 ## Model config.json
 
@@ -175,16 +207,18 @@ Parser 3 also reads `attention_bias`, `alibi`, `multi_query`, `new_decoder_archi
 
 ### torch_dtype
 
-Blazr reads `torch_dtype` from `config.json` for every SafeTensors load. The result overwrites `inference.dtype`.
+Blazr reads `torch_dtype` from `config.json` for every SafeTensors load. It is step 3 of the [compute dtype](#compute-dtype) order. `--dtype` and `inference.dtype` in `config.yaml` win over it.
 
-| `torch_dtype`               | Resulting dtype |
-| --------------------------- | --------------- |
-| `bfloat16`                  | `bf16`          |
-| `float16`                   | `f16`           |
-| `float32`                   | `f32`           |
-| Any other value, or missing | `f16`           |
+| `torch_dtype`               | Resulting dtype                          |
+| --------------------------- | ---------------------------------------- |
+| `bfloat16`                  | `bf16`                                   |
+| `float16`                   | `f16`                                    |
+| `float32`                   | `f32`                                    |
+| Any other value, or missing | The next step: `f32`, the backend default |
 
-GGUF loads use `f32`.
+The weights take the resolved dtype, whatever dtype the file stores. A `torch_dtype` of `float32` over BF16 weights runs in `f32`.
+
+An `inference.dtype` in the model `config.json` is ignored. GGUF loads use `f32`.
 
 ### inference section
 
@@ -338,6 +372,7 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 | `--tts-continuous-capacity <N>`       | `1024`                | Cache positions held per seated VoxCPM2 batch slot. `audio` feature.                                                         |
 | `--voice-dir <DIR>`                   | `BLAZR_VOICE_DIR`     | Kokoro voice file directory                                                                                                  |
 | `--reasoning-format <deepseek\|none>` | `server.reasoning_format`, else `deepseek` | Default split of reasoning output in chat responses                                                 |
+| `--dtype <f32\|bf16\|f16>`             | `inference.dtype`, else `torch_dtype`, else `f32` | Compute dtype of every served model. See [Compute dtype](#compute-dtype).                         |
 | `--mmproj <PATH>`                     | mmproj value          | Qwen3-VL mmproj GGUF for image inputs                                                                                        |
 | `--image-min-tokens <N>`              | mmproj value          | Fewest output tokens per image                                                                                               |
 | `--image-max-tokens <N>`              | mmproj value          | Most output tokens per image                                                                                                 |
@@ -359,10 +394,11 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 | `--repeat-penalty <F>`         | `generation.repeat_penalty`, else `1.1`          | Repetition penalty. `1.0` disables it.                                                          |
 | `--repeat-last-n <N>`          | `generation.repeat_last_n`, else `64`            | Recent tokens the repetition penalty covers                                                     |
 | `--gpu-layers <N>`             | `0`                                              | Layers on GPU. `-1` loads all layers on GPU. `0` selects automatically. CUDA path only.         |
-| `--cpu`                        | off                                              | Runs on CPU                                                                                     |
+| `--cpu`                        | off                                              | Runs on the CPU runtime                                                                         |
 | `--num-ctx <N>`                | `num_ctx`, else `2048`                           | Initial KV cache size. The cache grows as needed.                                               |
 | `--paged-attention`            | off                                              | Paged KV cache. CUDA path only.                                                                 |
 | `--graphs`                     | off                                              | CUDA graph capture for greedy decode. CUDA path only.                                           |
+| `--dtype <f32\|bf16\|f16>`      | `inference.dtype`, else `torch_dtype`, else `f32` | Compute dtype of the weights, activations, and KV cache. See [Compute dtype](#compute-dtype). |
 | `--mmproj <PATH>`              | mmproj value                                     | Qwen3-VL mmproj GGUF for image inputs                                                           |
 | `--image-min-tokens <N>`       | mmproj value                                     | Fewest output tokens per image                                                                  |
 | `--image-max-tokens <N>`       | mmproj value                                     | Most output tokens per image                                                                    |
@@ -371,7 +407,8 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 
 Rules that apply to `run` and `generate`:
 
-- Without `--cpu`, the command runs on the CUDA index from `device`, else device 0. A build without the `cuda` feature exits with an error that names `--cpu`.
+- Without `--cpu`, the command runs on the GPU index from `device`, else device 0 of the build. The GPU is CUDA or wgpu, by build.
+- A `device` value for a backend the build lacks exits with an error. The error names `--cpu` and `device: cpu`.
 - `--gpu-layers`, `--paged-attention`, and `--graphs` have no effect with `--cpu`.
 - `--graphs` needs `--temperature 0`, `--repeat-penalty 1.0`, and no frequency or presence penalty. The default `--repeat-penalty` of `1.1` makes the run ineligible. An ineligible run logs a warning and decodes eagerly.
 - `--image` needs `--mmproj` and `--prompt`.
@@ -387,6 +424,7 @@ Rules that apply to `run` and `generate`:
 | `--top-p <F>`                  | `generation.top_p`, else `1.0`                   | Nucleus sampling threshold            |
 | `--num-ctx <N>`                | `num_ctx`, else `2048`                           | Context window size                   |
 | `-v`, `--verbose`              | off                                              | Shows token IDs and timing            |
+| `--dtype <f32\|bf16\|f16>`      | `inference.dtype`, else `torch_dtype`, else `f32` | Compute dtype. See [Compute dtype](#compute-dtype). |
 | `--mmproj <PATH>`              | mmproj value                                     | Qwen3-VL mmproj GGUF for image inputs |
 | `--image-min-tokens <N>`       | mmproj value                                     | Fewest output tokens per image        |
 | `--image-max-tokens <N>`       | mmproj value                                     | Most output tokens per image          |
@@ -402,6 +440,7 @@ Rules that apply to `run` and `generate`:
 | `--runs <N>`           | `3`     | Measurement runs                                                 |
 | `--json <PATH>`        | unset   | Writes results as JSON to this file                              |
 | `--concurrency <N>...` | unset   | Concurrency levels to sweep, for example `--concurrency 1 2 4 8` |
+| `--dtype <f32\|bf16\|f16>` | `inference.dtype`, else `torch_dtype`, else `f32` | Compute dtype. See [Compute dtype](#compute-dtype). |
 
 `bench` uses fixed values that no flag sets. Prompts are 32, 128, and 512 tokens. It runs one warmup run before measuring. Decoding is greedy. Each concurrency level runs its requests one after another.
 
@@ -461,7 +500,7 @@ Blazr reads no `.env` file. Export these variables before the command runs.
 | `BLAZR_SWARM_TOKEN`   | unset                         | `swarm --token`                                                                          | Swarm shared secret                                                                                                                                                   |
 | `BLAZR_VOICE_DIR`     | unset                         | `serve --voice-dir`                                                                      | Kokoro voice directory when the flag is unset                                                                                                                         |
 | `BLAZR_TP_SIZE`       | unset                         | `serve`                                                                                  | Tensor parallel degree. Overrides `inference.tensor_parallel_size`. A value that is not a whole number is an error. `serve` returns an error above `1` in a build without `cuda` and `nccl`. The scheduler also returns an error above `1` without both features. |
-| `BLAZR_TP_RANK`       | `0`                           | Scheduler model load, `cuda` and `nccl` builds                                           | Tensor parallel rank                                                                                                                                                  |
+| `BLAZR_TP_RANK`       | unset                         | Scheduler model load, `cuda` and `nccl` builds                                           | Refused. Every rank runs as a thread of one process, so a set value is a load error                                                                                   |
 | `BOOSTR_MODELS_DIR`   | unset                         | Model search                                                                             | Model root, searched before the hub caches. Relative paths resolve against the working directory.                                                                     |
 | `HF_HUB_CACHE`        | unset                         | Model search                                                                             | Hugging Face hub cache, searched first                                                                                                                                |
 | `HF_HOME`             | `~/.cache/huggingface`        | Model search                                                                             | Hugging Face home. Blazr searches `$HF_HOME/hub`.                                                                                                                     |

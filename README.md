@@ -13,8 +13,9 @@ Inference server for LLMs, with speech synthesis (TTS) and transcription (ASR). 
 - **Streaming** - Server-Sent Events (SSE) for real-time token generation
 - **HuggingFace Hub** - Pull models directly from HuggingFace
 - **Operations** - API-key auth, native TLS, Prometheus `/metrics`, request timeout, graceful shutdown on SIGTERM
-- **CUDA Acceleration** - Optional GPU inference with optimized quantization kernels
-- **Speech** - Text-to-speech (Kokoro, VoxCPM2, VITS) and Whisper transcription with word timestamps, over HTTP and the `speak`, `transcribe` and `sound-review` commands (`audio` feature)
+- **GPU Acceleration** - CUDA (`cuda`) with quantization kernels, or WebGPU (`wgpu`) on Metal, Vulkan, and DX12
+- **Embedding** - C ABI (`capi`) with a static and a shared library, for app embedders
+- **Speech** - Text-to-speech (Kokoro, VoxCPM2, VITS) and Whisper transcription with word timestamps. Available over HTTP and through the `speak`, `transcribe`, and `sound-review` commands (`audio` feature)
 
 ## Quick Start
 
@@ -22,17 +23,23 @@ Inference server for LLMs, with speech synthesis (TTS) and transcription (ASR). 
 
 #### Prebuilt binaries
 
-Every [GitHub release](https://github.com/ml-rust/blazr/releases) carries one
-archive per platform. Each holds the `blazr` binary, `LICENSE`, `README.md`,
-`NOTICE`, `LICENSE-LLAMA` and `THIRD-PARTY-LICENSES.txt`.
-All of them include the `audio` feature.
+Every [GitHub release](https://github.com/ml-rust/blazr/releases) carries the
+archives below. Each archive includes `LICENSE`, `NOTICE`, `LICENSE-LLAMA` and
+`THIRD-PARTY-LICENSES.txt`. The release workflow has not run on GitHub yet.
 
-| Archive                    | Platform                    |
-| -------------------------- | --------------------------- |
-| `blazr-linux-x64.tar.gz`   | Linux x86_64, CPU           |
-| `blazr-linux-arm64.tar.gz` | Linux aarch64, CPU          |
-| `blazr-macos-arm64.tar.gz` | macOS on Apple silicon, CPU |
-| `blazr-windows-x64.zip`    | Windows x86_64, CPU         |
+| Archive                      | Platform                     | Build                                  |
+| ---------------------------- | ---------------------------- | -------------------------------------- |
+| `blazr-linux-x64.tar.gz`     | Linux x86_64                 | CPU, `audio`                           |
+| `blazr-linux-x64-gpu.tar.gz` | Linux x86_64                 | Vulkan (`wgpu`), `audio`               |
+| `blazr-linux-arm64.tar.gz`   | Linux aarch64                | CPU, `audio`                           |
+| `blazr-macos-arm64.tar.gz`   | macOS on Apple silicon       | Metal (`wgpu`), `audio`                |
+| `blazr-windows-x64.zip`      | Windows x86_64               | CPU, `audio`                           |
+| `blazr-windows-x64-gpu.zip`  | Windows x86_64               | DX12 (`wgpu`), `audio`                 |
+| `blazr-android-arm64.tar.gz` | Android arm64                | `libblazr.a` for the C ABI (`capi`)    |
+| `blazr-ios-arm64.tar.gz`     | iOS arm64                    | `libblazr.a` for the C ABI (`capi`)    |
+
+The desktop archives hold the `blazr` binary and `README.md`. The mobile
+archives hold `libblazr.a` and `include/blazr.h`. See [Embedding](#embedding).
 
 The names carry no version, so the latest release always has the same URL:
 
@@ -47,9 +54,10 @@ tar xzf blazr-linux-x64.tar.gz
 `SHA256SUMS` lists the SHA-256 of every archive in the release. On macOS, use
 `shasum -a 256 --check --ignore-missing SHA256SUMS`.
 
-The Linux x86_64 archive needs glibc 2.35 or newer, and the aarch64 archive
-glibc 2.39 or newer. No archive includes CUDA. Install with `--features
-audio,cuda` for GPU inference: the build needs the CUDA toolkit, 12.8 or newer.
+The Linux x86_64 archives need glibc 2.35 or newer, and the aarch64 archive
+needs glibc 2.39 or newer. No archive includes CUDA. For NVIDIA GPU inference,
+build with `--features audio,cuda`. The build needs the CUDA toolkit, 12.8 or
+newer.
 
 #### From crates.io
 
@@ -61,15 +69,49 @@ cargo install blazr --locked --features audio,cuda     # NVIDIA CUDA
 #### From source
 
 ```bash
-# Build (CPU-only)
+# Build (CPU, default features f16, cli, and server)
 cargo build --release
 
 # Build with CUDA support (requires CUDA 12.8+ or 13.x)
 cargo build --release --features cuda
 
+# Build with WebGPU support (Metal, Vulkan, DX12)
+cargo build --release --features wgpu
+
 # Add speech: TTS, ASR and the narration commands
 cargo build --release --features audio
 ```
+
+### Build variants
+
+| Build                                  | Cargo command                                                                | Runtime                                                 |
+| -------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------- |
+| CPU (default)                          | `cargo build --release`                                                      | CPU                                                     |
+| CUDA                                   | `cargo build --release --features cuda`                                      | CUDA device from `device`, CPU with `--cpu`             |
+| WebGPU                                 | `cargo build --release --features wgpu`                                      | wgpu adapter from `device`, CPU with `--cpu`            |
+| Engine only (library)                  | `cargo check --lib --no-default-features`                                    | Library with no CLI or HTTP stack                       |
+| C library (`capi`)                     | `cargo build --release --lib --no-default-features --features capi,f16`      | `libblazr.a` and `libblazr.so`                          |
+| Android (`aarch64-linux-android`)      | `cargo check --lib --no-default-features --features capi --target aarch64-linux-android` | Compile check passes on NDK 27. Not run on a device. |
+| WebAssembly (`wasm32-unknown-unknown`) | `cargo check --lib --no-default-features --features wgpu --target wasm32-unknown-unknown` | Compile check passes. Not run in a browser. |
+
+- `cuda` takes priority over `wgpu` when both features are on.
+- `cli` and `server` each enable `hub`, the Hugging Face client.
+- `info`, `list`, `pull`, `run`, `chat`, `bench` and `convert` need `cli`. `serve` and `ps` need `server`. `swarm` and `disagg` need `distributed` and `server`.
+- The Android check needs these variables. Replace each placeholder with a path from your NDK 27 install:
+
+```bash
+export ANDROID_NDK_HOME=<ndk-dir>
+export CC_aarch64_linux_android=<ndk-clang>
+export AR_aarch64_linux_android=<ndk-ar>
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=<ndk-linker>
+cargo check --lib --no-default-features --features capi --target aarch64-linux-android
+```
+
+The iOS CI job checks `aarch64-apple-ios` and `aarch64-apple-ios-sim` on macOS.
+That job has not run on GitHub yet.
+
+The `wgpu` build ran Llama 3.2 1B on an NVIDIA RTX 3060 through Vulkan. For the
+tested scope, see [docs/models.md](docs/models.md#webgpu-runtime).
 
 ### Generate Text
 
@@ -161,6 +203,8 @@ model.gguf                     # Single file: weights + tokenizer + config
 
 GGUF quantization formats run from Q2_K through Q8_0, plus the IQ and TQ series. [docs/models.md](docs/models.md) lists the CPU and CUDA kernel for each format.
 
+GGUF files load through mmap on every target except `wasm32`. For Llama 3.2 1B Q4_K_M (807,689,920 bytes) on x86_64 Linux, peak RSS fell from 2,977,316 kB to 1,929,888 kB. This is one model on one host.
+
 ## API Reference
 
 ### Endpoints
@@ -232,7 +276,7 @@ blazr run           Interactive generation (REPL)
 blazr generate      Generate text from a prompt
 blazr chat          Interactive multi-turn chat
 blazr serve         Start the inference server
-blazr info          Display model architecture and configuration
+blazr info          Display model architecture and config
 blazr list          List available local models
 blazr pull          Download a model from HuggingFace Hub
 blazr bench         Measure prefill and decode throughput
@@ -244,7 +288,7 @@ blazr transcribe    Word timings from a Whisper model (audio)
 blazr sound-review  Review rendered sound effects (audio)
 ```
 
-### Generation Options
+### Generation Flags
 
 | Flag            | Default  | Description                                                       |
 | --------------- | -------- | ----------------------------------------------------------------- |
@@ -254,31 +298,52 @@ blazr sound-review  Review rendered sound effects (audio)
 | `--temperature` | 1.0      | Sampling temperature (0 = greedy)                                 |
 | `--top-p`       | 1.0      | Nucleus sampling threshold                                        |
 | `--top-k`       | 0        | Top-k sampling (0 = off)                                          |
-| `--cpu`         | `cuda:0` | Force CPU inference. Default device: `device` config key, else `cuda:0` |
+| `--cpu`         | off      | Run on the CPU. Without it, the `device` config key picks the GPU, else GPU 0 of the build |
 | `--mmproj`      | none     | Qwen3-VL mmproj GGUF for image inputs (`qwen35` models only)      |
 | `--image`       | none     | Image file placed before the prompt. Needs `--mmproj`. Repeatable. `generate` only. |
 
-### Server Options
+The `device` key accepts `cpu`, `cuda`, `cuda:N`, `wgpu`, and `wgpu:N`. Set it in `config.yaml`. See [docs/configuration.md](docs/configuration.md).
+
+### Server Flags
 
 | Flag                                        | Default            | Description                                                                                                    |
 | ------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `--model`                                   | none               | Local path or name under `$BLAZR_MODEL_DIR` (default `./models`); without it, models load on demand            |
+| `--model`                                   | none               | Local path or name under `$BLAZR_MODEL_DIR` (default `./models`). Without it, models load on demand            |
 | `--port`                                    | 8080               | Port to listen on                                                                                              |
 | `--host`                                    | 0.0.0.0            | Host to bind to                                                                                                |
 | `--data-parallel`                           | 1                  | Copies of the start model, one per CUDA device or CPU copy. Above 1 needs `--model` and tensor parallelism at 1. |
 | `--chat-template`                           | model's own        | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file |
-| `--mmproj`                                  | none               | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model; enables `image_url` parts in `/v1/chat/completions`       |
+| `--mmproj`                                  | none               | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model. Enables `image_url` parts in `/v1/chat/completions`       |
 | `--image-min-tokens` / `--image-max-tokens` | mmproj values      | Token range every image is resized into                                                                        |
-| `--tls-cert` / `--tls-key`                  | none               | PEM certificate chain and private key; both together serve HTTPS                                               |
-| `--api-key` / `--api-key-file`              | none               | Require a bearer key; also reads `BLAZR_API_KEY`                                                               |
-| `--asr-model`                               | none               | `NAME=DIR` Whisper model for `/v1/audio/transcriptions` (`audio`); repeatable                                  |
-| `--tts-model`                               | none               | `NAME=DIR` Kokoro, VoxCPM2 or VITS model for `/v1/audio/speech` (`audio`); repeatable                          |
+| `--tls-cert` / `--tls-key`                  | none               | PEM certificate chain and private key. Both together serve HTTPS                                               |
+| `--api-key` / `--api-key-file`              | none               | Require a bearer key. Also reads `BLAZR_API_KEY`                                                               |
+| `--asr-model`                               | none               | `NAME=DIR` Whisper model for `/v1/audio/transcriptions` (`audio`). Repeatable                                  |
+| `--tts-model`                               | none               | `NAME=DIR` Kokoro, VoxCPM2 or VITS model for `/v1/audio/speech` (`audio`). Repeatable                          |
 | `--voice-dir`                               | `$BLAZR_VOICE_DIR` | Kokoro voice files searched before the model's `voices/` (`audio`)                                             |
+
+### Tensor Parallelism
+
+Tensor parallelism splits one model across GPUs in one process. It needs a
+build with `--features cuda,nccl`. A degree above 1 fails with an error in any
+other build.
+
+The degree comes from the first source that sets it:
+
+- `BLAZR_TP_SIZE`
+- `inference.tensor_parallel_size` in the user config file
+- The model's `config.json`
+- `1`, when no source sets it
+
+Tensor parallelism follows these rules:
+
+- Each rank runs as a thread of one process. blazr rejects `BLAZR_TP_RANK` with an error.
+- A tensor-parallel model decodes with a contiguous KV cache. Paged attention, speculative decoding, and both prefix caches stay off.
+- Tensor parallelism is untested on two or more GPUs. The test host has one GPU.
 
 ## Image Inputs
 
 With `--mmproj`, three routes take images beside the text. Each image takes
-the place of its own part in the prompt; the reply describes it. Without
+the place of its own part in the prompt. The reply describes it. Without
 `--mmproj` such a request gets a 400 naming the flag, in the route's own
 error shape. `blazr chat` attaches an image to the next turn with
 `/image <path>`.
@@ -308,7 +373,7 @@ template's message.
 ## Audio
 
 Build with `--features audio` for speech, or take a prebuilt binary: every
-release archive includes it. The feature adds the `/v1/audio/*` routes to
+desktop release archive includes it. The feature adds the `/v1/audio/*` routes to
 `blazr serve` and three commands. The commands keep standard output for
 their report and log to standard error.
 
@@ -344,13 +409,13 @@ Each command prints its full flag list with `--help`.
 | Code | Meaning                                                                       |
 | ---- | ----------------------------------------------------------------------------- |
 | 0    | Done: every phrase heard as written, every narration read, every sound passed |
-| 1    | A problem remains, or the run failed                                          |
+| 1    | A mismatch remains, or the run failed                                         |
 | 2    | A bad input: a missing file, a flag out of range, a bad manifest              |
-| 3    | `speak --model` names a model blazr does not run; run it another way          |
+| 3    | `speak --model` names a model blazr does not run. Run it another way          |
 
 ### Models on first use
 
-A model the commands need and do not find on disk downloads from the
+A model the commands need and do not find on disk fetches from the
 Hugging Face hub on first use, once:
 
 | Model                                   | Used by                                      |
@@ -361,13 +426,13 @@ Hugging Face hub on first use, once:
 | `openbmb/VoxCPM2`                       | `speak` with VoxCPM2 (CUDA build with a GPU) |
 | `laion/larger_clap_general`             | `sound-review`                               |
 
-Downloads land in hub layout in the model folder: `$MOTION_VIDEO_MODELS`,
+Fetched files land in hub layout in the model folder: `$MOTION_VIDEO_MODELS`,
 else the `models` entry of `~/.config/motion-video/config.json`, else
 `~/.cache/motion-video/models`. The search also reads `$BOOSTR_MODELS_DIR`
 and the Hugging Face cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else
 `~/.cache/huggingface/hub`). `blazr serve` fetches only Kokoro's G2P models
 on first use, into the Hugging Face cache. Set `HF_HUB_OFFLINE=1` to forbid
-every download: a missing model then fails with its name and the
+every fetch: a missing model then fails with its name and the
 `hf download` command that fetches it.
 
 ### CPU and CUDA builds
@@ -432,10 +497,47 @@ boostr (model architectures + quant kernels + NN modules)
 numr (tensors + linalg + multi-backend: CPU/CUDA/WebGPU)
 ```
 
+Without `cli` and `server`, the crate is the engine alone. Embedders start from `Scheduler`. The `blazr` crate docs show an example. For a model in memory, `engine::load_executor_from_bytes` loads a GGUF file, or a SafeTensors file plus its JSON. The browser target uses it.
+
+## Embedding
+
+The `capi` feature builds a C library for app embedders. It writes
+`libblazr.a` and `libblazr.so` to `target/release/`. The header is
+[`include/blazr.h`](include/blazr.h).
+
+```bash
+cargo build --release --lib --no-default-features --features capi,f16
+```
+
+| Function                                                                 | Purpose                                                       |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `blazr_version`                                                          | Returns the library version. Do not free it.                  |
+| `blazr_load_options_default`                                             | Returns the default `BlazrLoadOptions`.                       |
+| `blazr_model_load`                                                       | Loads a GGUF file or a SafeTensors directory.                 |
+| `blazr_model_unload`                                                     | Unloads a model. A second unload returns `BLAZR_STATUS_INVALID_HANDLE`. |
+| `blazr_generate_params_default`                                          | Returns the default sampling parameters.                      |
+| `blazr_generate`                                                         | Generates text and calls the callback once per token.         |
+| `blazr_cancel`                                                           | Stops the running generation from any thread.                 |
+| `blazr_tokenize`                                                         | Encodes text to token ids.                                    |
+| `blazr_embed`                                                            | Returns one unit-length vector: the mean of the last hidden states. |
+| `blazr_last_error`                                                       | Returns the message of the last failed call on this thread.   |
+| `blazr_string_free`, `blazr_tokens_free`, `blazr_floats_free`            | Free the strings, token arrays and float arrays blazr returns. |
+
+Every call returns a `BlazrStatus`. Zero and above mean success.
+
+[examples/capi/README.md](examples/capi/README.md) lists the link steps for
+Linux, Android and iOS. [`examples/capi/smoke.c`](examples/capi/smoke.c) calls
+every step.
+
+blazr ships no Kotlin or Swift bindings. An app calls the C functions through
+JNI on Android or a bridging header on iOS.
+
 ## Requirements
 
 - Rust 1.95+ to build from source
-- (Optional) CUDA 12.8+ or 13.x for GPU acceleration
+- (Optional) CUDA 12.8+ or 13.x for the `cuda` feature
+- (Optional) NCCL with `cuda` for tensor parallelism
+- (Optional) A Metal, Vulkan, or DX12 driver for the `wgpu` feature
 
 ## License
 

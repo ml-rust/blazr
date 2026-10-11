@@ -200,6 +200,28 @@ Blazr detects the format and architecture in this order.
 - AWQ is detected from `quant_config.json`, from `quantization_config` in `config.json`, or from a `.qweight` tensor. GPTQ is checked first. It uses `quantize_config.json`, `quant_config.json`, `quantization_config`, or a `.g_idx` tensor.
 - A GGUF file selects its architecture from `general.architecture`. An unlisted value fails with `Unsupported GGUF architecture '<name>'`.
 
+## WebGPU runtime
+
+Build with `--features wgpu`. Select the adapter with `device: wgpu` or `device: wgpu:N`. WebGPU computes in F32 only. On this runtime, the loader decodes F16 and BF16 weights to F32 at load.
+
+### Tested scope
+
+| Model        | Format       | Check                                              | Result        |
+| ------------ | ------------ | -------------------------------------------------- | ------------- |
+| Llama 3.2 1B | SafeTensors  | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
+| Llama 3.2 1B | GGUF Q8_0    | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
+| Llama 3.2 1B | GGUF Q4_K_M  | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
+
+- The host was an NVIDIA RTX 3060 through Vulkan.
+- Per-layer hidden states stayed within 1e-5 relative of the CPU F32 reference. The test tolerance is 1e-3 relative.
+- The test is `tests/wgpu_generate.rs`. It reads `BLAZR_TEST_LLAMA_MODEL` for SafeTensors, with `$BOOSTR_MODELS_DIR/llama-3.2-1b` as the fallback, and `BLAZR_TEST_WGPU_GGUF` for GGUF. Each test skips when its fixture is absent or no adapter opens.
+
+### Not yet tested
+
+- Other model families on wgpu.
+- wgpu throughput.
+- Metal, DX12, and the browser.
+
 ## Sources
 
 - blazr: `src/loader/detect.rs`, `src/loader/safetensors/`, `src/loader/gguf_config.rs`, `src/loader/tts/`, `src/loader/whisper_loader.rs`, `src/model/chat_template/`, `src/tokenizer/`, `src/server/rerank.rs`, `src/server/embeddings.rs`.

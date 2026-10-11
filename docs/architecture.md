@@ -23,6 +23,8 @@ blazr is an LLM inference server with a CLI and an HTTP API. boostr and numr do 
 
 blazr holds no tensor ops, model layers, or quant kernels. Those live in boostr. blazr calls boostr through its types and traits.
 
+The engine builds without the CLI and the HTTP server, as a library. The `cli` and `server` features add the two front ends. See [Feature flags](#feature-flags).
+
 ## Request path
 
 1. The route table in `api_routes` (`src/server/routes.rs`) sends the request to a function, such as `chat_completions` in `src/server/chat.rs`.
@@ -37,14 +39,16 @@ blazr holds no tensor ops, model layers, or quant kernels. Those live in boostr.
 
 | Module        | Job                                                                                         | Key files                                                                                                                                                                                                       |
 | ------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cli`         | Defines the `blazr` subcommands and runs them                                               | `commands.rs` (`Cli`, `Commands`), `serve.rs`, `serve_batching.rs`, `serve_replicas.rs`, `load_settings.rs`, `run.rs`, `chat.rs`, `swarm.rs`, `disaggregated.rs`, `narration/` (`audio`)                           |
+| `cli`         | Defines the `blazr` subcommands and runs them. Needs the `cli` feature.                     | `commands.rs` (`Cli`, `Commands`), `serve.rs`, `serve_batching.rs`, `serve_replicas.rs`, `load_settings.rs`, `run.rs`, `chat.rs`, `swarm.rs`, `disaggregated.rs`, `narration/` (`audio`)                           |
 | `config`      | Holds the config types and resolves each value from flag, env, file, and default            | `file.rs` (`FileConfig`, `~/.blazr/config.yaml`), `resolve.rs`, `resolve_serve.rs`, `resolve_cluster.rs`, `env.rs`, `overlay.rs`, `reload.rs`, `live.rs`, `blazr.rs`, `server.rs`, `generation.rs`, `inference.rs`, `vision.rs` |
-| `engine`      | Schedules models and requests, runs the executor, samples tokens, and drives parallel modes | `scheduler.rs`, `executor*.rs`, `request_scheduler.rs`, `batch_engine.rs`, `lane_*.rs`, `sampling.rs`, `grammar*.rs`, `speculative.rs`, `tensor_parallel.rs`, `data_parallel.rs`, `cache_router.rs`, `latency_window.rs`, `slo_policy.rs`, `queue_depth.rs`, `keep_alive.rs`, `warmup.rs` |
-| `loader`      | Detects the model format and source and loads weights                                       | `detect.rs`, `api.rs`, `gguf.rs`, `safetensors/`, `vision.rs`, `hub/` (`audio`)                                                                                                                                 |
+| `engine`      | Schedules models and requests, runs the executor, samples tokens, and drives parallel modes | `scheduler.rs`, `executor*.rs`, `request_scheduler.rs`, `batch_engine.rs`, `lane_*.rs`, `sampling.rs`, `grammar*.rs`, `speculative.rs`, `tensor_parallel.rs`, `data_parallel.rs`, `cache_router.rs`, `latency_window.rs`, `slo_policy.rs`, `queue_depth.rs`, `keep_alive.rs`, `warmup.rs`, `pooling.rs` |
+| `loader`      | Detects the model format and source and loads weights                                       | `detect.rs`, `api.rs`, `gguf.rs`, `safetensors/`, `vision.rs`, `hub/` (`hub`)                                                                                                                                 |
 | `model`       | Detects architectures and renders chat templates                                            | `detect.rs`, `config.rs`, `chat_template/`                                                                                                                                                                      |
-| `server`      | Serves the HTTP API, API-key auth, and SSE streams                                          | `routes.rs`, `startup.rs`, `handlers/` (`route.rs`), `concurrency.rs`, `scheduled.rs`, `config_watch.rs`, `slo.rs`, `chat.rs`, `completions.rs`, `anthropic.rs`, `streaming.rs`, `management/`                    |
+| `server`      | Serves the HTTP API, API-key auth, and SSE streams. Needs the `server` feature.             | `routes.rs`, `startup.rs`, `handlers/` (`route.rs`), `concurrency.rs`, `scheduled.rs`, `config_watch.rs`, `slo.rs`, `chat.rs`, `completions.rs`, `anthropic.rs`, `streaming.rs`, `management/`                    |
 | `tokenizer`   | Loads the splintr BPE tokenizer for a vocabulary                                            | `splintr_tokenizer.rs`, `mod.rs`                                                                                                                                                                                |
 | `distributed` | Re-exports boostr's distributed inference API under the `distributed` feature               | `mod.rs`                                                                                                                                                                                                        |
+| `runtime`     | Picks the runtime for the build: `cuda`, then `wgpu`, then CPU                              | `src/runtime.rs`, `src/config/device.rs`                                                                                                                                                                        |
+| `telemetry`   | Holds metric names, metric recording, and latency SLO checks                                | `names.rs`, `record.rs`, `slo.rs`                                                                                                                                                                               |
 | `tls`         | Installs the rustls crypto provider and serves HTTPS                                        | `src/tls.rs`, `src/server/tls.rs`                                                                                                                                                                               |
 
 ## Config resolution
@@ -112,7 +116,7 @@ The executor picks the state type by model capability. GDN state is checked firs
 
 ### Tensor parallel
 
-Tensor parallelism shards Llama-family SafeTensors weights across ranks. Set `BLAZR_TP_SIZE` and `BLAZR_TP_RANK` for each process. `init_tp` in `src/engine/tensor_parallel.rs` sets up the rank state and the NCCL communicator. `loader::load_model_tp` (`src/loader/api.rs`) loads the shard. The `cuda` and `nccl` features compile this path.
+Tensor parallelism shards Llama-family SafeTensors weights across ranks. One process runs every rank. Rank r runs on GPU `device + r`. `init_tp` in `src/engine/tensor_parallel.rs` creates the NCCL group with `Comm::from_devices`, which shares one NCCL unique id. `TpGroup` in `src/engine/tp_group.rs` runs ranks 1 and up as threads. Each follower thread owns its shard and KV cache. Before each rank-0 forward, the group sends the step to every follower. The token ids reach the followers through an NCCL broadcast. `loader::load_model_tp` (`src/loader/api.rs`) loads each shard. A tensor-parallel model decodes with a contiguous KV cache, one sequence at a time. Paged attention, speculative decoding and the prefix caches are off for it. `BLAZR_TP_RANK` is refused: blazr shares no NCCL id across processes. The `cuda` and `nccl` features compile this path. No multi-GPU run has tested it.
 
 ### Data parallel
 
@@ -142,12 +146,16 @@ The five generation handlers call `state.route` for each request. Without a repl
 
 ## Feature flags
 
-There is no `cpu` feature. The CPU runtime is the default when `cuda` is off.
+There is no `cpu` feature. The CPU runtime runs when neither `cuda` nor `wgpu` is on. A command also takes the CPU with `--cpu` or `device: cpu`.
 
 | Feature       | Default | Enables                                                                                                                                                           |
 | ------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `f16`         | Yes     | `boostr/f16`                                                                                                                                                      |
+| `cli`         | Yes     | The `cli` module and the `blazr` binary: `clap`, `colored`, `rustyline`, `tracing-subscriber`, and `hub`                                                          |
+| `server`      | Yes     | The `server` module: axum, tower-http, TLS, `reqwest`, the Prometheus exporter, and `hub`. `blazr serve` and `blazr ps` need it.                                 |
+| `hub`         | No      | `hf-hub` and `indicatif`. `cli` and `server` enable it.                                                                                                           |
 | `cuda`        | No      | `boostr/cuda`, and `voxr-narrate/cuda` when `audio` is on                                                                                                         |
+| `wgpu`        | No      | `boostr/wgpu`: Metal, Vulkan, DX12, and WebGPU. `cuda` takes priority when both are on.                                                                           |
 | `nccl`        | No      | `boostr/nccl`. Tensor-parallel loading also needs `cuda`.                                                                                                         |
 | `distributed` | No      | `boostr/distributed`, the `nexar` dependency, and the `swarm` and `disagg` commands                                                                               |
-| `audio`       | No      | `voxr` and `voxr-narrate`, Kokoro, VoxCPM2, VITS, Whisper, and CLAP support, the `/v1/audio/*` routes, and the `speak`, `transcribe`, and `sound-review` commands |
+| `audio`       | No      | Implies `server` and `cli`. Adds `voxr` and `voxr-narrate`, Kokoro, VoxCPM2, VITS, Whisper, and CLAP support, the `/v1/audio/*` routes, and the `speak`, `transcribe`, and `sound-review` commands |

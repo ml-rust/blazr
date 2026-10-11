@@ -185,7 +185,8 @@ preview on crates.io that shares no code with it.
   error. The loader checks that the head counts divide by the degree
   before weights load.
 - **Model `config.json`** — blazr ignores its `server` and `generation`
-  sections. The loader always sets the dtype from the checkpoint.
+  sections. Its `torch_dtype` still sets the compute dtype when neither
+  `--dtype` nor `inference.dtype` is set.
 - **`speak`** — the CUDA build runs Kokoro and VITS on the GPU, as it runs
   Whisper and VoxCPM2. `--device cpu` keeps them on the CPU.
 - **`speak`** — a Kokoro take follows `--seed`: one seed gives the same take
@@ -202,8 +203,8 @@ preview on crates.io that shares no code with it.
   `inference.moe_gpu_experts` keys. A config that still sets either key
   parses and ignores it. In `config.yaml` each logs an unknown-key warning.
 - **Unused `inference` keys** — `weights_path`, `device`, `flash_attention`
-  and `kv_cache` had no reader and are gone. `dtype` is no longer a config
-  key. A model `config.json` that sets them still parses and ignores them.
+  and `kv_cache` had no reader and are gone. A model `config.json` that
+  sets them still parses and ignores them.
   In `config.yaml` each logs an unknown-key warning.
 
 ### Fixed

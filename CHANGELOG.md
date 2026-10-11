@@ -10,6 +10,14 @@ preview on crates.io that shares no code with it.
 
 ---
 
+## [Unreleased]
+
+### Documentation
+
+- **Android** — `examples/capi/README.md` gives the x86_64 emulator build, link and run steps, including `-Wl,-z,max-page-size=16384` for 16 KB pages. The emulator run passes on CPU and on wgpu through the host GPU. No aarch64 hardware or physical device has run blazr.
+
+---
+
 ## [0.2.0] - 2026-10-11
 
 ### Added

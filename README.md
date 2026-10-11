@@ -91,12 +91,13 @@ cargo build --release --features audio
 | WebGPU                                 | `cargo build --release --features wgpu`                                      | wgpu adapter from `device`, CPU with `--cpu`            |
 | Engine only (library)                  | `cargo check --lib --no-default-features`                                    | Library with no CLI or HTTP stack                       |
 | C library (`capi`)                     | `cargo build --release --lib --no-default-features --features capi,f16`      | `libblazr.a` and `libblazr.so`                          |
-| Android (`aarch64-linux-android`)      | `cargo check --lib --no-default-features --features capi --target aarch64-linux-android` | Compile check passes on NDK 27. Not run on a device. |
+| Android (`aarch64-linux-android`)      | `cargo check --lib --no-default-features --features capi --target aarch64-linux-android` | Compile check passes on NDK 27. x86_64 emulator run passes. Not run on aarch64 hardware. |
 | WebAssembly (`wasm32-unknown-unknown`) | `cargo check --lib --no-default-features --features wgpu --target wasm32-unknown-unknown` | Compile check passes. Not run in a browser. |
 
 - `cuda` takes priority over `wgpu` when both features are on.
 - `cli` and `server` each enable `hub`, the Hugging Face client.
 - `info`, `list`, `pull`, `run`, `chat`, `bench` and `convert` need `cli`. `serve` and `ps` need `server`. `swarm` and `disagg` need `distributed` and `server`.
+- The x86_64 emulator run needs `-Wl,-z,max-page-size=16384` at link. aarch64 hardware is not run. See [Android](examples/capi/README.md#android).
 - The Android check needs these variables. Replace each placeholder with a path from your NDK 27 install:
 
 ```bash

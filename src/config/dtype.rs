@@ -160,9 +160,15 @@ mod tests {
             compute_dtype::<CpuRuntime>(Some(&f32_request), Some(DType::BF16)),
             DType::F32
         );
+        // A model's half dtype applies only when the build can compute it.
+        let model_half = if cfg!(feature = "f16") {
+            DType::BF16
+        } else {
+            DType::F32
+        };
         assert_eq!(
             compute_dtype::<CpuRuntime>(None, Some(DType::BF16)),
-            DType::BF16
+            model_half
         );
         assert_eq!(compute_dtype::<CpuRuntime>(None, None), DType::F32);
     }

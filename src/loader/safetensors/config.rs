@@ -284,6 +284,7 @@ fn has_mixed_layer_types(layer_types: &[crate::model::detect::LayerType]) -> boo
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    #[cfg(feature = "f16")]
     use crate::config::DtypeSource;
     use boostr::CpuRuntime;
 

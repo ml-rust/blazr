@@ -1,6 +1,17 @@
-# CI: format, lint, tests on three platforms, the MSRV, and the dependency
-# audit. No job builds the `cuda` feature: numr's and boostr's kernels take
-# hours on a hosted runner.
+# CI: format, lint, tests on three platforms, the MSRV, the dependency audit,
+# and a compile check for every target blazr ships on. No job builds the
+# `cuda` feature: numr's and boostr's kernels take hours on a hosted runner.
+#
+# Target matrix:
+#   check         Linux, macOS and Windows: `cargo check --all-targets`
+#                 (Linux also checks `audio`)
+#   engine        the library with no default features: check and unit tests
+#   wgpu          check only: no runner has a GPU
+#   capi          the C API library with no default features
+#   wasm          `wasm32-unknown-unknown` with `wgpu`
+#   android       `aarch64-linux-android`, NDK from the runner image
+#   ios           `aarch64-apple-ios` and `aarch64-apple-ios-sim`
+# Format, clippy and tests run on the jobs above them.
 #
 # Called by release.yml as its gate, so a tag runs the same checks as a PR.
 #
@@ -177,3 +188,192 @@ jobs:
 
       - name: Run cargo-deny
         run: cargo deny --exclude-dev check
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Compile check on each desktop OS. Linux adds the `audio` feature.
+  check:
+    name: Check (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: check-${{ matrix.os }}
+
+      - name: Check all targets
+        run: cargo check --all-targets
+
+      - name: Check all targets (audio)
+        if: runner.os == 'Linux'
+        run: cargo check --all-targets --features audio
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # The engine as a library: no CLI, no server, no hub client.
+  engine:
+    name: Engine only
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: engine
+
+      - name: Check library
+        run: cargo check --lib --no-default-features
+
+      - name: Run unit tests
+        run: cargo test --lib --no-default-features --no-fail-fast
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Compile only. The runner has no GPU, so no test runs.
+  wgpu:
+    name: wgpu (check)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: wgpu
+
+      - name: Check all targets
+        run: cargo check --all-targets --features wgpu
+
+  # ─────────────────────────────────────────────────────────────────────────
+  capi:
+    name: C API (check)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: capi
+
+      - name: Check library
+        run: cargo check --lib --no-default-features --features capi
+
+  # ─────────────────────────────────────────────────────────────────────────
+  wasm:
+    name: wasm32 (check)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - name: Add the wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: wasm
+
+      - name: Check library
+        run: cargo check --lib --no-default-features --features wgpu --target wasm32-unknown-unknown
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Assumption: ubuntu-latest sets ANDROID_NDK_LATEST_HOME to a preinstalled
+  # NDK. The step below fails with a clear error when the path is absent.
+  android:
+    name: Android arm64 (check)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - name: Add the Android target
+        run: rustup target add aarch64-linux-android
+
+      - name: Point cargo at the NDK toolchain
+        run: |
+          set -euo pipefail
+          BIN="${ANDROID_NDK_LATEST_HOME:?ANDROID_NDK_LATEST_HOME is unset}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in aarch64-linux-android24-clang llvm-ar; do
+            if [[ ! -x "$BIN/$tool" ]]; then
+              echo "::error::$BIN/$tool is missing"
+              exit 1
+            fi
+          done
+          {
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME"
+            echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$BIN/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: android
+
+      - name: Check library
+        run: cargo check --lib --no-default-features --features capi --target aarch64-linux-android
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Assumption: macos-latest ships Xcode with the iOS device and simulator
+  # SDKs, so cargo finds them through `xcrun` with no extra setup.
+  ios:
+    name: iOS (${{ matrix.target }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-ios, aarch64-apple-ios-sim]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: ios-${{ matrix.target }}
+
+      - name: Check library
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo check --lib --no-default-features --features capi --target "$TARGET"

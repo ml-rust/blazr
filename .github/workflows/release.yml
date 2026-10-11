@@ -4,13 +4,20 @@
 #   validate        -> the tag matches Cargo.toml, CHANGELOG.md has its
 #                      section, and Cargo.lock resolves from crates.io
 #   ci              -> ci.yml, the same checks a PR runs
-#   build           -> one archive per platform, `--locked`
+#   build           -> one archive per desktop platform, `--locked`
+#   build-mobile    -> Android and iOS static libraries, `--locked`
 #   publish-crate   -> crates.io, after every archive built
 #   github-release  -> the archives, SHA256SUMS, and the changelog section
 #
 # Archive names carry no version, so
 # `releases/latest/download/blazr-<label>.tar.gz` stays stable across
 # releases.
+#
+# Archives: linux-x64, linux-x64-gpu, linux-arm64, macos-arm64, windows-x64,
+# windows-x64-gpu, android-arm64, ios-arm64. The `-gpu` archives add the
+# `wgpu` feature (Vulkan on Linux, DX12 on Windows). The macOS archive builds
+# `wgpu` (Metal). No archive includes CUDA: its kernels take hours to build on
+# a hosted runner.
 #
 # Each stage is idempotent. An already-indexed crate version is skipped, and
 # the GitHub Release is updated in place. A dispatch can turn either final
@@ -114,7 +121,7 @@ jobs:
       - name: Require a crates.io lockfile
         run: |
           set -euo pipefail
-          if ! cargo metadata --locked --format-version=1 --features audio,cuda > /dev/null; then
+          if ! cargo metadata --locked --format-version=1 --features audio,cuda,wgpu,capi > /dev/null; then
             echo "::error::Cargo.lock does not resolve from crates.io. Regenerate it without .cargo/config.toml patches and commit it."
             exit 1
           fi
@@ -128,8 +135,8 @@ jobs:
       ref: ${{ inputs.tag || github.ref_name }}
 
   # ── Third-party files ───────────────────────────────────────────────────────
-  # One set for every archive, from the `audio` crate graph that each one
-  # compiles.
+  # One set for every archive. The features are the union of the crate graphs
+  # that the archives compile, so the licence list covers each of them.
   third-party:
     name: Third-party licences
     needs: validate
@@ -146,7 +153,7 @@ jobs:
         run: cargo install cargo-about --locked --version 0.9.2 --features cli
 
       - name: Write licences and notices
-        run: bash scripts/ci/third_party.sh audio third-party
+        run: bash scripts/ci/third_party.sh audio,wgpu,capi third-party
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -168,6 +175,12 @@ jobs:
             runs-on: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: audio
+          # Assumption: wgpu loads Vulkan at run time, so the build needs no
+          # Vulkan SDK on the runner.
+          - label: linux-x64-gpu
+            runs-on: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: audio,wgpu
           - label: linux-arm64
             runs-on: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -175,11 +188,15 @@ jobs:
           - label: macos-arm64
             runs-on: macos-latest
             target: aarch64-apple-darwin
-            features: audio
+            features: audio,wgpu
           - label: windows-x64
             runs-on: windows-latest
             target: x86_64-pc-windows-msvc
             features: audio
+          - label: windows-x64-gpu
+            runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: audio,wgpu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -243,13 +260,98 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  # ── Mobile static libraries ─────────────────────────────────────────────────
+  # `libblazr.a` for the C API, with `include/blazr.h`. Assumptions: the
+  # `capi` feature builds a `staticlib` named `libblazr.a`, and `include/blazr.h`
+  # is committed.
+  build-mobile:
+    name: Build (${{ matrix.label }})
+    needs: [validate, ci, third-party]
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Assumption: ubuntu-latest sets ANDROID_NDK_LATEST_HOME.
+          - label: android-arm64
+            runs-on: ubuntu-latest
+            target: aarch64-linux-android
+          # Assumption: macos-latest ships Xcode with the iOS SDK.
+          - label: ios-arm64
+            runs-on: macos-latest
+            target: aarch64-apple-ios
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Point cargo at the NDK toolchain
+        if: matrix.label == 'android-arm64'
+        run: |
+          set -euo pipefail
+          BIN="${ANDROID_NDK_LATEST_HOME:?ANDROID_NDK_LATEST_HOME is unset}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in aarch64-linux-android24-clang llvm-ar; do
+            if [[ ! -x "$BIN/$tool" ]]; then
+              echo "::error::$BIN/$tool is missing"
+              exit 1
+            fi
+          done
+          {
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME"
+            echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$BIN/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: release-${{ matrix.label }}
+
+      - name: Build static library
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --lib --no-default-features --features capi --target "$TARGET"
+
+      - name: Download third-party files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: third-party
+          path: third-party
+
+      - name: Package
+        env:
+          LABEL: ${{ matrix.label }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist stage/include
+          cp "target/$TARGET/release/libblazr.a" stage/
+          cp include/blazr.h stage/include/
+          cp LICENSE stage/
+          cp third-party/* stage/
+          tar -C stage -czf "dist/blazr-$LABEL.tar.gz" \
+            libblazr.a include LICENSE NOTICE LICENSE-LLAMA THIRD-PARTY-LICENSES.txt
+          ls -l dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: blazr-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+
   # ── crates.io ───────────────────────────────────────────────────────────────
   # After every archive built, so a tag that cannot build never reaches
   # crates.io. A verifying publish (no `--no-verify`) builds the packaged
   # crate from a clean directory.
   publish-crate:
     name: Publish to crates.io
-    needs: [validate, build]
+    needs: [validate, build, build-mobile]
     if: github.event_name == 'push' || inputs.publish_crate
     runs-on: ubuntu-latest
     environment: crates-io
@@ -280,7 +382,7 @@ jobs:
   # binaries, and re-running this stage alone fixes a bad release body.
   github-release:
     name: Create GitHub Release
-    needs: [validate, build]
+    needs: [validate, build, build-mobile]
     if: github.event_name == 'push' || inputs.github_release
     runs-on: ubuntu-latest
     permissions:
@@ -297,6 +399,24 @@ jobs:
           pattern: blazr-*
           path: dist
           merge-multiple: true
+
+      # Fails the release when a platform produced no archive.
+      - name: Check the archive set
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            blazr-linux-x64.tar.gz blazr-linux-x64-gpu.tar.gz \
+            blazr-linux-arm64.tar.gz blazr-macos-arm64.tar.gz \
+            blazr-windows-x64.zip blazr-windows-x64-gpu.zip \
+            blazr-android-arm64.tar.gz blazr-ios-arm64.tar.gz; do
+            if [[ ! -f "$name" ]]; then
+              echo "::error::Archive $name is missing"
+              missing=1
+            fi
+          done
+          exit "$missing"
 
       - name: Write SHA256SUMS
         working-directory: dist
@@ -320,6 +440,21 @@ jobs:
 
           {
             cat "$RUNNER_TEMP/changelog-section.md"
+            echo
+            cat <<'TABLE'
+          ### Archives
+
+          | Archive                       | Platform                          |
+          | ----------------------------- | --------------------------------- |
+          | `blazr-linux-x64.tar.gz`      | Linux x86_64, CPU                 |
+          | `blazr-linux-x64-gpu.tar.gz`  | Linux x86_64, CPU and Vulkan      |
+          | `blazr-linux-arm64.tar.gz`    | Linux aarch64, CPU                |
+          | `blazr-macos-arm64.tar.gz`    | macOS on Apple silicon, Metal     |
+          | `blazr-windows-x64.zip`       | Windows x86_64, CPU               |
+          | `blazr-windows-x64-gpu.zip`   | Windows x86_64, CPU and DX12      |
+          | `blazr-android-arm64.tar.gz`  | Android arm64, static library     |
+          | `blazr-ios-arm64.tar.gz`      | iOS arm64, static library         |
+          TABLE
             echo
             if [[ -n "$PREVIOUS_TAG" ]]; then
               echo "**Full diff:** https://github.com/ml-rust/blazr/compare/${PREVIOUS_TAG}...${TAG}"

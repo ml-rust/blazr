@@ -15,9 +15,13 @@ use std::path::PathBuf;
 #[cfg(feature = "audio")]
 use std::sync::Arc;
 
+#[cfg(feature = "server")]
 use axum::body::Body;
+#[cfg(feature = "server")]
 use axum::http::{Request, StatusCode};
+#[cfg(feature = "server")]
 use axum::Router;
+#[cfg(feature = "server")]
 use tower::ServiceExt;
 
 #[cfg(feature = "audio")]
@@ -110,10 +114,8 @@ pub fn asr_test_wav() -> Option<PathBuf> {
 /// directory and registered under `asr.0`.
 #[cfg(feature = "audio")]
 pub async fn asr_app_state(asr: Option<(&str, &Path)>) -> Arc<AppState> {
-    #[cfg(not(feature = "cuda"))]
-    let device = boostr::CpuDevice::new();
-    #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(0);
+    let device = blazr::runtime::open_device(0)
+        .unwrap_or_else(|e| panic!("opening the server runtime's device 0: {e}"));
 
     let scheduler = Arc::new(Scheduler::<ServerRuntime>::new(
         std::env::temp_dir().join("blazr-audio-test-models"),
@@ -179,6 +181,7 @@ pub fn multipart_body(
 /// status plus the response parsed as JSON. Panics if the body is not JSON —
 /// callers that expect `text`/`srt`/`vtt` read the router response directly
 /// instead of going through this helper.
+#[cfg(feature = "server")]
 pub async fn post_multipart_json(
     router: Router,
     uri: &str,

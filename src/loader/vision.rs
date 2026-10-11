@@ -64,8 +64,9 @@ where
     let model_path = model_path.as_ref();
     let mmproj_path = mmproj_path.as_ref();
 
-    let gguf = Gguf::open(model_path).map_err(|e| anyhow!("Failed to open GGUF file: {}", e))?;
-    let mut config = config_from_gguf_metadata(&gguf)?;
+    let mut gguf =
+        Gguf::open(model_path).map_err(|e| anyhow!("Failed to open GGUF file: {}", e))?;
+    let mut config = config_from_gguf_metadata(&mut gguf)?;
 
     // Load main model tensors
     let mut var_map = VarMap::<R>::from_gguf(model_path, device)

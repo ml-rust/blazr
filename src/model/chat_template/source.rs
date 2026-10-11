@@ -91,8 +91,17 @@ fn from_tokenizer_config(dir: &Path) -> Result<Option<ModelTemplate>> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    template_from_tokenizer_config(&text).with_context(|| format!("parse {}", path.display()))
+}
+
+/// `chat_template` from the text of a `tokenizer_config.json`, when it
+/// has one.
+///
+/// # Errors
+///
+/// An error when the text is not JSON.
+pub fn template_from_tokenizer_config(text: &str) -> Result<Option<ModelTemplate>> {
+    let json: serde_json::Value = serde_json::from_str(text)?;
     let Some(source) = select_template(json.get("chat_template")) else {
         return Ok(None);
     };

@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
-use crate::config::{BlazrConfig, InferenceOverlay, VisionOverrides, DEFAULT_NUM_CTX};
+use crate::config::{
+    BlazrConfig, DtypeRequest, InferenceOverlay, VisionOverrides, DEFAULT_NUM_CTX,
+};
 use crate::model::chat_template::ChatTemplate;
 use tokio::sync::RwLock;
 
@@ -21,7 +23,7 @@ use boostr::{
 
 use crate::engine::Executor;
 use crate::loader;
-use crate::tokenizer::from_vocab_size;
+use crate::tokenizer::checkpoint_tokenizer;
 
 /// Model entry in the scheduler
 struct ModelEntry<R: Runtime<DType = DType>> {
@@ -64,6 +66,9 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     /// Tensor parallel degree from `BLAZR_TP_SIZE` or the user config file.
     /// `None` takes each model's `config.json` value, else 1.
     tensor_parallel_size: Option<usize>,
+    /// `--dtype`, then `inference.dtype`. `None` takes each model's
+    /// `torch_dtype`, else f32.
+    dtype: Option<DtypeRequest>,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -93,7 +98,15 @@ where
             vision: VisionOverrides::default(),
             inference_overlay: InferenceOverlay::default(),
             tensor_parallel_size: None,
+            dtype: None,
         }
+    }
+
+    /// Load every model at the compute dtype `request` names. `None` takes
+    /// each model's `torch_dtype`, else f32.
+    pub fn with_dtype(mut self, request: Option<DtypeRequest>) -> Self {
+        self.dtype = request;
+        self
     }
 
     /// Write the user config file's `inference` keys over every model.
@@ -179,18 +192,28 @@ where
         let executor = if tp_size > 1 {
             #[cfg(all(feature = "cuda", feature = "nccl"))]
             {
-                let rank = match std::env::var("BLAZR_TP_RANK") {
-                    Ok(text) => text.trim().parse::<usize>().map_err(|_| {
-                        anyhow!("BLAZR_TP_RANK='{text}' is not a rank. Set 0 or more, or unset it")
-                    })?,
-                    Err(_) => 0,
-                };
-                let (tp_state, comm) = super::tensor_parallel::init_tp(tp_size, rank)
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                let (model, mut config) =
-                    loader::load_model_tp::<R, _>(&model_path, &self.device, comm)?;
+                use boostr::runtime::Device;
+                // Rank r runs on GPU `self.device + r`, each as a thread of
+                // this process. Followers load their shards while rank 0 does.
+                let (tp_state, comm) = super::tensor_parallel::init_tp(
+                    tp_size,
+                    self.device.id(),
+                    &model_path,
+                    self.dtype,
+                )
+                .map_err(|e| anyhow!("{e}"))?;
+                let (model, mut config) = loader::load_model_tp::<R, _>(
+                    &model_path,
+                    &self.device,
+                    comm,
+                    self.dtype.as_ref(),
+                )?;
+                if let Some(group) = &tp_state.group {
+                    group.wait_loaded()?;
+                }
                 self.apply_settings(&mut config, tp_size)?;
-                let tokenizer = from_vocab_size(config.vocab_size())?;
+                super::tensor_parallel::restrict_to_lockstep(&mut config.inference);
+                let tokenizer = checkpoint_tokenizer(&model_path, config.vocab_size())?;
                 let chat_template = ChatTemplate::detect(
                     &model_path,
                     config.model_type(),
@@ -221,12 +244,18 @@ where
             // matched to a bundled one by size.
             let source = loader::detect_model_source(&model_path)?;
             let (model, mut config, tokenizer) = match source.format {
-                loader::ModelFormat::Gguf => {
-                    loader::load_gguf_with_tokenizer::<R, _>(&model_path, &self.device)?
-                }
+                loader::ModelFormat::Gguf => loader::load_gguf_with_tokenizer_as::<R, _>(
+                    &model_path,
+                    &self.device,
+                    self.dtype.as_ref(),
+                )?,
                 loader::ModelFormat::SafeTensors => {
-                    let (model, config) = loader::load_model::<R, _>(&model_path, &self.device)?;
-                    let tokenizer = from_vocab_size(config.vocab_size())?;
+                    let (model, config) = loader::load_model_as::<R, _>(
+                        &model_path,
+                        &self.device,
+                        self.dtype.as_ref(),
+                    )?;
+                    let tokenizer = checkpoint_tokenizer(&model_path, config.vocab_size())?;
                     (model, config, tokenizer)
                 }
             };

@@ -22,8 +22,6 @@ use super::executor::Executor;
 use super::request_scheduler::RequestScheduler;
 use super::types::FinishReason;
 
-use crate::config::parse_dtype;
-
 /// Continuous batching engine that drives the scheduling loop
 pub struct BatchEngine<R: Runtime<DType = DType>> {
     executor: Arc<Executor<R>>,
@@ -67,7 +65,7 @@ where
             let num_kv_heads = executor.model().num_kv_heads().unwrap_or(8);
             let head_dim = executor.model().head_dim().unwrap_or(64);
             let block_size = config.inference.block_size;
-            let kv_dtype = parse_dtype(config.dtype())?;
+            let kv_dtype = config.kv_cache_dtype()?;
 
             // Total blocks in the shared pool
             let total_blocks = if config.inference.kv_pool_blocks > 0 {
@@ -309,20 +307,20 @@ where
         let token_id = Executor::<R>::read_token_id(&token_gpu, event)?;
 
         let is_eos = self.executor.tokenizer().is_eos(token_id);
-        let text = if is_eos {
-            String::new()
-        } else {
-            self.executor
-                .tokenizer()
-                .decode(&[token_id])
-                .unwrap_or_default()
-        };
-
         let finish = if is_eos {
             Some(FinishReason::Eos)
         } else {
             None
         };
+
+        let finished = self.scheduler.append_token(seq_id, token_id)?;
+        let text = self.scheduler.token_text(
+            seq_id,
+            self.executor.tokenizer(),
+            token_id,
+            is_eos,
+            finished,
+        );
 
         if let Some(tx) = self.scheduler.get_token_sender(seq_id) {
             let token = super::types::GeneratedToken {
@@ -336,7 +334,6 @@ where
         }
 
         self.scheduler.append_to_history(seq_id, token_id);
-        let finished = self.scheduler.append_token(seq_id, token_id)?;
         if finished || finish == Some(FinishReason::Eos) {
             self.scheduler.finish_sequence(seq_id)?;
         }
@@ -380,9 +377,9 @@ where
                 "Prefix cache hit: skipping {} tokens in prefill",
                 cached_count,
             );
-            crate::server::metrics::record_prefix_cache_hit();
+            crate::telemetry::record::record_prefix_cache_hit();
         } else {
-            crate::server::metrics::record_prefix_cache_miss();
+            crate::telemetry::record::record_prefix_cache_miss();
         }
 
         // Build slot mapping only for uncached tokens
@@ -434,22 +431,24 @@ where
             .map_err(|e| anyhow!("record event failed: {}", e))?;
         let token_id = Executor::<R>::read_token_id(&token_gpu, event)?;
 
-        // Send token to caller
-        let text = if self.executor.tokenizer().is_eos(token_id) {
-            String::new()
-        } else {
-            self.executor
-                .tokenizer()
-                .decode(&[token_id])
-                .unwrap_or_default()
-        };
-
-        let finish = if self.executor.tokenizer().is_eos(token_id) {
+        let is_eos = self.executor.tokenizer().is_eos(token_id);
+        let finish = if is_eos {
             Some(FinishReason::Eos)
         } else {
             None
         };
 
+        // Track in scheduler
+        let finished = self.scheduler.append_token(seq_id, token_id)?;
+
+        // Send token to caller
+        let text = self.scheduler.token_text(
+            seq_id,
+            self.executor.tokenizer(),
+            token_id,
+            is_eos,
+            finished,
+        );
         if let Some(tx) = self.scheduler.get_token_sender(seq_id) {
             let token = super::types::GeneratedToken {
                 token_id,
@@ -463,8 +462,6 @@ where
 
         self.scheduler.append_to_history(seq_id, token_id);
 
-        // Track in scheduler
-        let finished = self.scheduler.append_token(seq_id, token_id)?;
         if finished || finish == Some(FinishReason::Eos) {
             self.scheduler.finish_sequence(seq_id)?;
         }

@@ -11,7 +11,12 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{DeviceChoice, GenerationConfig, InferenceConfig, InferenceOverlay, ServerConfig};
+use boostr::DType;
+
+use super::{
+    parse_dtype_for, DeviceChoice, GenerationConfig, InferenceConfig, InferenceOverlay,
+    ServerConfig,
+};
 
 /// The file as written. A section key the file omits holds its default.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -152,7 +157,11 @@ impl FileConfig {
         let raw: RawFile = serde_saphyr::from_str(text).map_err(|e| yaml_error(path, &e))?;
 
         let mut unknown_keys = Vec::new();
-        if let Value::Object(known) = serde_json::to_value(&raw)? {
+        if let Value::Object(mut known) = serde_json::to_value(&raw)? {
+            // `inference.dtype` is read below, not by `InferenceConfig`.
+            if let Some(Value::Object(inference)) = known.get_mut("inference") {
+                inference.insert("dtype".to_string(), Value::Null);
+            }
             collect_unknown(&tree, &known, "", &mut unknown_keys);
         }
 
@@ -182,7 +191,10 @@ impl FileConfig {
             Some(Value::Object(section)) => section.keys().cloned().collect(),
             _ => BTreeSet::new(),
         };
-        let inference = InferenceOverlay::from_section(&inference, &inference_keys)?;
+        let mut inference = InferenceOverlay::from_section(&inference, &inference_keys)?;
+        if let Some(dtype) = inference_dtype(&tree, path)? {
+            inference.set_dtype(dtype)?;
+        }
 
         Ok(ParsedFile {
             config: Self {
@@ -197,6 +209,25 @@ impl FileConfig {
             unknown_keys,
         })
     }
+}
+
+/// `inference.dtype`, checked. `None` when the file omits it.
+fn inference_dtype(tree: &Map<String, Value>, path: &Path) -> Result<Option<DType>> {
+    let Some(value) = tree
+        .get("inference")
+        .and_then(|section| section.get("dtype"))
+    else {
+        return Ok(None);
+    };
+    let Some(name) = value.as_str() else {
+        return Err(anyhow!(
+            "{}: inference.dtype is {value}, not a name. Set f32, bf16 or f16",
+            path.display()
+        ));
+    };
+    parse_dtype_for(name, "inference.dtype")
+        .map(Some)
+        .map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
 /// A top-level key older files used in place of `section.key`.
@@ -351,7 +382,6 @@ server:
     ttft_p51_ms: 3
 inference:
   flash_attention: true
-  dtype: f32
 generation:
   logit_bias:
     \"42\": -1.5
@@ -364,11 +394,26 @@ generation:
                 "server.hots",
                 "server.slo.ttft_p51_ms",
                 "inference.flash_attention",
-                "inference.dtype",
             ]
         );
         assert_eq!(parsed.config.generation.logit_bias.get(&42), Some(&-1.5));
         assert_eq!(parsed.config.inference.keys().count(), 0);
+    }
+
+    #[test]
+    fn inference_dtype_is_a_checked_key() {
+        let parsed = parse("inference:\n  dtype: f32\n").unwrap();
+        assert!(parsed.unknown_keys.is_empty(), "{:?}", parsed.unknown_keys);
+        assert_eq!(parsed.config.inference.dtype(), Some(DType::F32));
+        assert_eq!(parse("").unwrap().config.inference.dtype(), None);
+
+        let err = parse("inference:\n  dtype: fp8\n").unwrap_err().to_string();
+        assert!(err.contains("config.yaml"), "{err}");
+        assert!(err.contains("inference.dtype"), "{err}");
+        assert!(err.contains("fp8"), "{err}");
+
+        let err = parse("inference:\n  dtype: 32\n").unwrap_err().to_string();
+        assert!(err.contains("inference.dtype"), "{err}");
     }
 
     #[test]

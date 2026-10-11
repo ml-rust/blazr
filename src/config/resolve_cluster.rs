@@ -28,8 +28,8 @@ pub struct ClusterSettings {
     pub model: Option<String>,
     /// `BLAZR_MODEL_DIR`, then `model_dir`, then `./models`.
     pub model_dir: PathBuf,
-    /// CUDA device index from `device`. 0 on a CPU build.
-    pub cuda_index: usize,
+    /// GPU index from `device`, for the build's runtime. 0 on a CPU build.
+    pub gpu_index: usize,
     /// The `server` section with `--port` and `--host` written over it.
     pub server: ServerConfig,
     /// `--api-key`, then `BLAZR_API_KEY`.
@@ -54,7 +54,7 @@ pub fn resolve_cluster(
     Ok(ClusterSettings {
         model: resolve_model(flags.model, file),
         model_dir: resolve_model_dir(None, env, file),
-        cuda_index: DeviceChoice::build_cuda_index(file.device)?,
+        gpu_index: DeviceChoice::build_gpu_index(file.device)?,
         server,
         api_key: flags.api_key.or_else(|| env.api_key.clone()),
     })
@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(s.model.as_deref(), Some("file-model"));
         assert_eq!(s.model_dir, PathBuf::from("/env"));
         assert_eq!(s.api_key.as_deref(), Some("env-key"));
-        assert_eq!(s.cuda_index, 0);
+        assert_eq!(s.gpu_index, 0);
 
         let flags = ClusterFlags {
             model: Some("flag-model".into()),

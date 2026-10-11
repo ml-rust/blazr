@@ -21,10 +21,7 @@ use super::disaggregated_forward::{
     build_decode_step_fn, build_prefill_fn, resolve_model_path, run_router_http_server,
 };
 
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public entry points
@@ -164,11 +161,8 @@ pub async fn run_disagg_prefill_worker(
             .ok_or_else(|| anyhow::anyhow!("Prefill worker could not find its rank in mesh"))?,
     );
 
-    // Load model on the `device` key's CUDA index.
-    #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(settings.cuda_index);
-    #[cfg(not(feature = "cuda"))]
-    let device = boostr::CpuDevice::new();
+    // Load model on the `device` key's GPU index.
+    let device = crate::runtime::open_device(settings.gpu_index)?;
 
     let model_path = resolve_model_path(&model, &settings.model_dir);
     let (loaded_model, _blazr_config) =
@@ -261,11 +255,8 @@ pub async fn run_disagg_decode_worker(
             .ok_or_else(|| anyhow::anyhow!("Decode worker could not find its rank in mesh"))?,
     );
 
-    // Load model on the `device` key's CUDA index.
-    #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(settings.cuda_index);
-    #[cfg(not(feature = "cuda"))]
-    let device = boostr::CpuDevice::new();
+    // Load model on the `device` key's GPU index.
+    let device = crate::runtime::open_device(settings.gpu_index)?;
 
     let model_path = resolve_model_path(&model, &settings.model_dir);
     let (loaded_model, _blazr_config) =

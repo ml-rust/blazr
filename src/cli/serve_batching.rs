@@ -19,11 +19,7 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::engine::{BatchEngine, Executor, GenerationScheduler, RequestScheduler, SloBatchPolicy};
-
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 /// Which scheduler a model's decode path takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,8 +107,8 @@ async fn lane_batching(
     Ok(Some(configured))
 }
 
-/// Lane decode is a CUDA path, so a CPU build serves these models one
-/// sequence at a time whatever `max_batch_size` says.
+/// Lane decode is a CUDA path, so a CPU or wgpu build serves these models
+/// one sequence at a time whatever `max_batch_size` says.
 #[cfg(not(feature = "cuda"))]
 async fn lane_batching(
     executor: Arc<Executor<ServerRuntime>>,

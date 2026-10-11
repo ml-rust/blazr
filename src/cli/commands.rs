@@ -1,12 +1,13 @@
 use clap::{Parser, Subcommand};
 
-use super::args::{RuntimeArgs, SamplingArgs, VisionArgs};
+use super::args::{DtypeArgs, RuntimeArgs, SamplingArgs, VisionArgs};
 
 /// The optional features this binary is built with, as `--version` lists
 /// them after the version: `0.1.1 (audio, cuda)`.
-const FEATURES: [(&str, bool); 4] = [
+const FEATURES: [(&str, bool); 5] = [
     ("audio", cfg!(feature = "audio")),
     ("cuda", cfg!(feature = "cuda")),
+    ("wgpu", cfg!(feature = "wgpu")),
     ("nccl", cfg!(feature = "nccl")),
     ("distributed", cfg!(feature = "distributed")),
 ];
@@ -63,6 +64,7 @@ pub enum Commands {
     },
 
     /// Start inference server
+    #[cfg(feature = "server")]
     Serve {
         /// Model to load at start. Others load on demand. [default: default_model]
         #[arg(long, short)]
@@ -197,6 +199,9 @@ pub enum Commands {
 
         #[command(flatten)]
         vision: VisionArgs,
+
+        #[command(flatten)]
+        dtype: DtypeArgs,
     },
 
     /// List available models
@@ -288,6 +293,9 @@ pub enum Commands {
 
         #[command(flatten)]
         vision: VisionArgs,
+
+        #[command(flatten)]
+        dtype: DtypeArgs,
     },
 
     /// Benchmark model performance (tok/s, TTFT, ITL)
@@ -314,9 +322,13 @@ pub enum Commands {
         /// Concurrency levels to sweep (e.g., --concurrency 1 2 4 8)
         #[arg(long, num_args = 1..)]
         concurrency: Option<Vec<usize>>,
+
+        #[command(flatten)]
+        dtype: DtypeArgs,
     },
 
     /// Show running models on a blazr server
+    #[cfg(feature = "server")]
     Ps {
         /// Server URL (default: http://localhost:8080)
         #[arg(long, default_value = "http://localhost:8080")]
@@ -346,7 +358,7 @@ pub enum Commands {
     },
 
     /// Join or start a distributed inference swarm
-    #[cfg(feature = "distributed")]
+    #[cfg(all(feature = "distributed", feature = "server"))]
     Swarm {
         /// Role: "leader" or "worker"
         #[arg(long, default_value = "worker")]
@@ -386,7 +398,7 @@ pub enum Commands {
     },
 
     /// Run a disaggregated prefill/decode router or worker
-    #[cfg(feature = "distributed")]
+    #[cfg(all(feature = "distributed", feature = "server"))]
     Disagg {
         /// Role: "router", "prefill", or "decode"
         #[arg(long, default_value = "router")]
@@ -459,6 +471,7 @@ mod tests {
         assert!(VERSION.starts_with(env!("CARGO_PKG_VERSION")));
         assert_eq!(VERSION.contains("(audio"), cfg!(feature = "audio"));
         assert_eq!(VERSION.contains("cuda"), cfg!(feature = "cuda"));
+        assert_eq!(VERSION.contains("wgpu"), cfg!(feature = "wgpu"));
         assert_eq!(VERSION.contains('('), FEATURES.iter().any(|(_, on)| *on));
     }
 }

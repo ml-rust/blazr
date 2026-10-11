@@ -26,6 +26,9 @@ pub struct TensorParallelState {
     /// Kept alive here so it is not dropped while the executor exists.
     #[cfg(feature = "cuda")]
     pub comm: std::sync::Arc<dyn boostr::runtime::Communicator>,
+    /// The follower rank threads that run in lockstep with rank 0.
+    #[cfg(all(feature = "cuda", feature = "nccl"))]
+    pub group: Option<super::tp_group::TpGroup>,
 }
 
 impl TensorParallelState {
@@ -46,6 +49,8 @@ impl TensorParallelState {
             rank,
             world_size,
             comm,
+            #[cfg(feature = "nccl")]
+            group: None,
         }
     }
 
@@ -62,6 +67,78 @@ impl TensorParallelState {
         let start = self.rank * per_rank + self.rank.min(remainder);
         let end = start + per_rank + if self.rank < remainder { 1 } else { 0 };
         (start, end)
+    }
+}
+
+/// The shape of a fresh contiguous KV cache, as rank 0 built it. Each
+/// follower rank builds a matching cache for its own head shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvCacheSpec {
+    pub initial_capacity: usize,
+    pub max_seq_len: usize,
+    pub dtype: boostr::DType,
+}
+
+impl<R> super::Executor<R>
+where
+    R: boostr::Runtime<DType = boostr::DType>,
+    R::Client: boostr::model::ModelClient<R> + boostr::IndexingOps<R>,
+{
+    /// A forward pass over a contiguous KV cache.
+    ///
+    /// A tensor-parallel executor runs the step on every rank of its group.
+    /// Pass `fresh_cache` when `kv_cache` was just built for a new sequence.
+    pub(crate) fn forward_contiguous(
+        &self,
+        input: &boostr::Tensor<R>,
+        kv_cache: &mut boostr::inference::LayeredKvCache<R>,
+        position: usize,
+        fresh_cache: Option<KvCacheSpec>,
+    ) -> anyhow::Result<boostr::Tensor<R>> {
+        #[cfg(all(feature = "cuda", feature = "nccl"))]
+        if let Some(group) = self.tp_state.as_ref().and_then(|s| s.group.as_ref()) {
+            return group.forward_with_kv_cache(
+                &self.model,
+                input,
+                kv_cache,
+                position,
+                fresh_cache,
+            );
+        }
+        let _ = fresh_cache;
+        self.model
+            .forward_with_kv_cache(input, kv_cache, position)
+            .map_err(|e| anyhow::anyhow!("Forward pass failed: {e}"))
+    }
+
+    /// The lock a tensor-parallel generation holds from prefill to the last
+    /// token. `None` on an executor with no rank group.
+    pub(crate) async fn tp_generation_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        #[cfg(all(feature = "cuda", feature = "nccl"))]
+        if let Some(group) = self.tp_state.as_ref().and_then(|s| s.group.as_ref()) {
+            return Some(group.generation_lock().lock_owned().await);
+        }
+        None
+    }
+
+    /// [`Self::tp_generation_guard`] for a caller that cannot wait, such as
+    /// warmup. An error when a generation holds the lock.
+    pub(crate) fn tp_generation_try_guard(
+        &self,
+    ) -> anyhow::Result<Option<tokio::sync::OwnedMutexGuard<()>>> {
+        #[cfg(all(feature = "cuda", feature = "nccl"))]
+        if let Some(group) = self.tp_state.as_ref().and_then(|s| s.group.as_ref()) {
+            return group
+                .generation_lock()
+                .try_lock_owned()
+                .map(Some)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "a tensor-parallel generation is running. Warm up before serving"
+                    )
+                });
+        }
+        Ok(None)
     }
 }
 
@@ -132,15 +209,75 @@ pub fn log_tp_config(tp_size: usize) {
     }
 }
 
-/// Initialize tensor parallelism for model loading.
+/// Environment variable a multi-process launcher sets to give each process
+/// its rank. blazr refuses it: every rank runs as a thread of one process.
+pub const TP_RANK_ENV: &str = "BLAZR_TP_RANK";
+
+/// Refuse a multi-process tensor-parallel launch.
 ///
-/// Creates a NCCL communicator, logs configuration, and returns a
-/// `TensorParallelState` that keeps the communicator alive for the
-/// duration of the executor. Call this before loading model weights.
+/// A multi-process group needs one NCCL unique id shared by every process,
+/// for example over nexar. blazr does not exchange that id. It runs all
+/// ranks as threads of one process instead.
+pub fn refuse_multi_process(rank_var: Option<&str>) -> Result<(), String> {
+    match rank_var {
+        None => Ok(()),
+        Some(value) => Err(format!(
+            "{TP_RANK_ENV}={value} asks for one process per rank. blazr runs every tensor-parallel \
+             rank as a thread of one process and shares no NCCL id across processes. Unset \
+             {TP_RANK_ENV} and start one blazr process"
+        )),
+    }
+}
+
+/// One NCCL communicator per GPU `base_device..base_device + world_size`.
+///
+/// All ranks live in this process. `Comm::from_devices` creates one NCCL
+/// unique id and initializes every rank with it. Each communicator runs on
+/// its device's default compute stream, so collectives order with the
+/// model's kernels.
+#[cfg(all(feature = "cuda", feature = "nccl"))]
+pub fn create_nccl_group(
+    base_device: usize,
+    world_size: usize,
+) -> Result<Vec<std::sync::Arc<dyn boostr::runtime::Communicator>>, String> {
+    use boostr::runtime::cuda::NcclCommunicator;
+    use boostr::{CudaDevice, CudaRuntime, Runtime};
+
+    let available =
+        CudaDevice::count().map_err(|e| format!("could not count CUDA devices: {e}"))?;
+    if base_device + world_size > available {
+        return Err(format!(
+            "tensor_parallel_size {world_size} from GPU {base_device} needs GPUs {base_device}..{} \
+             and this host has {available}. Lower the size",
+            base_device + world_size - 1
+        ));
+    }
+    let streams = (base_device..base_device + world_size)
+        .map(|index| {
+            let client = CudaRuntime::default_client(&CudaDevice::new(index));
+            std::sync::Arc::clone(client.stream_arc())
+        })
+        .collect();
+    let comms = NcclCommunicator::from_streams(streams).map_err(|e| {
+        format!("NCCL init for {world_size} ranks from GPU {base_device} failed: {e}")
+    })?;
+    Ok(comms
+        .into_iter()
+        .map(|comm| std::sync::Arc::new(comm) as std::sync::Arc<dyn boostr::runtime::Communicator>)
+        .collect())
+}
+
+/// Start a single-process tensor-parallel group for one model.
+///
+/// Creates the NCCL group and starts the follower rank threads, which load
+/// their shards at once. The caller loads rank 0 with the returned
+/// communicator, then calls [`TpGroup::wait_loaded`] on `state.group`.
 #[cfg(all(feature = "cuda", feature = "nccl"))]
 pub fn init_tp(
     tp_size: usize,
-    rank: usize,
+    base_device: usize,
+    model_path: &std::path::Path,
+    dtype: Option<crate::config::DtypeRequest>,
 ) -> Result<
     (
         TensorParallelState,
@@ -149,33 +286,45 @@ pub fn init_tp(
     String,
 > {
     if tp_size <= 1 {
-        return Err("init_tp called with tp_size <= 1".to_string());
+        return Err(format!(
+            "a tensor-parallel group needs 2 or more ranks, got {tp_size}"
+        ));
     }
+    refuse_multi_process(std::env::var(TP_RANK_ENV).ok().as_deref())?;
     log_tp_config(tp_size);
-    let comm = create_nccl_communicator(rank, tp_size)?;
-    let state = TensorParallelState::with_comm(rank, tp_size, std::sync::Arc::clone(&comm));
+    let comms = create_nccl_group(base_device, tp_size)?;
+    let group = super::tp_group::TpGroup::spawn(&comms, base_device, model_path, dtype)
+        .map_err(|e| format!("{e:#}"))?;
+    let comm = std::sync::Arc::clone(&comms[0]);
+    let state = TensorParallelState {
+        rank: 0,
+        world_size: tp_size,
+        comm: std::sync::Arc::clone(&comm),
+        group: Some(group),
+    };
     Ok((state, comm))
 }
 
-/// Create a NCCL communicator for tensor parallelism.
+/// Turn off every inference path a tensor-parallel group cannot drive.
 ///
-/// Returns a communicator that can be passed to `LoadedModel::load_tp()`.
-/// For single-process multi-GPU, rank is the GPU index.
-#[cfg(all(feature = "cuda", feature = "nccl"))]
-pub fn create_nccl_communicator(
-    rank: usize,
-    world_size: usize,
-) -> Result<std::sync::Arc<dyn boostr::runtime::Communicator>, String> {
-    use boostr::runtime::cuda::NcclCommunicator;
-
-    let comm = NcclCommunicator::new(rank, world_size).map_err(|e| {
-        format!(
-            "Failed to create NCCL communicator (rank={}, world_size={}): {}",
-            rank, world_size, e
-        )
-    })?;
-
-    Ok(std::sync::Arc::new(comm))
+/// The follower ranks mirror only the contiguous KV cache forward. Paged
+/// attention, speculative decoding and the prefix caches run on rank 0
+/// alone, so they stay off.
+pub fn restrict_to_lockstep(inference: &mut crate::config::InferenceConfig) {
+    if inference.paged_attention
+        || inference.speculative.is_some()
+        || inference.prefix_cache
+        || inference.gpu_prefix_cache
+    {
+        tracing::info!(
+            "tensor parallelism decodes with a contiguous KV cache. Paged attention, \
+             speculative decoding and the prefix caches are off"
+        );
+    }
+    inference.paged_attention = false;
+    inference.speculative = None;
+    inference.prefix_cache = false;
+    inference.gpu_prefix_cache = false;
 }
 
 #[cfg(test)]
@@ -215,6 +364,29 @@ mod tests {
     }
 
     #[test]
+    fn multi_process_rank_variable_is_refused() {
+        assert!(refuse_multi_process(None).is_ok());
+        let err = refuse_multi_process(Some("1")).unwrap_err();
+        assert!(err.contains("BLAZR_TP_RANK=1"), "{err}");
+        assert!(err.contains("Unset BLAZR_TP_RANK"), "{err}");
+    }
+
+    #[test]
+    fn lockstep_turns_off_rank0_only_paths() {
+        let mut inference = crate::config::InferenceConfig {
+            paged_attention: true,
+            prefix_cache: true,
+            gpu_prefix_cache: true,
+            ..Default::default()
+        };
+        restrict_to_lockstep(&mut inference);
+        assert!(!inference.paged_attention);
+        assert!(!inference.prefix_cache);
+        assert!(!inference.gpu_prefix_cache);
+        assert!(inference.speculative.is_none());
+    }
+
+    #[test]
     fn test_validate_zero_is_an_error() {
         assert!(validate_tp_config(0, None).is_err());
     }
@@ -232,5 +404,29 @@ mod tests {
         assert!(validate_tp_config(4, None).is_ok());
         assert!(validate_tp_config(4, heads(32, 8)).is_ok());
         assert!(validate_tp_config(4, heads(32, 6)).is_err());
+    }
+
+    /// One NCCL rank per visible GPU initializes, and a group larger than
+    /// the host is refused before NCCL runs. Skips with no CUDA device.
+    #[test]
+    #[cfg(all(feature = "cuda", feature = "nccl"))]
+    fn nccl_group_spans_the_visible_gpus_only() {
+        let available = match boostr::CudaDevice::count() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                println!("skip: no CUDA device");
+                return;
+            }
+        };
+        let comms = create_nccl_group(0, available).expect("NCCL group over every GPU");
+        assert_eq!(comms.len(), available);
+        for (rank, comm) in comms.iter().enumerate() {
+            assert_eq!(comm.rank(), rank);
+            assert_eq!(comm.world_size(), available);
+        }
+        let err = create_nccl_group(0, available + 1)
+            .err()
+            .expect("more ranks than GPUs");
+        assert!(err.contains("Lower the size"), "{err}");
     }
 }

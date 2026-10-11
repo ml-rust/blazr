@@ -15,13 +15,8 @@ use crate::server::metrics;
 
 use super::route::{Route, Serving};
 
-#[cfg(feature = "cuda")]
-pub type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-pub type ServerRuntime = boostr::CpuRuntime;
-
-/// The device the server loads every model onto.
-pub type ServerDevice = <ServerRuntime as boostr::Runtime>::Device;
+/// The runtime and device the server loads every model onto.
+pub use crate::runtime::{ServerDevice, ServerRuntime};
 
 /// Standalone vision embedder (SigLIP/CLIP) keyed by model name.
 pub type VisionEmbedder = boostr::model::vision::ImageEmbedder<ServerRuntime>;

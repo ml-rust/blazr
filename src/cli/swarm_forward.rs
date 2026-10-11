@@ -8,10 +8,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Activation serialization helpers

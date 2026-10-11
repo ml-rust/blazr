@@ -15,6 +15,7 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
+use crate::tokenizer::{token_piece, TokenTextStream};
 
 use super::executor::Executor;
 use super::types::{FinishReason, GeneratedToken, TokenLogprob};
@@ -183,18 +184,23 @@ where
     }
 
     /// Build a GeneratedToken with optional logprobs computation.
+    ///
+    /// `text` is the request's own decoder, so a SentencePiece token keeps
+    /// its leading space and a split character arrives whole.
     pub(crate) fn make_token(
         &self,
         token_id: u32,
+        text: &mut TokenTextStream,
         logits: &Tensor<R>,
         gen_config: &GenerationConfig,
         finish_reason: Option<FinishReason>,
     ) -> Result<GeneratedToken> {
-        let text = if finish_reason == Some(FinishReason::Eos) {
-            String::new()
-        } else {
-            self.tokenizer().decode(&[token_id]).unwrap_or_default()
-        };
+        let text = text.next_text(
+            self.tokenizer(),
+            token_id,
+            finish_reason == Some(FinishReason::Eos),
+            finish_reason.is_some(),
+        );
 
         let (logprob, top_logprobs) = if gen_config.logprobs {
             let (lp, top) = self.compute_logprobs(logits, token_id, gen_config.top_logprobs)?;
@@ -295,7 +301,7 @@ where
             .into_iter()
             .map(|(id, lp)| TokenLogprob {
                 token_id: id as u32,
-                text: self.tokenizer().decode(&[id as u32]).unwrap_or_default(),
+                text: token_piece(self.tokenizer(), id as u32),
                 logprob: lp,
             })
             .collect();

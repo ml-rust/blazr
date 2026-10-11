@@ -27,7 +27,7 @@
 //! session also allocates a KV cache and GDN state at `LANES` lanes, so expect
 //! peak device memory well above the file size.
 
-#![cfg(feature = "cuda")]
+#![cfg(all(feature = "cuda", feature = "server"))]
 
 use std::path::PathBuf;
 use std::sync::Arc;

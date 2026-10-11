@@ -30,6 +30,7 @@ use boostr::{CudaClient, CudaRuntime, Runtime, Tensor};
 use super::executor::Executor;
 use super::graph_session::Qwen35GraphSession;
 use super::types::{FinishReason, GeneratedToken};
+use crate::tokenizer::TokenTextStream;
 
 /// The one lane a `qwen35` graph session decodes in.
 const GRAPH_LANE: usize = 0;
@@ -377,15 +378,16 @@ impl Executor<CudaRuntime> {
             drop(plan);
             let decode_graph = &mut session.decode;
 
+            let mut text = TokenTextStream::new(self.tokenizer(), prompt_tokens);
             // ── First token from prefill logits ──
             let first_token = self.first_token_from_logits(&prefill_logits)?;
             drop(prefill_logits);
 
             if self.tokenizer().is_eos(first_token) {
-                yield Ok(Self::eos_token(first_token));
+                yield Ok(Self::eos_token(first_token, &mut text));
                 return;
             }
-            yield Ok(self.text_token(first_token, None));
+            yield Ok(self.text_token(&mut text, first_token, None));
 
             decode_graph.set_next_tokens(&client, &[first_token as i64])
                 .map_err(|e| anyhow!("Failed to seed the graph lane's first token: {}", e))?;
@@ -410,13 +412,13 @@ impl Executor<CudaRuntime> {
                 tracing::info!("qwen35 graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
 
                 if self.tokenizer().is_eos(next_token) {
-                    yield Ok(Self::eos_token(next_token));
+                    yield Ok(Self::eos_token(next_token, &mut text));
                     break;
                 }
 
                 let is_last = i + 1 == graph_max;
                 let finish_reason = if is_last { Some(FinishReason::Length) } else { None };
-                yield Ok(self.text_token(next_token, finish_reason));
+                yield Ok(self.text_token(&mut text, next_token, finish_reason));
             }
         }
     }

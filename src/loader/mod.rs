@@ -11,10 +11,12 @@ mod detect;
 pub(crate) mod gguf;
 mod gguf_config;
 mod gguf_info;
+mod gguf_rope;
 mod gguf_template;
 #[cfg(feature = "audio")]
 pub mod hub;
-pub(crate) mod hub_client;
+#[cfg(feature = "hub")]
+pub mod hub_client;
 mod safetensors;
 #[cfg(feature = "audio")]
 mod tts;
@@ -23,14 +25,19 @@ mod vision_embedder;
 #[cfg(feature = "audio")]
 mod whisper_loader;
 
-pub use api::{load_model, load_model_tp, load_model_with_config, load_model_with_offloading};
+pub use api::{
+    load_model, load_model_as, load_model_tp, load_model_with_config, load_model_with_offloading,
+};
 pub use detect::{detect_model_source, ModelFormat, ModelSource};
-pub use gguf::{load_gguf, load_gguf_with_tokenizer};
+pub use gguf::{
+    load_gguf, load_gguf_bytes_with_tokenizer_as, load_gguf_with_tokenizer,
+    load_gguf_with_tokenizer_as, GgufBytesModel,
+};
 pub use gguf_info::{get_gguf_info, GgufInfo};
 pub use gguf_template::{chat_template_from_metadata, gguf_chat_template};
 pub use safetensors::{
-    load_safetensors, load_safetensors_with_offloading, model_config_inference, OffloadingInfo,
-    OffloadingOptions,
+    load_safetensors, load_safetensors_bytes, load_safetensors_with_offloading,
+    model_config_inference, OffloadingInfo, OffloadingOptions, SafeTensorsBytes,
 };
 #[cfg(feature = "audio")]
 pub use tts::{

@@ -14,8 +14,11 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub max_context_len: Option<usize>,
 
-    /// Data type for inference (f32, f16, bf16). The loader sets it from the
-    /// checkpoint, so it is not a config key.
+    /// The compute dtype (f32, bf16, f16) of the loaded model. The loader
+    /// resolves it before any weight loads, see `config::dtype`. Weights,
+    /// activations and the KV cache all take it. A model `config.json`
+    /// value here is ignored. The user file key `inference.dtype` is a
+    /// request the loader reads, never a write over this field.
     #[serde(skip, default = "default_dtype")]
     pub dtype: String,
 

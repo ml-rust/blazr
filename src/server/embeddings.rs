@@ -17,7 +17,7 @@ use super::encoding::encode_f32_base64;
 use super::generation::{error_response, policy_error_response};
 use super::handlers::AppState;
 use super::multimodal::{decode_image, ContentPart};
-use super::pooling::{l2_normalize, pool_cls, pool_last, pool_mean};
+use crate::engine::pooling::{l2_normalize, pool_cls, pool_last, pool_mean};
 
 /// Embedding request (OpenAI-compatible)
 #[derive(Deserialize)]

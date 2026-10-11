@@ -6,20 +6,23 @@ use boostr::model::LoadedModel;
 use boostr::ops::TensorOps;
 use boostr::{DType, Runtime};
 
-use crate::config::BlazrConfig;
+use crate::config::{BlazrConfig, DtypeRequest};
 
 use super::offloading::{OffloadingInfo, OffloadingOptions};
 use super::regular;
 
-/// Load a model from SafeTensors format (no offloading)
+/// Load a model from SafeTensors format (no offloading).
+///
+/// `request` is the user's compute dtype, see `config::compute_dtype`.
 pub fn load_safetensors<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
-    regular::load_safetensors_regular(path, device)
+    regular::load_safetensors_regular(path, device, request)
 }
 
 /// Load a model from SafeTensors with explicit configuration
@@ -40,11 +43,12 @@ pub fn load_safetensors_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path
     path: P,
     gpu_device: &R::Device,
     options: OffloadingOptions,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig, OffloadingInfo)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
-    super::offloading::load_safetensors_with_offloading(path, gpu_device, options)
+    super::offloading::load_safetensors_with_offloading(path, gpu_device, options, request)
 }
 
 /// Load a model with tensor parallelism (weight sharding across ranks)
@@ -52,11 +56,12 @@ pub fn load_safetensors_tp<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
     comm: std::sync::Arc<dyn boostr::runtime::Communicator>,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
-    regular::load_safetensors_tp(path, device, comm)
+    regular::load_safetensors_tp(path, device, comm, request)
 }
 
 /// Non-CUDA fallback for offloading (just loads normally)
@@ -65,11 +70,12 @@ pub fn load_safetensors_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path
     path: P,
     device: &R::Device,
     _options: OffloadingOptions,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig, OffloadingInfo)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
-    let (model, config) = load_safetensors(path, device)?;
+    let (model, config) = load_safetensors(path, device, request)?;
     Ok((
         model,
         config,

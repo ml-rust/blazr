@@ -16,7 +16,7 @@ use crate::engine::Executor;
 use crate::loader::OffloadingOptions;
 use crate::loader::{self, detect_model_source, ModelFormat};
 use crate::model::chat_template::ChatTemplate;
-use crate::tokenizer::from_vocab_size;
+use crate::tokenizer::checkpoint_tokenizer;
 use boostr::{CpuRuntime, DType, Runtime};
 
 /// Run interactive generation. `images` are files placed before `prompt`,
@@ -32,8 +32,37 @@ pub async fn run(
     let images = read_images(&images)?;
     match runtime.device {
         DeviceChoice::Cpu => {
-            run_cpu(model, prompt, chat_template, gen_config, runtime, images).await
+            let device = boostr::CpuDevice::new();
+            run_plain::<CpuRuntime>(
+                model,
+                prompt,
+                chat_template,
+                gen_config,
+                runtime,
+                images,
+                device,
+            )
+            .await
         }
+        #[cfg(feature = "wgpu")]
+        DeviceChoice::Wgpu(index) => {
+            let device = crate::runtime::open_wgpu_device(index)?;
+            run_plain::<boostr::runtime::wgpu::WgpuRuntime>(
+                model,
+                prompt,
+                chat_template,
+                gen_config,
+                runtime,
+                images,
+                device,
+            )
+            .await
+        }
+        #[cfg(not(feature = "wgpu"))]
+        DeviceChoice::Wgpu(_) => anyhow::bail!(
+            "wgpu support is not enabled. Rebuild with --features wgpu, or pass --cpu, or set \
+             device: cpu in ~/.blazr/config.yaml"
+        ),
         #[cfg(feature = "cuda")]
         DeviceChoice::Cuda(index) => {
             run_cuda(
@@ -79,14 +108,22 @@ async fn run_cuda(
     let (loaded_model, mut config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
             // GGUF: use embedded tokenizer (exact vocabulary from the file)
-            let (m, c, tok) = loader::load_gguf_with_tokenizer::<CudaRuntime, _>(&model, &device)?;
+            let (m, c, tok) = loader::load_gguf_with_tokenizer_as::<CudaRuntime, _>(
+                &model,
+                &device,
+                runtime.load.dtype.as_ref(),
+            )?;
             tracing::info!("Using GGUF-embedded tokenizer");
             (m, c, tok)
         }
         ModelFormat::SafeTensors => {
             if gpu_layers < 0 {
-                let (m, c) = loader::load_model::<CudaRuntime, _>(&model, &device)?;
-                let tok = from_vocab_size(c.vocab_size())?;
+                let (m, c) = loader::load_model_as::<CudaRuntime, _>(
+                    &model,
+                    &device,
+                    runtime.load.dtype.as_ref(),
+                )?;
+                let tok = checkpoint_tokenizer(Path::new(&model), c.vocab_size())?;
                 (m, c, tok)
             } else {
                 let options = if gpu_layers > 0 {
@@ -95,8 +132,12 @@ async fn run_cuda(
                     OffloadingOptions::default()
                 };
 
-                let (m, c, info) =
-                    loader::load_model_with_offloading::<CudaRuntime, _>(&model, &device, options)?;
+                let (m, c, info) = loader::load_model_with_offloading::<CudaRuntime, _>(
+                    &model,
+                    &device,
+                    options,
+                    runtime.load.dtype.as_ref(),
+                )?;
 
                 tracing::info!(
                     "Model loaded: {} layers on GPU, {} on CPU ({:.2} GB on GPU)",
@@ -105,7 +146,7 @@ async fn run_cuda(
                     info.gpu_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
                 );
 
-                let tok = from_vocab_size(c.vocab_size())?;
+                let tok = checkpoint_tokenizer(Path::new(&model), c.vocab_size())?;
                 (m, c, tok)
             }
         }
@@ -205,25 +246,41 @@ async fn run_cuda(
     interactive_repl(&executor, &gen_config, &model, graphs).await
 }
 
-async fn run_cpu(
+/// Generation on a runtime with no paged or graph decode: the CPU or wgpu.
+async fn run_plain<R>(
     model: String,
     prompt: Option<String>,
     chat_template: Option<String>,
     gen_config: GenerationConfig,
     runtime: RunSettings,
     images: Vec<Vec<u8>>,
-) -> Result<()> {
+    device: R::Device,
+) -> Result<()>
+where
+    R: Runtime<DType = DType>,
+    R::Client: boostr::ops::TensorOps<R>
+        + boostr::ScalarOps<R>
+        + boostr::ConvOps<R>
+        + boostr::NormalizationOps<R>
+        + boostr::UnaryOps<R>
+        + boostr::ActivationOps<R>
+        + boostr::BinaryOps<R>
+        + boostr::TypeConversionOps<R>
+        + boostr::SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
+        + boostr::model::ModelClient<R>
+        + boostr::RoPEPackedOps<R>
+        + boostr::quant::traits::DequantOps<R>,
+{
     let num_ctx = runtime.load.num_ctx;
     if runtime.paged_attention || runtime.graphs {
         tracing::warn!(
-            "--paged-attention and --graphs apply on CUDA only. The CPU run ignores them"
+            "--paged-attention and --graphs apply on CUDA only. The {} run ignores them",
+            R::name()
         );
     }
 
-    // Initialize CPU device
-    let device = boostr::CpuDevice::new();
-
-    tracing::info!("Loading model: {}", model);
+    tracing::info!("Loading model: {} on {}", model, R::name());
 
     // Detect format and load appropriately
     let source = detect_model_source(Path::new(&model))?;
@@ -231,18 +288,23 @@ async fn run_cpu(
     let (loaded_model, mut config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
             // Load GGUF with embedded tokenizer
-            let loaded = loader::load_gguf_with_tokenizer::<CpuRuntime, _>(&model, &device)?;
+            let loaded = loader::load_gguf_with_tokenizer_as::<R, _>(
+                &model,
+                &device,
+                runtime.load.dtype.as_ref(),
+            )?;
             tracing::info!("Using GGUF-embedded tokenizer");
             loaded
         }
         ModelFormat::SafeTensors => {
             // Load SafeTensors with splintr tokenizer
-            let (loaded_model, config) = loader::load_model::<CpuRuntime, _>(&model, &device)?;
-            let tokenizer = from_vocab_size(config.vocab_size())?;
+            let (loaded_model, config) =
+                loader::load_model_as::<R, _>(&model, &device, runtime.load.dtype.as_ref())?;
+            let tokenizer = checkpoint_tokenizer(Path::new(&model), config.vocab_size())?;
             (loaded_model, config, tokenizer)
         }
     };
-    // The CPU path has no paged or graph decode, so only the load keys apply.
+    // This path has no paged or graph decode, so only the load keys apply.
     runtime.load.apply(&mut config.inference)?;
     let template = ChatTemplate::detect(
         Path::new(&model),
@@ -253,7 +315,7 @@ async fn run_cpu(
         .with_chat_template(template)
         .with_configured_vision_tower()?;
 
-    // Warm up model (less important for CPU, but good for consistency)
+    // Warm up model: compiles GPU pipelines before the first token.
     executor.warmup()?;
     tracing::info!("Model ready");
 

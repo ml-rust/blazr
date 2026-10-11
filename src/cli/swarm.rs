@@ -15,10 +15,7 @@ use crate::distributed::worker::SwarmWorker;
 
 use super::swarm_forward::build_forward_fn;
 
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 /// Start swarm mode (leader or worker).
 ///
@@ -99,7 +96,7 @@ pub async fn swarm(
             .map_err(anyhow::Error::msg)?;
         run_leader(&mut manager, &model_name, settings).await
     } else {
-        run_worker(&manager, leader.as_deref(), settings.cuda_index).await
+        run_worker(&manager, leader.as_deref(), settings.gpu_index).await
     }
 }
 
@@ -111,7 +108,7 @@ async fn run_leader(
 ) -> Result<()> {
     let ClusterSettings {
         model_dir,
-        cuda_index,
+        gpu_index,
         server: server_config,
         api_key,
         ..
@@ -129,13 +126,7 @@ async fn run_leader(
     });
 
     // Load model on leader
-    #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(cuda_index);
-    #[cfg(not(feature = "cuda"))]
-    let device = {
-        let _ = cuda_index;
-        boostr::CpuDevice::new()
-    };
+    let device = crate::runtime::open_device(gpu_index)?;
 
     let scheduler = std::sync::Arc::new(crate::engine::Scheduler::<ServerRuntime>::new(
         model_dir.clone(),
@@ -247,7 +238,7 @@ async fn run_leader(
 async fn run_worker(
     _manager: &SwarmManager,
     leader_addr: Option<&str>,
-    cuda_index: usize,
+    gpu_index: usize,
 ) -> Result<()> {
     let leader_addr =
         leader_addr.ok_or_else(|| anyhow::anyhow!("Worker requires --leader address"))?;
@@ -325,13 +316,7 @@ async fn run_worker(
     );
 
     // Load model on worker
-    #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(cuda_index);
-    #[cfg(not(feature = "cuda"))]
-    let device = {
-        let _ = cuda_index;
-        boostr::CpuDevice::new()
-    };
+    let device = crate::runtime::open_device(gpu_index)?;
 
     let model_path_ref = std::path::Path::new(&model_path);
     let (loaded_model, _blazr_config) =

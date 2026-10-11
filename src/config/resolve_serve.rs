@@ -4,10 +4,10 @@
 use std::path::PathBuf;
 
 use super::resolve::{
-    pick, resolve_model, resolve_model_dir, resolve_num_ctx, resolve_reasoning_format,
-    resolve_tp_size,
+    pick, resolve_dtype, resolve_model, resolve_model_dir, resolve_num_ctx,
+    resolve_reasoning_format, resolve_tp_size,
 };
-use super::{DeviceChoice, EnvVars, FileConfig, ReasoningFormat, ServerConfig};
+use super::{DeviceChoice, DtypeRequest, EnvVars, FileConfig, ReasoningFormat, ServerConfig};
 
 /// The `serve` flags that a key or variable also sets. `None` means not given.
 #[derive(Debug, Clone, Default)]
@@ -21,6 +21,7 @@ pub struct ServeFlags {
     pub reasoning_format: Option<ReasoningFormat>,
     pub voice_dir: Option<PathBuf>,
     pub data_parallel: Option<usize>,
+    pub dtype: Option<boostr::DType>,
 }
 
 /// Every value `blazr serve` starts with.
@@ -30,8 +31,8 @@ pub struct ServeSettings {
     pub model: Option<String>,
     /// `BLAZR_MODEL_DIR`, then `model_dir`, then `./models`.
     pub model_dir: PathBuf,
-    /// CUDA device index from `device`. 0 on a CPU build.
-    pub cuda_index: usize,
+    /// GPU index from `device`, for the build's runtime. 0 on a CPU build.
+    pub gpu_index: usize,
     /// `num_ctx`, then the default.
     pub num_ctx: usize,
     /// `BLAZR_TP_SIZE`, then `inference.tensor_parallel_size`. `None`
@@ -48,6 +49,9 @@ pub struct ServeSettings {
     pub api_key: Option<String>,
     /// `--voice-dir`, then `BLAZR_VOICE_DIR`.
     pub voice_dir: Option<PathBuf>,
+    /// `--dtype`, then `inference.dtype`. `None` takes each model's
+    /// `torch_dtype`, else f32.
+    pub dtype: Option<DtypeRequest>,
 }
 
 /// Resolve every `serve` value.
@@ -78,7 +82,7 @@ pub fn resolve_serve(
     Ok(ServeSettings {
         model,
         model_dir: resolve_model_dir(None, env, file),
-        cuda_index: DeviceChoice::build_cuda_index(file.device)?,
+        gpu_index: DeviceChoice::build_gpu_index(file.device)?,
         num_ctx: resolve_num_ctx(None, file),
         tensor_parallel_size,
         data_parallel,
@@ -86,6 +90,7 @@ pub fn resolve_serve(
         reasoning_format_flag: flags.reasoning_format,
         api_key: flags.api_key.or_else(|| env.api_key.clone()),
         voice_dir: flags.voice_dir.or_else(|| env.voice_dir.clone()),
+        dtype: resolve_dtype(flags.dtype, file),
     })
 }
 
@@ -336,5 +341,34 @@ server:
         let err =
             resolve_serve(ServeFlags::default(), &EnvVars::default(), &from_file).unwrap_err();
         assert!(err.contains("tls_cert"), "{err}");
+    }
+
+    #[test]
+    fn dtype_flag_then_file_then_model() {
+        use crate::config::DtypeSource;
+        use boostr::DType;
+
+        let from_file = file("inference:\n  dtype: f32\n");
+        let env = EnvVars::default();
+        let flags = ServeFlags {
+            dtype: Some(DType::BF16),
+            ..Default::default()
+        };
+        let s = resolve_serve(flags, &env, &from_file).unwrap();
+        let request = s.dtype.unwrap();
+        assert_eq!(
+            (request.dtype, request.source),
+            (DType::BF16, DtypeSource::Flag)
+        );
+
+        let s = resolve_serve(ServeFlags::default(), &env, &from_file).unwrap();
+        let request = s.dtype.unwrap();
+        assert_eq!(
+            (request.dtype, request.source),
+            (DType::F32, DtypeSource::File)
+        );
+
+        let s = resolve_serve(ServeFlags::default(), &env, &file("")).unwrap();
+        assert!(s.dtype.is_none());
     }
 }

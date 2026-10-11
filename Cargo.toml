@@ -19,11 +19,47 @@ categories = [
 exclude = [".github/", "scripts/", "deny.toml", "about.toml", "about.hbs", ".cargo/"]
 
 [features]
-default = ["f16"]
+default = ["f16", "cli", "server"]
 f16 = ["boostr/f16"]
 cuda = ["boostr/cuda", "voxr-narrate?/cuda"]
+# WebGPU runtime: Metal (Apple), Vulkan (Android, Linux, AMD, Intel, NVIDIA),
+# DX12 (Windows) and the browser. With `cuda` also on, CUDA wins.
+wgpu = ["boostr/wgpu"]
 nccl = ["boostr/nccl"]
 distributed = ["boostr/distributed", "dep:nexar"]
+
+# Hugging Face hub client: `blazr pull`, the server's `/api/pull`, and the
+# first-use model download of the audio commands. Network only.
+hub = ["dep:hf-hub", "dep:indicatif"]
+
+# The command-line front end: argument parsing, the REPL, progress output
+# and log setup. `run`, `chat`, `bench`, `info`, `list`, `convert` and `pull`
+# need only the engine and the hub client.
+cli = [
+  "hub",
+  "dep:clap",
+  "dep:clap_complete",
+  "dep:colored",
+  "dep:rustyline",
+  "dep:tracing-subscriber",
+]
+
+# The HTTP front end: the OpenAI, Anthropic and Ollama routes, TLS, the
+# Prometheus exporter, remote image fetching, `blazr serve` and `blazr ps`.
+# Without it the library is the engine alone, for phone, browser and
+# embedded hosts.
+server = [
+  "hub",
+  "tokio/full",
+  "dep:axum",
+  "dep:tower-http",
+  "dep:hyper-util",
+  "dep:rustls",
+  "dep:tokio-rustls",
+  "dep:reqwest",
+  "dep:metrics-exporter-prometheus",
+  "dep:tokio-stream",
+]
 
 # Speech: text-to-speech synthesis and audio transcription endpoints, the
 # `speak`, `transcribe` and `sound-review` commands, plus the TTS, Whisper
@@ -32,7 +68,10 @@ distributed = ["boostr/distributed", "dep:nexar"]
 # pipelines or their four codec decoders. The Whisper weights and mel front
 # end come from boostr; the bundle (tokenizer, generation config) and the TTS
 # engines come from voxr; the narration logic comes from voxr-narrate.
+# The routes need `server` and the commands need `cli`.
 audio = [
+  "server",
+  "cli",
   "dep:voxr",
   "voxr/kokoro",
   "voxr/voxcpm",
@@ -47,6 +86,20 @@ audio = [
   "voxr-narrate/voxcpm",
   "voxr-narrate/stretch",
 ]
+
+# C ABI for app embedders: `src/capi`, header `include/blazr.h`. The engine
+# alone: it needs neither `server` nor `cli`.
+capi = []
+
+# `staticlib` and `cdylib` carry the C ABI for iOS, Android and desktop apps.
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+# The binary is the CLI with the server: `serve` is one of its commands.
+[[bin]]
+name = "blazr"
+path = "src/main.rs"
+required-features = ["cli", "server"]
 
 [dependencies]
 # ML framework (model architectures, quant kernels, tensors via numr)
@@ -66,10 +119,13 @@ splintr = { version = "0.21", features = [
   "vocab-mistral",
 ] }
 
-# HTTP server
-axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.7", features = [
+# Async runtime. The engine needs channels, locks, timers and task yield.
+# `server` adds the rest of tokio.
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+
+# HTTP server (`server`)
+axum = { version = "0.8", features = ["multipart"], optional = true }
+tower-http = { version = "0.7", optional = true, features = [
   "cors",
   "trace",
   "timeout",
@@ -99,9 +155,9 @@ minijinja-contrib = { version = "3.0", default-features = false, features = [
   "pycompat",
 ] }
 
-# CLI
-clap = { version = "4", features = ["derive", "env"] }
-clap_complete = "4"
+# CLI (`cli`)
+clap = { version = "4", features = ["derive", "env"], optional = true }
+clap_complete = { version = "4", optional = true }
 
 # Byte casting for tensor creation from raw bytes
 bytemuck = "1"
@@ -110,16 +166,15 @@ half = "2"
 # Utilities
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 glob = "0.3"
 
-# HuggingFace Hub for model downloading
+# HuggingFace Hub for model downloading (`hub`)
 # Blocking API plus the async client, over reqwest with rustls: no system
 # OpenSSL.
-hf-hub = { version = "1.0", default-features = false, features = ["blocking"] }
-dotenvy = "0.15"
+hf-hub = { version = "1.0", default-features = false, features = ["blocking"], optional = true }
 
 # Distributed runtime (swarm mode)
 nexar = { version = "0.1.2", optional = true }
@@ -127,27 +182,28 @@ nexar = { version = "0.1.2", optional = true }
 # Async streaming
 futures = "0.3"
 async-stream = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", optional = true }
 
 # Random number generation
 rand = "0.10"
 
-# Metrics
+# Metrics. The engine records through the `metrics` facade. The
+# Prometheus exporter belongs to `server`.
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18", default-features = false, features = [
+metrics-exporter-prometheus = { version = "0.18", default-features = false, optional = true, features = [
   "http-listener",
 ] }
 
-# CLI UX
-colored = "3"
-indicatif = "0.18"
+# CLI UX (`cli`, `hub`)
+colored = { version = "3", optional = true }
+indicatif = { version = "0.18", optional = true }
 dirs = "7"
-rustyline = "18"
+rustyline = { version = "18", optional = true }
 
-# HTTP client (for blazr ps)
+# HTTP client (`server`): `blazr ps` and remote image URLs.
 # rustls without a provider of its own: it reads the ring default the
 # process installs, see `crate::tls`.
-reqwest = { version = "0.13", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, optional = true, features = [
   "json",
   "rustls-no-provider",
   "charset",
@@ -159,26 +215,44 @@ reqwest = { version = "0.13", default-features = false, features = [
 # TLS support. ring is the process-wide crypto provider, installed at
 # start. hf-hub's reqwest also links aws-lc-rs, and with two linked
 # providers `rustls::*Config::builder()` panics unless one is installed.
-rustls = { version = "0.23", default-features = false, features = [
+rustls = { version = "0.23", default-features = false, optional = true, features = [
   "ring",
   "logging",
   "std",
   "tls12",
 ] }
-tokio-rustls = { version = "0.26", default-features = false, features = [
+tokio-rustls = { version = "0.26", default-features = false, optional = true, features = [
   "ring",
   "logging",
   "tls12",
 ] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
+
+# Browser builds: the engine's sampling and request ids read randomness from
+# the JavaScript host.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+uuid = { version = "1", features = ["v4", "js"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
+# `#[tokio::test]` in a build without `server`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Per-thread test recorder for the engine's metrics tests.
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # Scratch directories for the narration command tests.
 tempfile = "3"
 # `ServiceExt::oneshot`, for driving the axum router in-process against a
 # built request instead of a live socket (server route integration tests).
 tower = { version = "0.5", features = ["util"] }
+
+# The C ABI tests need the `capi` feature.
+[[test]]
+name = "capi_generate"
+required-features = ["capi"]
+
+[[test]]
+name = "capi_smoke_c"
+required-features = ["capi"]
 
 [profile.release]
 opt-level = 3

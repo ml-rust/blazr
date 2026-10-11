@@ -69,7 +69,7 @@ where
                 paged_cache.set_blocks(blocks);
 
                 if cached > 0 {
-                    crate::server::metrics::record_prefix_cache_hit();
+                    crate::telemetry::record::record_prefix_cache_hit();
                     tracing::info!(
                         prefix_cache_hit = true,
                         cached_blocks = cached,
@@ -79,7 +79,7 @@ where
                         cached * block_size
                     );
                 } else {
-                    crate::server::metrics::record_prefix_cache_miss();
+                    crate::telemetry::record::record_prefix_cache_miss();
                 }
                 // Allocate additional blocks for decode tokens beyond what prefix cache covers
                 let prompt_blocks = prompt_tokens.len().div_ceil(block_size);
@@ -186,7 +186,15 @@ where
             .narrow(1, seq_len - 1, 1)
             .map_err(|e| anyhow!("{}", e))?;
         let squeezed = narrowed.squeeze(Some(1)).squeeze(Some(0));
-        squeezed.argmax(0, false).map_err(|e| anyhow!("{}", e))
+        let token = squeezed.argmax(0, false).map_err(|e| anyhow!("{}", e))?;
+        if token.dtype() == DType::I64 {
+            return Ok(token);
+        }
+        // WebGPU has no 64-bit integers, so its argmax returns I32. Every
+        // token reader takes I64. The cast moves one element.
+        R::default_client(&self.device)
+            .cast(&token, DType::I64)
+            .map_err(|e| anyhow!("argmax token cast to I64: {e}"))
     }
 
     /// Read a scalar i64 GPU tensor to CPU using the pipelined copy stream.

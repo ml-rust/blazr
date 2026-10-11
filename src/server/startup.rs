@@ -25,10 +25,7 @@ use super::metrics;
 use super::routes::api_routes;
 use super::tls::build_tls_config;
 
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 /// Request ID for tracing (injected into request extensions for handler access)
 #[derive(Clone)]

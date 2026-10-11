@@ -1,4 +1,6 @@
-//! Prometheus metrics for the inference server
+//! Prometheus exporter, request middleware and `/metrics` for the server.
+//!
+//! The metric names and the recording helpers live in [`crate::telemetry`].
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,33 +13,14 @@ use metrics_exporter_prometheus::PrometheusHandle;
 
 use super::handlers::AppState;
 
-/// Metric names
-pub mod names {
-    pub const REQUESTS_TOTAL: &str = "blazr_requests_total";
-    pub const REQUESTS_ACTIVE: &str = "blazr_requests_active";
-    pub const REQUEST_DURATION: &str = "blazr_request_duration_seconds";
-    pub const TOKENS_PROMPTED: &str = "blazr_tokens_prompted_total";
-    pub const TOKENS_GENERATED: &str = "blazr_tokens_generated_total";
-    pub const MODELS_LOADED: &str = "blazr_models_loaded";
-    pub const TIME_TO_FIRST_TOKEN: &str = "blazr_time_to_first_token_seconds";
-    pub const TOKENS_PER_SECOND: &str = "blazr_tokens_per_second";
-    pub const INFLIGHT_TOKENS: &str = "blazr_inflight_tokens";
-    pub const SCHEDULER_MODELS_AVAILABLE: &str = "blazr_scheduler_models_available";
-    pub const SCHEDULER_EVICTIONS_TOTAL: &str = "blazr_scheduler_evictions_total";
-    pub const SCHEDULER_LOADS_TOTAL: &str = "blazr_scheduler_loads_total";
-    pub const QUEUE_DEPTH: &str = "blazr_queue_depth";
-    pub const ACTIVE_DECODE_SLOTS: &str = "blazr_active_decode_slots";
-    pub const TOKEN_BUDGET_UTILIZATION: &str = "blazr_token_budget_utilization_ratio";
-    pub const INTER_TOKEN_LATENCY: &str = "blazr_inter_token_latency_seconds";
-    pub const VRAM_USED_BYTES: &str = "blazr_vram_used_bytes";
-    pub const KV_CACHE_UTILIZATION: &str = "blazr_kv_cache_utilization_ratio";
-    pub const PREFIX_CACHE_HITS: &str = "blazr_prefix_cache_hits_total";
-    pub const PREFIX_CACHE_MISSES: &str = "blazr_prefix_cache_misses_total";
-    pub const SLO_VIOLATIONS_TOTAL: &str = "blazr_slo_violations_total";
-    pub const SLO_BATCH_HELD: &str = "blazr_slo_batch_growth_held";
-    pub const DATA_PARALLEL_REPLICAS: &str = "blazr_data_parallel_replicas";
-    pub const REPLICA_ACTIVE_REQUESTS: &str = "blazr_replica_active_requests";
-}
+pub use crate::telemetry::names;
+#[cfg(feature = "cuda")]
+pub use crate::telemetry::record::update_vram_used;
+pub use crate::telemetry::record::{
+    adjust_decode_slots, adjust_inflight_tokens, record_e2e, record_itl, record_prefix_cache_hit,
+    record_prefix_cache_miss, record_tokens, record_tokens_per_second, record_ttft,
+    update_kv_cache_utilization, update_replicas,
+};
 
 /// Install the global Prometheus recorder and return its handle for rendering.
 /// Must be called once at startup before any metrics are recorded.
@@ -142,92 +125,6 @@ pub async fn metrics_middleware(request: Request, next: Next) -> Response {
         .record(duration);
 
     response
-}
-
-/// Record token counts after a generation completes
-pub fn record_tokens(prompt_tokens: usize, completion_tokens: usize) {
-    metrics::counter!(names::TOKENS_PROMPTED).increment(prompt_tokens as u64);
-    metrics::counter!(names::TOKENS_GENERATED).increment(completion_tokens as u64);
-}
-
-/// Record time-to-first-token (TTFT) in seconds. The SLO checker sees it too.
-pub fn record_ttft(ttft_secs: f64) {
-    metrics::histogram!(names::TIME_TO_FIRST_TOKEN).record(ttft_secs);
-    super::slo::observe_ttft_ms(ttft_secs * 1000.0);
-}
-
-/// Record end-to-end request latency in seconds for the SLO checker.
-pub fn record_e2e(e2e_secs: f64) {
-    super::slo::observe_e2e_ms(e2e_secs * 1000.0);
-}
-
-/// Record decode throughput (tokens/second) for a completed request
-pub fn record_tokens_per_second(tps: f64) {
-    if tps > 0.0 {
-        metrics::histogram!(names::TOKENS_PER_SECOND).record(tps);
-    }
-}
-
-/// Increment/decrement the active decode slot gauge
-pub fn adjust_decode_slots(delta: f64) {
-    if delta >= 0.0 {
-        metrics::gauge!(names::ACTIVE_DECODE_SLOTS).increment(delta);
-    } else {
-        metrics::gauge!(names::ACTIVE_DECODE_SLOTS).decrement(-delta);
-    }
-}
-
-/// Record inter-token latency (ITL) in seconds. The SLO checker sees it too.
-pub fn record_itl(itl_secs: f64) {
-    if itl_secs > 0.0 {
-        metrics::histogram!(names::INTER_TOKEN_LATENCY).record(itl_secs);
-        super::slo::observe_itl_ms(itl_secs * 1000.0);
-    }
-}
-
-/// Update VRAM usage gauge (bytes)
-#[cfg(feature = "cuda")]
-pub fn update_vram_used(device: &boostr::CudaDevice) {
-    if let Ok((free, total)) = device.memory_info() {
-        let used = total.saturating_sub(free);
-        metrics::gauge!(names::VRAM_USED_BYTES).set(used as f64);
-    }
-}
-
-/// Update KV cache block utilization ratio
-pub fn update_kv_cache_utilization(allocated_blocks: usize, total_blocks: usize) {
-    if total_blocks > 0 {
-        let ratio = allocated_blocks as f64 / total_blocks as f64;
-        metrics::gauge!(names::KV_CACHE_UTILIZATION).set(ratio);
-    }
-}
-
-/// Set the replica count gauge and each replica's in-flight request gauge.
-pub fn update_replicas(count: usize, load: &[usize]) {
-    metrics::gauge!(names::DATA_PARALLEL_REPLICAS).set(count as f64);
-    for (index, active) in load.iter().enumerate() {
-        metrics::gauge!(names::REPLICA_ACTIVE_REQUESTS, "replica" => index.to_string())
-            .set(*active as f64);
-    }
-}
-
-/// Record a prefix cache hit
-pub fn record_prefix_cache_hit() {
-    metrics::counter!(names::PREFIX_CACHE_HITS).increment(1);
-}
-
-/// Record a prefix cache miss
-pub fn record_prefix_cache_miss() {
-    metrics::counter!(names::PREFIX_CACHE_MISSES).increment(1);
-}
-
-/// Adjust the in-flight token gauge (positive = add, negative = subtract)
-pub fn adjust_inflight_tokens(delta: f64) {
-    if delta >= 0.0 {
-        metrics::gauge!(names::INFLIGHT_TOKENS).increment(delta);
-    } else {
-        metrics::gauge!(names::INFLIGHT_TOKENS).decrement(-delta);
-    }
 }
 
 /// GET /metrics — Prometheus text exposition format

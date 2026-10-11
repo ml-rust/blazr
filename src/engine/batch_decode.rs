@@ -188,12 +188,6 @@ where
         let token_id = Executor::<R>::read_token_id(&token_gpu, event)?;
 
         let is_eos = executor.tokenizer().is_eos(token_id);
-        let text = if is_eos {
-            String::new()
-        } else {
-            executor.tokenizer().decode(&[token_id]).unwrap_or_default()
-        };
-
         let finished = scheduler.append_token(seq_id, token_id)?;
         let finish = if is_eos {
             Some(FinishReason::Eos)
@@ -202,6 +196,13 @@ where
         } else {
             None
         };
+        let text = scheduler.token_text(
+            seq_id,
+            executor.tokenizer(),
+            token_id,
+            is_eos,
+            finish.is_some(),
+        );
 
         if let Some(tx) = scheduler.get_token_sender(seq_id) {
             let token = GeneratedToken {

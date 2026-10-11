@@ -20,10 +20,7 @@ pub use super::gen_types::{
     LogprobResult, ResponseFormat, Usage,
 };
 
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 /// Sampling parameters shared between completion and chat requests
 pub struct SamplingParams {

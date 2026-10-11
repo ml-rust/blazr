@@ -8,6 +8,7 @@
 mod blazr;
 mod defaults;
 mod device;
+mod dtype;
 mod env;
 mod file;
 mod generation;
@@ -24,6 +25,10 @@ mod vision;
 pub use blazr::{parse_dtype, BlazrConfig};
 pub use defaults::{DEFAULT_MODEL_DIR, DEFAULT_NUM_CTX};
 pub use device::DeviceChoice;
+pub use dtype::{
+    compute_dtype, dtype_name, fixed_format_dtype, parse_dtype_for, torch_dtype, DtypeRequest,
+    DtypeSource, BACKEND_DEFAULT_DTYPE,
+};
 pub use env::EnvVars;
 pub use file::{FileConfig, ParsedFile};
 pub use generation::GenerationConfig;

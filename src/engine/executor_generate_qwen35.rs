@@ -19,12 +19,13 @@ use boostr::{
     SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
-use crate::config::{parse_dtype, GenerationConfig};
+use crate::config::GenerationConfig;
 
 use super::executor::Executor;
 use super::grammar::GrammarDfa;
 use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
+use crate::tokenizer::TokenTextStream;
 
 /// Sampling state one request carries through its decode loop.
 pub(super) struct SamplerState<R: Runtime<DType = DType>> {
@@ -33,6 +34,8 @@ pub(super) struct SamplerState<R: Runtime<DType = DType>> {
     pub mirostat: Option<MirostatState>,
     pub grammar_dfa: Option<GrammarDfa>,
     pub device_grammar: Option<boostr::DeviceGrammarDfa<R>>,
+    /// The request's text decoder, primed with the prompt.
+    pub text: TokenTextStream,
 }
 
 /// Per-request state `generate` builds before it picks a decode arm.
@@ -102,7 +105,7 @@ where
             .model
             .head_dim()
             .ok_or_else(|| anyhow!("qwen35 model missing head dim"))?;
-        let dtype = parse_dtype(self.config.dtype())?;
+        let dtype = self.config.kv_cache_dtype()?;
 
         let kv_config = LayeredKvCacheConfig {
             batch_size: batch,
@@ -221,6 +224,7 @@ where
                 mut mirostat,
                 mut grammar_dfa,
                 mut device_grammar,
+                mut text,
             } = sampler;
 
             let prompt_rows = plan.as_ref().map_or(prompt_tokens.len(), Qwen35PromptPlan::seq_len);
@@ -261,7 +265,7 @@ where
 
                 let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                yield Ok(self.make_token(next_token, cur_logits, gen_config, finish)?);
+                yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
                 if finish == Some(FinishReason::Eos) { break; }
                 logits = next_logits;
             }

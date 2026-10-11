@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
             voice_dir,
             reasoning_format,
             vision,
+            dtype,
         } => {
             let file_path = FileConfig::path();
             let file = FileConfig::load()?;
@@ -135,6 +136,7 @@ async fn main() -> Result<()> {
                 reasoning_format,
                 voice_dir,
                 data_parallel,
+                dtype: dtype.dtype,
             };
             let settings = resolve_serve(flags, &env, &file).map_err(anyhow::Error::msg)?;
             blazr::cli::serve(
@@ -194,6 +196,7 @@ async fn main() -> Result<()> {
             num_ctx,
             verbose,
             vision,
+            dtype,
         } => {
             let file = FileConfig::load()?;
             let model = resolve::require_model(model, &file).map_err(anyhow::Error::msg)?;
@@ -205,9 +208,9 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
             let gen_config = resolve::resolve_generation(&flags, &file.generation);
-            let cuda_index = blazr::cli::build_cuda_index(&file)?;
-            let load = LoadSettings::resolve(num_ctx, vision.into_overrides(), &file);
-            blazr::cli::chat(model, system, chat_template, gen_config, cuda_index, load).await?;
+            let gpu_index = blazr::cli::build_gpu_index(&file)?;
+            let load = LoadSettings::resolve(num_ctx, vision.into_overrides(), dtype.dtype, &file);
+            blazr::cli::chat(model, system, chat_template, gen_config, gpu_index, load).await?;
         }
         Commands::Bench {
             model,
@@ -216,15 +219,16 @@ async fn main() -> Result<()> {
             runs,
             json,
             concurrency,
+            dtype,
         } => {
             let file = FileConfig::load()?;
             let model = resolve::require_model(model, &file).map_err(anyhow::Error::msg)?;
-            let cuda_index = blazr::cli::build_cuda_index(&file)?;
-            let load = LoadSettings::resolve(num_ctx, Default::default(), &file);
+            let gpu_index = blazr::cli::build_gpu_index(&file)?;
+            let load = LoadSettings::resolve(num_ctx, Default::default(), dtype.dtype, &file);
             blazr::cli::bench(
                 model,
                 load,
-                cuda_index,
+                gpu_index,
                 decode_tokens,
                 runs,
                 json,

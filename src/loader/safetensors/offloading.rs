@@ -20,14 +20,16 @@ use boostr::VarMap;
 use boostr::{DType, Runtime};
 
 #[cfg(feature = "cuda")]
-use crate::config::BlazrConfig;
+use crate::config::{BlazrConfig, DtypeRequest};
 #[cfg(feature = "cuda")]
 use crate::model::detect::DetectedConfig;
 
 #[cfg(feature = "cuda")]
-use super::config::{config_from_detected, load_or_create_config};
+use super::config::{checkpoint_compute_dtype, config_from_detected, load_or_create_config};
 #[cfg(feature = "cuda")]
 use super::detect_arch::{detect_architecture_from_loader, detect_awq, detect_gptq};
+#[cfg(feature = "cuda")]
+use super::regular::cast_float;
 
 /// VRAM reserved for KV cache and working memory (2GB default)
 const DEFAULT_KV_CACHE_RESERVE: u64 = 2 * 1024 * 1024 * 1024;
@@ -89,6 +91,7 @@ pub fn load_safetensors_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path
     path: P,
     gpu_device: &R::Device,
     options: OffloadingOptions,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig, OffloadingInfo)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
@@ -108,7 +111,7 @@ where
 
     // Check if this is a GPTQ model — delegate to GPTQ loader
     if detect_gptq(&loader, config_dir) {
-        let (model, config) = super::gptq::load_safetensors_gptq(path, gpu_device)?;
+        let (model, config) = super::gptq::load_safetensors_gptq(path, gpu_device, request)?;
         let info = OffloadingInfo {
             gpu_layers: 0,
             cpu_layers: 0,
@@ -122,7 +125,7 @@ where
     // Check if this is an AWQ model — delegate to AWQ loader which handles
     // qweight/qzeros/scales triplets and DecomposedQuantTensor construction
     if detect_awq(&loader, config_dir) {
-        let (model, config) = super::awq::load_safetensors_awq(path, gpu_device)?;
+        let (model, config) = super::awq::load_safetensors_awq(path, gpu_device, request)?;
         let info = OffloadingInfo {
             gpu_layers: 0,
             cpu_layers: 0,
@@ -137,11 +140,14 @@ where
     let detected = detect_architecture_from_loader(&loader)?;
     let total_layers = detected.num_layers;
 
+    // Resolve the compute dtype before any weight loads.
+    let compute = checkpoint_compute_dtype::<R>(config_dir, request);
     let config = if let Some(dir) = config_dir {
-        load_or_create_config(dir, &detected)?
+        load_or_create_config(dir, &detected, compute)?
     } else {
-        config_from_detected(&detected)
+        config_from_detected(&detected, compute)?
     };
+    let client = R::default_client(gpu_device);
 
     let vram_limit = options
         .vram_limit
@@ -235,6 +241,8 @@ where
         let tensor = loader
             .load_tensor::<R>(name, gpu_device)
             .map_err(|e| anyhow!("Failed to load tensor '{}' to GPU: {}", name, e))?;
+        let tensor = cast_float(&client, tensor, compute)
+            .map_err(|e| anyhow!("tensor '{name}' did not cast to {compute:?}: {e}"))?;
         var_map.insert(name.clone(), tensor);
         gpu_direct_count += 1;
         gpu_bytes += tensor_bytes;
@@ -276,6 +284,8 @@ where
                     .map_err(|e| anyhow!("Failed to transfer tensor '{}' to GPU: {}", name, e))?;
 
             drop(cpu_tensor);
+            let gpu_tensor = cast_float(&client, gpu_tensor, compute)
+                .map_err(|e| anyhow!("tensor '{name}' did not cast to {compute:?}: {e}"))?;
 
             var_map.insert(name.clone(), gpu_tensor);
             cpu_staged_count += 1;

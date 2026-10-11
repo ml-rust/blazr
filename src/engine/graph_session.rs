@@ -18,7 +18,7 @@ use boostr::inference::decode_graph::{
 use boostr::inference::{LayeredGdnState, LayeredKvCache};
 use boostr::{CudaRuntime, Runtime, Tensor};
 
-use crate::config::parse_dtype;
+use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
 use super::types::{FinishReason, GeneratedToken};
@@ -76,25 +76,27 @@ impl Executor<CudaRuntime> {
         Self::read_token_id(&token_gpu, event)
     }
 
-    /// The `GeneratedToken` for an EOS step: empty text, `FinishReason::Eos`.
-    pub(super) fn eos_token(token_id: u32) -> GeneratedToken {
+    /// The `GeneratedToken` for an EOS step. It carries only the bytes the
+    /// decoder still holds.
+    pub(super) fn eos_token(token_id: u32, text: &mut TokenTextStream) -> GeneratedToken {
         GeneratedToken {
             token_id,
-            text: String::new(),
+            text: text.finish(),
             logprob: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Eos),
         }
     }
 
-    /// The `GeneratedToken` for a non-EOS decode step: decodes `token_id`
-    /// through the tokenizer and attaches `finish_reason`.
+    /// The `GeneratedToken` for a non-EOS decode step. `text` is the
+    /// request's own decoder, and `finish_reason` marks the last token.
     pub(super) fn text_token(
         &self,
+        text: &mut TokenTextStream,
         token_id: u32,
         finish_reason: Option<FinishReason>,
     ) -> GeneratedToken {
-        let text = self.tokenizer().decode(&[token_id]).unwrap_or_default();
+        let text = text.next_text(self.tokenizer(), token_id, false, finish_reason.is_some());
         GeneratedToken {
             token_id,
             text,
@@ -143,7 +145,7 @@ impl Executor<CudaRuntime> {
         let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
         let head_dim = self.model().head_dim().unwrap_or(64);
         let half_dim = head_dim / 2;
-        let kv_dtype = parse_dtype(self.config().dtype())?;
+        let kv_dtype = self.config().kv_cache_dtype()?;
         let device = self.device();
 
         let mut kv_cache = LayeredKvCache::new_positional(

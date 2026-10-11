@@ -1,7 +1,7 @@
 //! Loads the start model of `blazr serve`: one copy, or one copy per
 //! data-parallel replica.
 //!
-//! Replica `i` runs on CUDA device `device + i` on a CUDA build, and on its
+//! Replica `i` runs on GPU `device + i` on a CUDA or wgpu build, and on its
 //! own CPU copy on a CPU build. Each copy gets its own batching scheduler.
 
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 
-use crate::config::{tp_conflict, InferenceOverlay, VisionOverrides};
+use crate::config::{tp_conflict, DtypeRequest, InferenceOverlay, VisionOverrides};
 use crate::engine::{DataParallelGroup, Executor, Scheduler, SloBatchPolicy};
 use crate::server::handlers::{ServeReplica, ServerDevice, ServerRuntime, Serving};
 
@@ -23,6 +23,8 @@ pub struct SchedulerSettings {
     pub inference: InferenceOverlay,
     pub tensor_parallel_size: Option<usize>,
     pub vision: VisionOverrides,
+    /// `--dtype`, then `inference.dtype`, for every model loaded.
+    pub dtype: Option<DtypeRequest>,
 }
 
 impl SchedulerSettings {
@@ -34,12 +36,13 @@ impl SchedulerSettings {
             .with_inference_overlay(self.inference.clone())
             .with_tensor_parallel_size(self.tensor_parallel_size)
             .with_vision(self.vision.clone())
+            .with_dtype(self.dtype)
     }
 }
 
 /// Load `model` for serving.
 ///
-/// `primary` is the server's model scheduler on CUDA device `base_index`.
+/// `primary` is the server's model scheduler on GPU `base_index`.
 /// It holds replica 0. Above 1 replica, each further copy loads on the next
 /// device.
 ///
@@ -108,10 +111,9 @@ async fn serve_replica(
 
 /// The name of replica `i`'s device.
 fn device_label(base_index: usize, i: usize) -> String {
-    if cfg!(feature = "cuda") {
-        format!("cuda:{}", base_index + i)
-    } else {
-        format!("cpu:{i}")
+    match crate::runtime::GpuBackend::of_build() {
+        Some(gpu) => format!("{}:{}", gpu.name(), base_index + i),
+        None => format!("cpu:{i}"),
     }
 }
 
@@ -132,8 +134,24 @@ fn replica_devices(base_index: usize, replicas: usize) -> Result<Vec<ServerDevic
     Ok((base_index..last).map(boostr::CudaDevice::new).collect())
 }
 
+/// One device per replica: wgpu adapters `base_index..base_index + replicas`.
+///
+/// An adapter that does not open names the replica count to lower.
+#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+fn replica_devices(base_index: usize, replicas: usize) -> Result<Vec<ServerDevice>> {
+    (base_index..base_index + replicas)
+        .map(|index| {
+            crate::runtime::open_wgpu_device(index).map_err(|e| {
+                anyhow!(
+                    "inference.data_parallel is {replicas} from device wgpu:{base_index}, so it                      needs adapter {index}: {e}. Lower inference.data_parallel or the device                      index"
+                )
+            })
+        })
+        .collect()
+}
+
 /// One device per replica: a CPU device for each copy.
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 fn replica_devices(base_index: usize, replicas: usize) -> Result<Vec<ServerDevice>> {
     let _ = base_index;
     Ok((0..replicas).map(|_| boostr::CpuDevice::new()).collect())
@@ -145,11 +163,11 @@ mod tests {
 
     #[test]
     fn each_replica_gets_one_device_with_a_label() {
-        let devices = replica_devices(0, 3);
-        if cfg!(feature = "cuda") {
-            // A CUDA host with fewer than three devices refuses the count.
+        if crate::runtime::GpuBackend::of_build().is_some() {
+            // A GPU host with fewer than three devices refuses the count.
             return;
         }
+        let devices = replica_devices(0, 3);
         assert_eq!(devices.map(|d| d.len()).ok(), Some(3));
         assert_eq!(device_label(0, 2), "cpu:2");
     }

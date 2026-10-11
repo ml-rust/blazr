@@ -106,7 +106,22 @@ pub fn encode_chat_prompt_with_markers(
         allowed.extend(server_markers.iter().cloned());
         tokenizer.encode_with(&prompt, &SpecialMode::Allow(&allowed))?
     };
-    Ok((prompt, ids))
+    Ok((prompt, single_leading_bos(tokenizer, ids)))
+}
+
+/// `ids` with one BOS where the tokenizer's policy and the template both put
+/// one.
+///
+/// The policy prepends BOS when the model's files ask for it. A template
+/// that spells `{{ bos_token }}` puts a second one right after. llama.cpp
+/// keeps one in that case, and so does this.
+fn single_leading_bos(tokenizer: &AnyTokenizer, mut ids: Vec<u32>) -> Vec<u32> {
+    if let Some(bos) = tokenizer.policy().leading_special() {
+        if ids.len() >= 2 && ids[0] == bos && ids[1] == bos {
+            ids.remove(0);
+        }
+    }
+    ids
 }
 
 #[cfg(test)]
@@ -272,6 +287,40 @@ mod tests {
         assert!(allowed.contains("<|begin_of_text|>"), "bos_token is named");
         assert!(!allowed.contains("<|eot_id|>"), "eos_token is not named");
         assert!(!allowed.contains("<|python_tag|>"));
+    }
+
+    /// A template that spells BOS gets one BOS, not the policy's plus its
+    /// own. A template without BOS still gets the policy's.
+    #[test]
+    fn test_template_bos_is_not_doubled() {
+        let tok = tokenizer("llama3").with_leading_bos(Some(128000));
+        let messages = msgs(&[("user", "Hello")]);
+        let jinja = |source: &str| {
+            let mut template = ChatTemplate::Jinja(
+                JinjaTemplate::new(
+                    source,
+                    TemplateOrigin::Inline,
+                    "<|begin_of_text|>",
+                    "<|eot_id|>",
+                )
+                .expect("compiles"),
+            );
+            template.bind_special_tokens(&tok);
+            template
+        };
+
+        let with_bos = jinja("{{ bos_token }}{% for m in messages %}{{ m.content }}{% endfor %}");
+        let (_, ids) = encode(&with_bos, &tok, &messages).expect("encodes");
+        assert_eq!(ids[0], 128000);
+        assert_ne!(ids[1], 128000, "one BOS: {ids:?}");
+
+        let without_bos = jinja("{% for m in messages %}{{ m.content }}{% endfor %}");
+        let (_, ids) = encode(&without_bos, &tok, &messages).expect("encodes");
+        assert_eq!(ids[0], 128000, "the policy adds BOS");
+        assert_eq!(ids.iter().filter(|&&id| id == 128000).count(), 1);
+
+        let (_, ids) = encode(&ChatTemplate::Llama3, &tok, &messages).expect("encodes");
+        assert_eq!(ids.iter().filter(|&&id| id == 128000).count(), 1, "{ids:?}");
     }
 
     /// `Generic` emits no markers at all, so its allow-list is empty and any

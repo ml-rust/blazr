@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::latency_window::LatencyWindow;
 use crate::config::LatencySlo;
-use crate::server::metrics::names::SLO_BATCH_HELD;
+use crate::telemetry::names::SLO_BATCH_HELD;
 
 /// Samples each policy window holds.
 const POLICY_WINDOW: usize = 256;

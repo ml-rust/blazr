@@ -18,7 +18,8 @@ use boostr::{
     SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
-use crate::config::{parse_dtype, GenerationConfig};
+use crate::config::GenerationConfig;
+use crate::tokenizer::{token_piece, token_piece_bytes, TokenTextStream};
 
 use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
@@ -91,8 +92,7 @@ where
         next_token: u32,
     ) {
         if let Some(ref mut dfa) = grammar_dfa {
-            let token_text = self.tokenizer().decode(&[next_token]).unwrap_or_default();
-            for byte in token_text.bytes() {
+            for byte in token_piece_bytes(self.tokenizer(), next_token) {
                 dfa.advance(byte);
             }
             if let Some(ref mut dg) = device_grammar {
@@ -132,12 +132,7 @@ where
                     // Build vocab byte representations for the device DFA
                     let vocab_size = self.vocab_size();
                     let vocab_bytes: Vec<Vec<u8>> = (0..vocab_size)
-                        .map(|i| {
-                            self.tokenizer()
-                                .decode(&[i as u32])
-                                .unwrap_or_default()
-                                .into_bytes()
-                        })
+                        .map(|i| token_piece_bytes(self.tokenizer(), i as u32))
                         .collect();
                     device_grammar = Some(dfa.to_device::<R>(&vocab_bytes, &self.device)?);
                     grammar_dfa = Some(dfa);
@@ -152,6 +147,7 @@ where
             mirostat,
             grammar_dfa,
             device_grammar,
+            text: TokenTextStream::new(self.tokenizer(), prompt_tokens),
         })
     }
 
@@ -183,7 +179,7 @@ where
                 eprintln!("\nprompt: '{}'", prompt);
                 eprintln!("number of tokens in prompt = {}", prompt_tokens.len());
                 for &tok in prompt_tokens {
-                    let piece = self.tokenizer.decode(&[tok]).unwrap_or_default();
+                    let piece = token_piece(&self.tokenizer, tok);
                     eprintln!("{:>6} -> '{}'", tok, piece);
                 }
                 eprintln!();
@@ -205,6 +201,7 @@ where
                 mut mirostat,
                 mut grammar_dfa,
                 mut device_grammar,
+                mut text,
             } = self.sampler_state(prompt_tokens, gen_config)?;
 
             if self.model.needs_gdn_state() {
@@ -219,6 +216,7 @@ where
                         mirostat,
                         grammar_dfa,
                         device_grammar,
+                        text,
                     },
                     plan: None,
                 };
@@ -232,7 +230,7 @@ where
                     .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
                 let num_layers = self.model.num_layers();
 
-                let state_dtype = parse_dtype(self.config.dtype())?;
+                let state_dtype = self.config.compute_dtype()?;
 
                 let mut ssm_state = LayeredSsmState::new(
                     num_layers, 1, mamba_config, state_dtype, &self.device,
@@ -263,7 +261,7 @@ where
 
                     let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                    yield Ok(self.make_token(next_token, cur_logits, gen_config, finish)?);
+                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
@@ -274,7 +272,7 @@ where
                 let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
                 let head_dim = self.model.head_dim().unwrap_or(64);
                 let block_size = self.config.inference.block_size;
-                let kv_dtype = parse_dtype(self.config.dtype())?;
+                let kv_dtype = self.config.kv_cache_dtype()?;
 
                 // Use shared allocator if available, otherwise create per-request
                 let total_tokens = prompt_tokens.len() + max_tokens;
@@ -388,7 +386,7 @@ where
 
                     let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                    yield Ok(self.make_token(next_token, cur_logits, gen_config, finish)?);
+                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
@@ -412,17 +410,23 @@ where
                 let head_dim = self.model.head_dim().unwrap_or(64);
                 let initial_capacity = (prompt_tokens.len() + max_tokens).min(max_seq_len);
 
-                let kv_dtype = parse_dtype(self.config.dtype())?;
+                let kv_dtype = self.config.kv_cache_dtype()?;
 
                 let mut kv_cache = LayeredKvCache::new_positional(
                     num_layers, 1, num_kv_heads, initial_capacity, max_seq_len,
                     head_dim, kv_dtype, &self.device,
                 ).map_err(|e| anyhow!("Failed to create KV cache: {}", e))?;
+                let fresh_cache = super::tensor_parallel::KvCacheSpec {
+                    initial_capacity,
+                    max_seq_len,
+                    dtype: kv_dtype,
+                };
+                // A tensor-parallel group runs one sequence at a time.
+                let _tp_guard = self.tp_generation_guard().await;
 
                 tracing::info!(phase = "prefill_start", backend = "contiguous", prompt_tokens = prompt_tokens.len());
                 let t0 = std::time::Instant::now();
-                let mut logits = self.model.forward_with_kv_cache(&input, &mut kv_cache, 0)
-                    .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
+                let mut logits = self.forward_contiguous(&input, &mut kv_cache, 0, Some(fresh_cache))?;
                 tracing::info!("Prefill: {:?} (seq_len={}, kv={})", t0.elapsed(), prompt_tokens.len(), kv_cache.seq_len());
                 tracing::info!(phase = "prefill_end", backend = "contiguous");
                 tracing::info!(phase = "decode_start", backend = "contiguous", max_tokens = max_tokens);
@@ -436,8 +440,7 @@ where
 
                     let next_input = token_gpu.reshape(&[1, 1])?;
                     let position = kv_cache.seq_len();
-                    let next_logits = self.model.forward_with_kv_cache(&next_input, &mut kv_cache, position)
-                        .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
+                    let next_logits = self.forward_contiguous(&next_input, &mut kv_cache, position, None)?;
                     let fwd_time = t1.elapsed();
 
                     let t2 = std::time::Instant::now();
@@ -451,7 +454,7 @@ where
 
                     let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                    yield Ok(self.make_token(next_token, cur_logits, gen_config, finish)?);
+                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }

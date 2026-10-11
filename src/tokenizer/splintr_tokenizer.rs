@@ -57,9 +57,9 @@ const CANDIDATE_VOCABS: &[&str] = &[
 /// - `deepseek_v3` / `deepseek-v3` - DeepSeek V3/R1 (~129k tokens)
 /// - `mistral` / `mistral_v1` / `mistral_v2` / `mistral_v3` - Mistral families
 ///
-/// Boundary tokens (BOS/EOS) are owned by the returned tokenizer's own special-token
-/// policy, not by this loader: blazr's chat templates already spell the model's BOS
-/// marker in the prompt text, and splintr matches it there.
+/// The returned tokenizer prepends no BOS of its own. A checkpoint states its BOS
+/// rule in its own files, and [`checkpoint_tokenizer`](super::checkpoint_tokenizer)
+/// applies that rule.
 ///
 /// # Errors
 ///

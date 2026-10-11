@@ -21,8 +21,8 @@ pub fn parse_dtype(s: &str) -> Result<DType> {
         "bf16" | "bfloat16" => Ok(DType::BF16),
         #[cfg(not(feature = "f16"))]
         "f16" | "float16" | "bf16" | "bfloat16" => Err(anyhow!(
-            "dtype '{}' requested but the 'f16' feature is not enabled; \
-             rebuild with `--features f16` or use 'f32'",
+            "dtype '{}' needs the 'f16' build feature. Rebuild with `--features f16`, or use \
+             'f32'",
             s
         )),
         other => Err(anyhow!("unknown dtype: '{}'", other)),
@@ -81,6 +81,26 @@ impl BlazrConfig {
     /// Get the inference dtype
     pub fn dtype(&self) -> &str {
         &self.inference.dtype
+    }
+
+    /// The compute dtype the loader resolved. The weights hold it, and the
+    /// KV cache and every activation buffer take it.
+    ///
+    /// # Errors
+    ///
+    /// An error when `inference.dtype` is not f32, bf16 or f16.
+    pub fn compute_dtype(&self) -> Result<DType> {
+        parse_dtype(&self.inference.dtype)
+    }
+
+    /// The KV cache dtype: always [`Self::compute_dtype`]. The attention
+    /// append writes activations into the cache, so the two must agree.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::compute_dtype`].
+    pub fn kv_cache_dtype(&self) -> Result<DType> {
+        self.compute_dtype()
     }
 
     /// Get the model type

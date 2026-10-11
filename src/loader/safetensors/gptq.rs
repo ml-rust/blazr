@@ -23,7 +23,7 @@ use boostr::VarBuilder;
 use boostr::VarMap;
 use boostr::{DType, Runtime};
 
-use crate::config::BlazrConfig;
+use crate::config::{fixed_format_dtype, BlazrConfig, DtypeRequest};
 
 use super::config::load_or_create_config;
 use super::detect_arch::{detect_architecture_from_loader, read_gptq_group_size};
@@ -32,6 +32,7 @@ use super::detect_arch::{detect_architecture_from_loader, read_gptq_group_size};
 pub fn load_safetensors_gptq<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R>
@@ -64,8 +65,8 @@ where
     let detected = detect_architecture_from_loader(&loader)?;
 
     // Load config — GPTQ models run in F16 (scales are F16)
-    let mut config = load_or_create_config(model_dir, &detected)?;
-    config.inference.dtype = "f16".to_string();
+    let dtype = fixed_format_dtype("GPTQ", DType::F16, request);
+    let config = load_or_create_config(model_dir, &detected, dtype)?;
 
     // Separate tensor names into quantized groups and regular tensors
     let tensor_names = loader.tensor_names();

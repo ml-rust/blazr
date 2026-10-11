@@ -25,6 +25,20 @@ use crate::model::chat_template::ChatTemplate;
 use super::lora::{load_lora_adapter, LoraAdapterRegistry};
 use super::vision_tower::{ImageTokenLimits, VisionTower};
 
+/// `config` with `inference.dtype` set to the dtype `R` computes.
+///
+/// The loader already resolved it through `config::compute_dtype`, so a
+/// loaded config passes unchanged. A config built by hand for a runtime
+/// that computes in f32 only gets f32 here.
+fn with_runtime_dtype<R: Runtime<DType = DType>>(mut config: BlazrConfig) -> Result<BlazrConfig> {
+    let dtype = config.compute_dtype()?;
+    let runs = crate::config::compute_dtype::<R>(None, Some(dtype));
+    if runs != dtype {
+        config.inference.dtype = crate::config::dtype_name(runs)?.to_string();
+    }
+    Ok(config)
+}
+
 /// Inference executor
 ///
 /// Wraps a loaded model and provides text generation capabilities.
@@ -103,6 +117,7 @@ where
         device: R::Device,
         num_ctx: usize,
     ) -> Result<Self> {
+        let config = with_runtime_dtype::<R>(config)?;
         let chat_template = ChatTemplate::from_model_type(config.model_type());
 
         // Shared block allocator for paged attention (shared across all concurrent requests)
@@ -346,7 +361,14 @@ where
         };
 
         tracing::info!("Loading draft model from {:?}", draft_path);
-        let (model, _config) = crate::loader::load_model::<R, _>(&draft_path, &self.device)?;
+        // The draft shares the target's KV cache dtype, so it loads at the
+        // target's compute dtype.
+        let request = crate::config::DtypeRequest {
+            dtype: self.config.compute_dtype()?,
+            source: crate::config::DtypeSource::Target,
+        };
+        let (model, _config) =
+            crate::loader::load_model_as::<R, _>(&draft_path, &self.device, Some(&request))?;
         let model = Arc::new(model);
         *guard = Some(Arc::clone(&model));
         tracing::info!("Draft model loaded (vocab_size={})", model.vocab_size());

@@ -12,6 +12,8 @@
 //!
 //! Run: `BLAZR_TEST_SERVER=http://localhost:8080 BLAZR_TEST_MODEL=/path/to/model cargo test -- --ignored`
 
+#![cfg(feature = "server")]
+
 // ── Helpers ──
 
 /// Get the test server URL from env, or skip the test.

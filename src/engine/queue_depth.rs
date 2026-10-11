@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::server::metrics::names::QUEUE_DEPTH;
+use crate::telemetry::names::QUEUE_DEPTH;
 
 /// One queue's share of `blazr_queue_depth`.
 #[derive(Debug, Default)]
@@ -70,7 +70,7 @@ fn move_gauge(before: usize, after: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::test_recorder::TestRecorder;
+    use crate::telemetry::test_recorder::TestRecorder;
 
     #[test]
     fn set_and_enter_sum_into_one_gauge() {

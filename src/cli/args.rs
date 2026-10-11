@@ -72,7 +72,7 @@ pub struct RuntimeArgs {
     #[arg(long, default_value = "0", allow_hyphen_values = true)]
     pub gpu_layers: i32,
 
-    /// Use CPU instead of GPU [default: the `device` key, else cuda:0]
+    /// Use CPU instead of GPU [default: the `device` key, else GPU 0 of the build]
     #[arg(long)]
     pub cpu: bool,
 
@@ -93,6 +93,24 @@ pub struct RuntimeArgs {
 
     #[command(flatten)]
     pub vision: VisionArgs,
+
+    #[command(flatten)]
+    pub dtype: DtypeArgs,
+}
+
+/// The compute dtype flag of `run`, `generate`, `chat`, `bench` and `serve`.
+#[derive(Parser, Debug, Clone, Default)]
+pub struct DtypeArgs {
+    /// Compute dtype of the weights, activations and KV cache. wgpu runs
+    /// f32 whatever this says. GGUF runs f32, AWQ and GPTQ run f16.
+    /// [default: inference.dtype, else the model torch_dtype, else f32]
+    #[arg(long, value_name = "f32|bf16|f16", value_parser = parse_dtype_flag)]
+    pub dtype: Option<boostr::DType>,
+}
+
+/// Parse `--dtype`. The error names the flag and the accepted values.
+fn parse_dtype_flag(value: &str) -> Result<boostr::DType, String> {
+    crate::config::parse_dtype_for(value, "--dtype").map_err(|e| e.to_string())
 }
 
 impl SamplingArgs {

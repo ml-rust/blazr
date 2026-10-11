@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// How a chat response returns the model's reasoning block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningFormat {
     /// Reasoning goes to `reasoning_content`, the answer to `content`.

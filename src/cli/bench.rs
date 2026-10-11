@@ -13,13 +13,10 @@ use super::LoadSettings;
 use crate::config::GenerationConfig;
 use crate::engine::Executor;
 use crate::loader::{self, detect_model_source, ModelFormat};
-use crate::tokenizer::from_vocab_size;
+use crate::tokenizer::checkpoint_tokenizer;
 use boostr::{DType, Runtime};
 
-#[cfg(feature = "cuda")]
-type BenchRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type BenchRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime as BenchRuntime;
 
 /// Benchmark prompt lengths to test
 const PROMPT_LENGTHS: &[usize] = &[32, 128, 512];
@@ -34,11 +31,11 @@ const WARMUP_RUNS: usize = 1;
 const MEASURE_RUNS: usize = 3;
 
 /// Run benchmarks on a model. `load` carries `num_ctx` and the user
-/// config file's inference keys. `cuda_index` comes from `device`.
+/// config file's inference keys. `gpu_index` comes from `device`.
 pub async fn bench(
     model: String,
     load: LoadSettings,
-    cuda_index: usize,
+    gpu_index: usize,
     decode_tokens: Option<usize>,
     runs: Option<usize>,
     json_output: Option<PathBuf>,
@@ -57,24 +54,23 @@ pub async fn bench(
     // Load model
     let spinner = super::util::spinner(format!("Loading model '{}'...", model));
 
-    #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(cuda_index);
-    #[cfg(not(feature = "cuda"))]
-    let device = {
-        let _ = cuda_index;
-        boostr::CpuDevice::new()
-    };
+    let device = crate::runtime::open_device(gpu_index)?;
 
     let source = detect_model_source(std::path::Path::new(&model))?;
 
     let (loaded_model, mut config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
-            let (m, c, tok) = loader::load_gguf_with_tokenizer::<BenchRuntime, _>(&model, &device)?;
+            let (m, c, tok) = loader::load_gguf_with_tokenizer_as::<BenchRuntime, _>(
+                &model,
+                &device,
+                load.dtype.as_ref(),
+            )?;
             (m, c, tok)
         }
         ModelFormat::SafeTensors => {
-            let (m, c) = loader::load_model::<BenchRuntime, _>(&model, &device)?;
-            let tok = from_vocab_size(c.vocab_size())?;
+            let (m, c) =
+                loader::load_model_as::<BenchRuntime, _>(&model, &device, load.dtype.as_ref())?;
+            let tok = checkpoint_tokenizer(std::path::Path::new(&model), c.vocab_size())?;
             (m, c, tok)
         }
     };
@@ -233,7 +229,7 @@ pub async fn bench(
     if let Some(path) = json_output {
         let report = serde_json::json!({
             "model": model,
-            "backend": if cfg!(feature = "cuda") { "cuda" } else { "cpu" },
+            "backend": crate::runtime::backend_name(),
             "num_ctx": num_ctx,
             "decode_tokens": decode_tokens,
             "measurement_runs": measure_runs,

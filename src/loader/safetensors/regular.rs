@@ -11,15 +11,19 @@ use boostr::VarBuilder;
 use boostr::VarMap;
 use boostr::{DType, Runtime};
 
-use crate::config::BlazrConfig;
+use crate::config::{BlazrConfig, DtypeRequest};
 
-use super::config::{config_from_detected, load_or_create_config};
+use super::config::{checkpoint_compute_dtype, config_from_detected, load_or_create_config};
 use super::detect_arch::{detect_architecture_from_loader, detect_awq, detect_gptq};
 
-/// Load a regular (non-AWQ) SafeTensors model
+/// Load a regular (non-AWQ) SafeTensors model.
+///
+/// `request` is the user's compute dtype, see `config::compute_dtype`.
+/// Every float weight is cast to the resolved dtype.
 pub fn load_safetensors_regular<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
@@ -39,12 +43,12 @@ where
 
     // Check if this is a GPTQ model
     if detect_gptq(&loader, config_dir) {
-        return super::gptq::load_safetensors_gptq(path, device);
+        return super::gptq::load_safetensors_gptq(path, device, request);
     }
 
     // Check if this is an AWQ model
     if detect_awq(&loader, config_dir) {
-        return super::awq::load_safetensors_awq(path, device);
+        return super::awq::load_safetensors_awq(path, device, request);
     }
 
     // Log loading info
@@ -64,15 +68,16 @@ where
     // Detect architecture from tensor names and shapes
     let detected = detect_architecture_from_loader(&loader)?;
 
-    // Try to load config.json if available
+    // Resolve the compute dtype before any weight loads.
+    let dtype = checkpoint_compute_dtype::<R>(config_dir, request);
     let config = if let Some(dir) = config_dir {
-        load_or_create_config(dir, &detected)?
+        load_or_create_config(dir, &detected, dtype)?
     } else {
-        config_from_detected(&detected)
+        config_from_detected(&detected, dtype)?
     };
 
-    // Load all tensors into a VarMap
-    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
+    // Load all tensors into a VarMap, every float weight at `dtype`.
+    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
 
     // VarMap only needs to live through model loading — LoadedModel::load takes
     // tensors out via take_tensor, so VarMap is empty after load and can be dropped.
@@ -85,15 +90,20 @@ where
     Ok((model, config))
 }
 
-/// Load all tensors from a SafeTensorsLoader into a VarMap
+/// Load all tensors from a SafeTensorsLoader into a VarMap.
+///
+/// Every F32, F16 and BF16 tensor is cast to `dtype`, the compute dtype.
+/// Integer tensors keep their dtype.
 pub fn load_tensors_from_loader<R: Runtime<DType = DType>>(
     loader: &mut SafeTensorsLoader,
     device: &R::Device,
+    dtype: DType,
 ) -> Result<VarMap<R>>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let mut var_map = VarMap::<R>::new();
+    let client = R::default_client(device);
 
     let tensor_names = loader.tensor_names();
     let total = tensor_names.len();
@@ -108,6 +118,8 @@ where
         let tensor = loader
             .load_tensor::<R>(&name, device)
             .map_err(|e| anyhow!("Failed to load tensor '{}': {}", name, e))?;
+        let tensor = cast_float(&client, tensor, dtype)
+            .map_err(|e| anyhow!("tensor '{name}' did not cast to {dtype:?}: {e}"))?;
         var_map.insert(name, tensor);
     }
 
@@ -122,6 +134,7 @@ pub fn load_safetensors_tp<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
     comm: std::sync::Arc<dyn boostr::runtime::Communicator>,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
@@ -137,10 +150,11 @@ where
         SafeTensorsLoader::open(path).map_err(|e| anyhow!("Failed to open SafeTensors: {}", e))?;
 
     let detected = detect_architecture_from_loader(&loader)?;
+    let dtype = checkpoint_compute_dtype::<R>(config_dir, request);
     let config = if let Some(dir) = config_dir {
-        load_or_create_config(dir, &detected)?
+        load_or_create_config(dir, &detected, dtype)?
     } else {
-        config_from_detected(&detected)
+        config_from_detected(&detected, dtype)?
     };
 
     // Check the head split before any weight loads.
@@ -159,7 +173,7 @@ where
         comm.world_size()
     );
 
-    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
+    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
     let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model = LoadedModel::load_tp(&config.model, &mut vb, comm)
@@ -190,11 +204,72 @@ where
         );
     }
 
-    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device)?;
+    let config_dir = if path.is_file() {
+        path.parent()
+    } else {
+        Some(path)
+    };
+    let dtype = checkpoint_compute_dtype::<R>(config_dir, None);
+    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
     let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model =
         LoadedModel::load(config, &mut vb).map_err(|e| anyhow!("Failed to load model: {}", e))?;
 
     Ok(model)
+}
+
+/// `tensor` at `dtype` when it holds F32, F16 or BF16. Any other tensor
+/// passes unchanged.
+pub(super) fn cast_float<R: Runtime<DType = DType>>(
+    client: &R::Client,
+    tensor: boostr::Tensor<R>,
+    dtype: DType,
+) -> Result<boostr::Tensor<R>>
+where
+    R::Client: TensorOps<R>,
+{
+    let float = matches!(tensor.dtype(), DType::F32 | DType::F16 | DType::BF16);
+    if !float || tensor.dtype() == dtype {
+        return Ok(tensor);
+    }
+    boostr::TypeConversionOps::cast(client, &tensor, dtype).map_err(|e| anyhow!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boostr::{CpuDevice, CpuRuntime, Tensor};
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn float_weights_take_the_compute_dtype() {
+        let device = CpuDevice::new();
+        let client = CpuRuntime::default_client(&device);
+        let values = [1.5f32, -2.25, 0.125, 3.0];
+        let bf16: Vec<half::bf16> = values.iter().map(|&v| half::bf16::from_f32(v)).collect();
+        let weight = Tensor::<CpuRuntime>::from_slice(&bf16, &[2, 2], &device).unwrap();
+        let up = cast_float(&client, weight, DType::F32).unwrap();
+        assert_eq!(up.dtype(), DType::F32);
+        assert_eq!(up.to_vec::<f32>(), values);
+
+        let f32_weight = Tensor::<CpuRuntime>::from_slice(&values, &[4], &device).unwrap();
+        assert_eq!(
+            cast_float(&client, f32_weight, DType::BF16)
+                .unwrap()
+                .dtype(),
+            DType::BF16
+        );
+    }
+
+    #[test]
+    fn integer_tensors_keep_their_dtype() {
+        let device = CpuDevice::new();
+        let client = CpuRuntime::default_client(&device);
+        let ids = Tensor::<CpuRuntime>::from_slice(&[1i32, 2, 3], &[3], &device).unwrap();
+        assert_eq!(
+            cast_float(&client, ids, DType::F32).unwrap().dtype(),
+            DType::I32
+        );
+    }
 }

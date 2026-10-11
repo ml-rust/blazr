@@ -17,7 +17,8 @@ use boostr::{
     Tensor, TypeConversionOps, UnaryOps,
 };
 
-use crate::config::{parse_dtype, GenerationConfig};
+use crate::config::GenerationConfig;
+use crate::tokenizer::TokenTextStream;
 
 use super::sampling::MirostatState;
 use super::types::{FinishReason, GeneratedToken};
@@ -268,7 +269,7 @@ where
             let num_kv_heads = llm.num_kv_heads().unwrap_or(8);
             let head_dim = llm.head_dim().unwrap_or(64);
             let initial_capacity = (merged_seq_len + max_tokens).min(max_seq_len);
-            let kv_dtype = parse_dtype(self.config.dtype())?;
+            let kv_dtype = self.config.kv_cache_dtype()?;
 
             let mut kv_cache = LayeredKvCache::new_positional(
                 num_layers, 1, num_kv_heads, initial_capacity, max_seq_len,
@@ -297,6 +298,7 @@ where
 
             // ── Autoregressive decode (text-only, same as regular generate) ──
             let mut token_history: Vec<u32> = prompt_tokens.to_vec();
+            let mut text = TokenTextStream::new(self.tokenizer(), prompt_tokens);
             let mut mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
                 Some(MirostatState::new(gen_config.mirostat_tau, gen_config.mirostat_eta, gen_config.seed))
             } else {
@@ -332,7 +334,7 @@ where
                     None
                 };
 
-                yield Ok(self.make_token(next_token, cur_logits, gen_config, finish)?);
+                yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
                 if finish == Some(FinishReason::Eos) { break; }
                 logits = next_logits;
             }

@@ -17,7 +17,7 @@ use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
 use boostr::tensor::Tensor;
 use boostr::{CudaRuntime, Runtime};
 
-use crate::config::parse_dtype;
+use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
 use super::types::{FinishReason, GeneratedToken};
@@ -86,15 +86,16 @@ impl Executor<CudaRuntime> {
             };
             let decode_graph = &mut session.decode;
 
+            let mut text = TokenTextStream::new(self.tokenizer(), prompt_tokens);
             // ── First token from prefill logits ──
             let first_token = self.first_token_from_logits(&prefill_logits)?;
             drop(prefill_logits);
 
             if self.tokenizer().is_eos(first_token) {
-                yield Ok(Self::eos_token(first_token));
+                yield Ok(Self::eos_token(first_token, &mut text));
                 return;
             }
-            yield Ok(self.text_token(first_token, None));
+            yield Ok(self.text_token(&mut text, first_token, None));
 
             // Seed next_token_buf with the first token
             decode_graph.seed_next_token(&client, first_token as i64)
@@ -117,13 +118,13 @@ impl Executor<CudaRuntime> {
                 tracing::info!("Graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
 
                 if self.tokenizer().is_eos(next_token) {
-                    yield Ok(Self::eos_token(next_token));
+                    yield Ok(Self::eos_token(next_token, &mut text));
                     break;
                 }
 
                 let is_last = i + 1 == graph_max;
                 let finish_reason = if is_last { Some(FinishReason::Length) } else { None };
-                yield Ok(self.text_token(next_token, finish_reason));
+                yield Ok(self.text_token(&mut text, next_token, finish_reason));
             }
         }
     }
@@ -209,7 +210,7 @@ impl Executor<CudaRuntime> {
             let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
             let head_dim = self.model().head_dim().unwrap_or(64);
             let half_dim = head_dim / 2;
-            let kv_dtype = parse_dtype(self.config().dtype())?;
+            let kv_dtype = self.config().kv_cache_dtype()?;
             let block_size = self.config().inference.block_size;
 
             // Pre-allocate enough blocks for full capacity
@@ -329,6 +330,7 @@ impl Executor<CudaRuntime> {
                 seq_len: paged_cache.seq_len(),
             };
 
+            let mut text = TokenTextStream::new(self.tokenizer(), prompt_tokens);
             // ── First token from prefill logits ──
             let first_token_gpu = self.argmax_on_gpu(&prefill_logits)?;
             let first_event = first_token_gpu.record_event()
@@ -336,10 +338,10 @@ impl Executor<CudaRuntime> {
             let first_token = Self::read_token_id(&first_token_gpu, first_event)?;
 
             if self.tokenizer().is_eos(first_token) {
-                yield Ok(Self::eos_token(first_token));
+                yield Ok(Self::eos_token(first_token, &mut text));
                 return;
             }
-            yield Ok(self.text_token(first_token, None));
+            yield Ok(self.text_token(&mut text, first_token, None));
 
             decode_graph.seed_next_token(&client, first_token as i64)
                 .map_err(|e| anyhow!("Failed to seed next_token_buf: {}", e))?;
@@ -361,13 +363,13 @@ impl Executor<CudaRuntime> {
                 tracing::info!("Paged graph token {}: fwd={:?} sync={:?}", i + 1, fwd_time, t2.elapsed());
 
                 if self.tokenizer().is_eos(next_token) {
-                    yield Ok(Self::eos_token(next_token));
+                    yield Ok(Self::eos_token(next_token, &mut text));
                     break;
                 }
 
                 let is_last = i + 1 == graph_max;
                 let finish_reason = if is_last { Some(FinishReason::Length) } else { None };
-                yield Ok(self.text_token(next_token, finish_reason));
+                yield Ok(self.text_token(&mut text, next_token, finish_reason));
             }
         }
     }

@@ -274,15 +274,14 @@ impl LaneEngine {
         token_id: u32,
         finish_reason: Option<FinishReason>,
     ) -> bool {
-        let text = if finish_reason == Some(FinishReason::Eos) {
-            String::new()
-        } else {
-            self.executor
-                .tokenizer()
-                .decode(&[token_id])
-                .unwrap_or_default()
-        };
         let registry = self.scheduler.registry();
+        let text = registry.token_text(
+            seq_id,
+            self.executor.tokenizer(),
+            token_id,
+            finish_reason == Some(FinishReason::Eos),
+            finish_reason.is_some(),
+        );
         registry.push_history(seq_id, token_id);
         let delivered = registry
             .send_token(

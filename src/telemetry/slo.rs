@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Instant;
 
-use super::metrics::names::SLO_VIOLATIONS_TOTAL;
+use super::names::SLO_VIOLATIONS_TOTAL;
 use crate::config::LatencySlo;
 use crate::engine::latency_window::LatencyWindow;
 use crate::engine::SloBatchPolicy;
@@ -181,7 +181,7 @@ fn violations(metric: &'static str, percentile: usize) -> metrics::Counter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::test_recorder::TestRecorder;
+    use crate::telemetry::test_recorder::TestRecorder;
 
     fn slo() -> LatencySlo {
         LatencySlo {

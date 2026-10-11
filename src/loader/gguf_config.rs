@@ -8,6 +8,8 @@ use boostr::model::UniversalConfig;
 
 use crate::config::BlazrConfig;
 
+use super::gguf_rope::rope_scaling_from_gguf;
+
 /// `general.architecture` values [`config_from_gguf_metadata`] accepts.
 const SUPPORTED_GGUF_ARCHS: &[&str] = &[
     "llama",
@@ -34,15 +36,18 @@ const SUPPORTED_GGUF_ARCHS: &[&str] = &[
 ///
 /// `general.architecture` missing or outside [`SUPPORTED_GGUF_ARCHS`]. An
 /// unknown architecture never falls back to llama.
-pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
+pub(crate) fn config_from_gguf_metadata(gguf: &mut Gguf) -> Result<BlazrConfig> {
     use boostr::model::{AttentionConfig, MoeConfig, SsmConfig};
 
-    let metadata = gguf.metadata();
-
     // Get architecture first as it's needed for other keys
-    let arch = metadata
+    let arch_name = gguf
+        .metadata()
         .architecture()
-        .ok_or_else(|| anyhow!("GGUF missing general.architecture"))?;
+        .ok_or_else(|| anyhow!("GGUF missing general.architecture"))?
+        .to_string();
+    let rope_scaling = rope_scaling_from_gguf(gguf, &arch_name)?;
+    let metadata = gguf.metadata();
+    let arch = arch_name.as_str();
 
     // qwen35 (Bonsai 2): GDN + gated attention hybrid. boostr owns the key
     // table, so the generic attention/ssm blocks below never see it.
@@ -157,7 +162,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
             num_kv_heads,
             head_dim,
             rope_theta,
-            rope_scaling: None,
+            rope_scaling,
             kv_latent_dim,
             q_latent_dim,
             d_rope,
@@ -244,7 +249,9 @@ pub(crate) fn config_from_gguf_metadata(gguf: &Gguf) -> Result<BlazrConfig> {
         ssm,
         moe,
         hybrid_layers: None,
-        tie_word_embeddings: false,
+        // llama.cpp reads `token_embd.weight` as the output head when a file
+        // has no `output.weight`.
+        tie_word_embeddings: gguf.tensor_info("output.weight").is_err(),
         grow_vocab: false,
         vision: None,
         audio: None,
@@ -345,7 +352,7 @@ mod tests {
 
     #[test]
     fn qwen35_header_routes_to_boostr_parser() {
-        let config = config_from_gguf_metadata(&open(&bonsai_pairs())).expect("qwen35 config");
+        let config = config_from_gguf_metadata(&mut open(&bonsai_pairs())).expect("qwen35 config");
         let model = &config.model;
         assert_eq!(model.model_type, "qwen35");
         assert_eq!(model.num_layers, 64);
@@ -367,7 +374,7 @@ mod tests {
             ("not_a_real_arch.embedding_length", Kv::U32(64)),
             ("not_a_real_arch.block_count", Kv::U32(2)),
         ];
-        let err = config_from_gguf_metadata(&open(&pairs)).expect_err("unknown arch");
+        let err = config_from_gguf_metadata(&mut open(&pairs)).expect_err("unknown arch");
         let msg = err.to_string();
         assert!(msg.contains("not_a_real_arch"), "{msg}");
         assert!(msg.contains("qwen35"), "{msg}");
@@ -377,11 +384,11 @@ mod tests {
     #[test]
     fn qwen35moe_and_missing_architecture_error() {
         let pairs = [("general.architecture", Kv::Str("qwen35moe"))];
-        let err = config_from_gguf_metadata(&open(&pairs)).expect_err("qwen35moe");
+        let err = config_from_gguf_metadata(&mut open(&pairs)).expect_err("qwen35moe");
         assert!(err.to_string().contains("qwen35moe"), "{err}");
 
         let pairs = [("llama.embedding_length", Kv::U32(64))];
-        let err = config_from_gguf_metadata(&open(&pairs)).expect_err("missing arch");
+        let err = config_from_gguf_metadata(&mut open(&pairs)).expect_err("missing arch");
         assert!(err.to_string().contains("general.architecture"), "{err}");
     }
 
@@ -393,7 +400,7 @@ mod tests {
             ("llama.block_count", Kv::U32(2)),
             ("llama.attention.head_count", Kv::U32(4)),
         ];
-        let config = config_from_gguf_metadata(&open(&pairs)).expect("llama config");
+        let config = config_from_gguf_metadata(&mut open(&pairs)).expect("llama config");
         assert_eq!(config.model.model_type, "llama");
         assert_eq!(config.model.num_layers, 2);
     }

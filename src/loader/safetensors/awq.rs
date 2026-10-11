@@ -21,7 +21,7 @@ use boostr::VarBuilder;
 use boostr::VarMap;
 use boostr::{DType, Runtime};
 
-use crate::config::BlazrConfig;
+use crate::config::{fixed_format_dtype, BlazrConfig, DtypeRequest};
 
 use super::config::load_or_create_config;
 use super::detect_arch::{detect_architecture_from_loader, read_awq_group_size};
@@ -35,6 +35,7 @@ const AWQ_SHIFTS: [u32; 8] = [0, 16, 4, 20, 8, 24, 12, 28];
 pub fn load_safetensors_awq<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R>
@@ -67,8 +68,8 @@ where
     let detected = detect_architecture_from_loader(&loader)?;
 
     // Load config — AWQ models always run in F16 (scales are F16, reference uses F16)
-    let mut config = load_or_create_config(model_dir, &detected)?;
-    config.inference.dtype = "f16".to_string();
+    let dtype = fixed_format_dtype("AWQ", DType::F16, request);
+    let config = load_or_create_config(model_dir, &detected, dtype)?;
 
     // Separate tensor names into quantized triplets and regular tensors
     let tensor_names = loader.tensor_names();

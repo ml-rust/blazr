@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::generation::{error_response, policy_error_response};
 use super::handlers::AppState;
-use super::pooling::pool_mean;
+use crate::engine::pooling::pool_mean;
 
 /// Rerank request (Cohere/Jina compatible)
 #[derive(Deserialize)]

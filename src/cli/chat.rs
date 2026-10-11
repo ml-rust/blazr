@@ -14,30 +14,21 @@ use crate::loader::{self, detect_model_source, ModelFormat};
 use crate::model::chat_template::{
     encode_chat_prompt_with_markers, ChatMessage, ChatTemplate, RenderOptions,
 };
-use crate::tokenizer::from_vocab_size;
+use crate::tokenizer::checkpoint_tokenizer;
 
-#[cfg(feature = "cuda")]
-type ChatRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ChatRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime as ChatRuntime;
 
 /// Run interactive multi-turn chat. `gen_config` is resolved from the
-/// flags over the user config file. `cuda_index` comes from `device`.
+/// flags over the user config file. `gpu_index` comes from `device`.
 pub async fn chat(
     model: String,
     system: Option<String>,
     chat_template: Option<String>,
     gen_config: GenerationConfig,
-    cuda_index: usize,
+    gpu_index: usize,
     load: LoadSettings,
 ) -> Result<()> {
-    #[cfg(feature = "cuda")]
-    let executor = load_cuda(&model, cuda_index, &load)?;
-    #[cfg(not(feature = "cuda"))]
-    let executor = {
-        let _ = cuda_index;
-        load_cpu(&model, &load)?
-    };
+    let executor = load_executor(&model, gpu_index, &load)?;
 
     // Detect chat template
     let model_path = std::path::Path::new(&model);
@@ -264,13 +255,20 @@ macro_rules! load_model_from_source {
         let source = detect_model_source(std::path::Path::new($model))?;
         let (loaded_model, mut config, tokenizer) = match source.format {
             ModelFormat::Gguf => {
-                let (m, c, tok) =
-                    loader::load_gguf_with_tokenizer::<ChatRuntime, _>($model, &$device)?;
+                let (m, c, tok) = loader::load_gguf_with_tokenizer_as::<ChatRuntime, _>(
+                    $model,
+                    &$device,
+                    $load.dtype.as_ref(),
+                )?;
                 (m, c, tok)
             }
             ModelFormat::SafeTensors => {
-                let (m, c) = loader::load_model::<ChatRuntime, _>($model, &$device)?;
-                let tok = from_vocab_size(c.vocab_size())?;
+                let (m, c) = loader::load_model_as::<ChatRuntime, _>(
+                    $model,
+                    &$device,
+                    $load.dtype.as_ref(),
+                )?;
+                let tok = checkpoint_tokenizer(std::path::Path::new($model), c.vocab_size())?;
                 (m, c, tok)
             }
         };
@@ -280,24 +278,22 @@ macro_rules! load_model_from_source {
     }};
 }
 
-#[cfg(feature = "cuda")]
-fn load_cuda(model: &str, cuda_index: usize, load: &LoadSettings) -> Result<Executor<ChatRuntime>> {
-    let device = boostr::CudaDevice::new(cuda_index);
+/// Load `model` on GPU `gpu_index` of the build's runtime, or the CPU.
+fn load_executor(
+    model: &str,
+    gpu_index: usize,
+    load: &LoadSettings,
+) -> Result<Executor<ChatRuntime>> {
+    let device = crate::runtime::open_device(gpu_index)?;
 
     // Pre-load CUDA modules
-    let client = boostr::CudaClient::new(device.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to create CUDA client: {}", e))?;
-    boostr::preload_inference_modules(&client)
-        .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
+    #[cfg(feature = "cuda")]
+    {
+        let client = boostr::CudaClient::new(device.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to create CUDA client: {}", e))?;
+        boostr::preload_inference_modules(&client)
+            .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
+    }
 
-    load_model_from_source!(model, device, load)
-}
-
-// Gated to mirror `load_cuda` above: each backend gets its own function
-// instead of an `unreachable!()` branch for the other, so no path panics
-// on a case the compiler can already rule out.
-#[cfg(not(feature = "cuda"))]
-fn load_cpu(model: &str, load: &LoadSettings) -> Result<Executor<ChatRuntime>> {
-    let device = boostr::CpuDevice::new();
     load_model_from_source!(model, device, load)
 }

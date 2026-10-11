@@ -13,10 +13,7 @@ use crate::distributed::disaggregated::DisaggRouter;
 use crate::distributed::disaggregated::{DecodeStepFn, PrefillFn};
 use crate::distributed::kv_serialize;
 
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward function builders

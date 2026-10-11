@@ -11,11 +11,7 @@ use crate::server::handlers::Serving;
 use crate::server::{self, LiveSettings};
 
 use super::serve_replicas::{load_serving, SchedulerSettings};
-
-#[cfg(feature = "cuda")]
-type ServerRuntime = boostr::CudaRuntime;
-#[cfg(not(feature = "cuda"))]
-type ServerRuntime = boostr::CpuRuntime;
+use crate::runtime::ServerRuntime;
 
 /// Start the inference server.
 ///
@@ -40,7 +36,7 @@ pub async fn serve(
     let ServeSettings {
         model,
         model_dir,
-        cuda_index,
+        gpu_index,
         num_ctx,
         tensor_parallel_size,
         data_parallel,
@@ -48,6 +44,7 @@ pub async fn serve(
         reasoning_format_flag,
         api_key,
         voice_dir,
+        dtype,
     } = settings;
 
     // Check the tensor parallel degree before any model loads.
@@ -62,11 +59,8 @@ pub async fn serve(
         );
     }
 
-    // Initialize device
-    #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(cuda_index);
-    #[cfg(not(feature = "cuda"))]
-    let device = boostr::CpuDevice::new();
+    // The build's runtime fixes the device type. A wgpu adapter opens here.
+    let device = crate::runtime::open_device(gpu_index)?;
 
     // The model scheduler. Data-parallel replicas build theirs the same way.
     let scheduler_settings = SchedulerSettings {
@@ -76,6 +70,7 @@ pub async fn serve(
         inference: file.inference.clone(),
         tensor_parallel_size,
         vision,
+        dtype,
     };
     let scheduler = Arc::new(scheduler_settings.build(device.clone()));
     // The SLO checks and the batch policy start before any batching engine.
@@ -175,10 +170,11 @@ pub async fn serve(
     if let Some(ref m) = model {
         eprintln!("  Model: {}", m.bold());
     }
-    #[cfg(feature = "cuda")]
-    eprintln!("  Backend: {}", "CUDA".green());
-    #[cfg(not(feature = "cuda"))]
-    eprintln!("  Backend: {}", "CPU".yellow());
+    match crate::runtime::GpuBackend::of_build() {
+        Some(crate::runtime::GpuBackend::Cuda) => eprintln!("  Backend: {}", "CUDA".green()),
+        Some(crate::runtime::GpuBackend::Wgpu) => eprintln!("  Backend: {}", "wgpu".green()),
+        None => eprintln!("  Backend: {}", "CPU".yellow()),
+    }
     if !api_keys.is_empty() {
         eprintln!("  Auth: {} API key(s)", api_keys.len());
     }
@@ -195,7 +191,7 @@ pub async fn serve(
                 &scheduler,
                 &scheduler_settings,
                 model_name,
-                cuda_index,
+                gpu_index,
                 data_parallel,
                 slo_policy,
             )

@@ -8,7 +8,13 @@ use std::collections::BTreeSet;
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
 
-use super::InferenceConfig;
+use boostr::DType;
+
+use super::{dtype_name, parse_dtype, InferenceConfig};
+
+/// The key of the compute dtype request. It is never written over a
+/// model's config. The loader reads it before any weight loads.
+const DTYPE_KEY: &str = "dtype";
 
 /// The inference keys the user file sets, with their parsed values.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -53,13 +59,33 @@ impl InferenceOverlay {
             .and_then(|replicas| usize::try_from(replicas).ok())
     }
 
+    /// `dtype`, when the user file sets it. The file parse checks the
+    /// value, so an unknown name never reaches here.
+    pub fn dtype(&self) -> Option<DType> {
+        self.value(DTYPE_KEY)
+            .and_then(Value::as_str)
+            .and_then(|name| parse_dtype(name).ok())
+    }
+
+    /// Record the file's checked `dtype`.
+    ///
+    /// # Errors
+    ///
+    /// An error for a dtype that is not f32, bf16 or f16.
+    pub fn set_dtype(&mut self, dtype: DType) -> Result<()> {
+        self.values
+            .insert(DTYPE_KEY.to_string(), Value::from(dtype_name(dtype)?));
+        Ok(())
+    }
+
     /// Whether the user file sets `graphs`.
     pub fn graphs(&self) -> Option<bool> {
         self.value("graphs").and_then(Value::as_bool)
     }
 
     /// Write each set key over `target`. Keys the file omits keep the
-    /// model's value. `dtype` is not a key, so the loader's value stays.
+    /// model's value. `dtype` is a request the loader already resolved, so
+    /// the loader's value stays.
     pub fn apply(&self, target: &mut InferenceConfig) -> Result<()> {
         if self.values.is_empty() {
             return Ok(());
@@ -69,7 +95,7 @@ impl InferenceOverlay {
                 "the model inference config did not serialize to a map"
             ));
         };
-        for (key, value) in &self.values {
+        for (key, value) in self.values.iter().filter(|(key, _)| *key != DTYPE_KEY) {
             merged.insert(key.clone(), value.clone());
         }
         let dtype = std::mem::take(&mut target.dtype);
@@ -132,6 +158,22 @@ mod tests {
         let set = overlay(section, &["tensor_parallel_size", "graphs"]);
         assert_eq!(set.tensor_parallel_size(), Some(4));
         assert_eq!(set.graphs(), Some(true));
+    }
+
+    #[test]
+    fn dtype_is_read_and_never_written_over_the_model() {
+        let mut overlay = InferenceOverlay::default();
+        assert_eq!(overlay.dtype(), None);
+        overlay.set_dtype(DType::F32).unwrap();
+        assert_eq!(overlay.dtype(), Some(DType::F32));
+        assert_eq!(overlay.keys().collect::<Vec<_>>(), ["dtype"]);
+        let mut model = InferenceConfig {
+            dtype: "bf16".to_string(),
+            ..Default::default()
+        };
+        overlay.apply(&mut model).unwrap();
+        assert_eq!(model.dtype, "bf16");
+        assert!(overlay.set_dtype(DType::I32).is_err());
     }
 
     #[test]

@@ -225,6 +225,20 @@ impl RequestScheduler {
         self.registry.token_sender(seq_id)
     }
 
+    /// The text `token_id` adds to `seq_id`'s response. See
+    /// [`RequestRegistry::token_text`](super::request_registry::RequestRegistry::token_text).
+    pub fn token_text(
+        &self,
+        seq_id: SequenceId,
+        tokenizer: &crate::tokenizer::AnyTokenizer,
+        token_id: u32,
+        is_eos: bool,
+        is_final: bool,
+    ) -> String {
+        self.registry
+            .token_text(seq_id, tokenizer, token_id, is_eos, is_final)
+    }
+
     /// Get token history for a sequence (prompt + generated so far)
     pub fn get_token_history(&self, seq_id: SequenceId) -> Option<Vec<u32>> {
         self.registry.token_history(seq_id)
@@ -301,8 +315,8 @@ impl GenerationScheduler for RequestScheduler {
 mod tests {
     use super::*;
     use crate::config::LatencySlo;
-    use crate::server::metrics::names::QUEUE_DEPTH;
-    use crate::server::test_recorder::TestRecorder;
+    use crate::telemetry::names::QUEUE_DEPTH;
+    use crate::telemetry::test_recorder::TestRecorder;
 
     fn scheduler(
         max_batch_size: usize,

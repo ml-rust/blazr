@@ -6,9 +6,11 @@
 
 use std::path::PathBuf;
 
+use boostr::DType;
+
 use super::{
-    DeviceChoice, EnvVars, FileConfig, GenerationConfig, ReasoningFormat, ServerConfig,
-    DEFAULT_MODEL_DIR, DEFAULT_NUM_CTX,
+    DeviceChoice, DtypeRequest, DtypeSource, EnvVars, FileConfig, GenerationConfig,
+    ReasoningFormat, ServerConfig, DEFAULT_MODEL_DIR, DEFAULT_NUM_CTX,
 };
 
 /// The first set value in precedence order, else `default`.
@@ -50,13 +52,14 @@ pub fn require_model(flag: Option<String>, file: &FileConfig) -> Result<String, 
     })
 }
 
-/// Device for `run` and `generate`: `--cpu`, then `device`, then CUDA 0.
+/// Device for `run` and `generate`: `--cpu`, then `device`, then GPU 0 of
+/// the build, else the CPU.
 pub fn resolve_run_device(cpu_flag: bool, file: &FileConfig) -> DeviceChoice {
     pick(
         cpu_flag.then_some(DeviceChoice::Cpu),
         None,
         file.device,
-        DeviceChoice::Cuda(0),
+        DeviceChoice::build_default(),
     )
 }
 
@@ -65,6 +68,22 @@ pub fn resolve_run_device(cpu_flag: bool, file: &FileConfig) -> DeviceChoice {
 pub fn resolve_tp_size(env: &EnvVars, file: &FileConfig) -> Option<usize> {
     env.tp_size
         .or_else(|| file.inference.tensor_parallel_size())
+}
+
+/// The user's compute dtype request: `--dtype`, then `inference.dtype`.
+///
+/// `None` lets the loader take the model's `torch_dtype`, then the backend
+/// default. See `config::compute_dtype`.
+pub fn resolve_dtype(flag: Option<DType>, file: &FileConfig) -> Option<DtypeRequest> {
+    let flag = flag.map(|dtype| DtypeRequest {
+        dtype,
+        source: DtypeSource::Flag,
+    });
+    let file = file.inference.dtype().map(|dtype| DtypeRequest {
+        dtype,
+        source: DtypeSource::File,
+    });
+    flag.or(file)
 }
 
 /// Default reasoning split: `--reasoning-format`, then
@@ -174,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn run_device_cpu_flag_then_file_then_cuda() {
+    fn run_device_cpu_flag_then_file_then_build_default() {
         let file = FileConfig {
             device: Some(DeviceChoice::Cuda(1)),
             ..Default::default()
@@ -183,7 +202,7 @@ mod tests {
         assert_eq!(resolve_run_device(false, &file), DeviceChoice::Cuda(1));
         assert_eq!(
             resolve_run_device(false, &FileConfig::default()),
-            DeviceChoice::Cuda(0)
+            DeviceChoice::build_default()
         );
     }
 
@@ -208,6 +227,23 @@ mod tests {
             resolve_tp_size(&EnvVars::default(), &FileConfig::default()),
             None
         );
+    }
+
+    #[test]
+    fn dtype_flag_then_file_then_unset() {
+        let mut overlay = InferenceOverlay::default();
+        overlay.set_dtype(DType::F32).unwrap();
+        let file = FileConfig {
+            inference: overlay,
+            ..Default::default()
+        };
+        let from_flag = resolve_dtype(Some(DType::BF16), &file).unwrap();
+        assert_eq!(from_flag.dtype, DType::BF16);
+        assert_eq!(from_flag.source, DtypeSource::Flag);
+        let from_file = resolve_dtype(None, &file).unwrap();
+        assert_eq!(from_file.dtype, DType::F32);
+        assert_eq!(from_file.source, DtypeSource::File);
+        assert_eq!(resolve_dtype(None, &FileConfig::default()), None);
     }
 
     #[test]

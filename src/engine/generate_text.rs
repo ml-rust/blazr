@@ -12,6 +12,7 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
+use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
 use super::types::{is_valid_json, FinishReason, GeneratedToken, GenerationResult};
@@ -114,20 +115,22 @@ where
 
         let prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
 
-        let text = self.tokenizer().decode(&generated_ids).unwrap_or_default();
-
-        // Check for EOS in generated tokens
+        // Text ends at the first EOS. The prompt primes the decoder, so the
+        // first generated token keeps its leading space, as when streaming.
         let eos_pos = generated_ids
             .iter()
             .position(|&t| self.tokenizer().is_eos(t));
-        let (final_text, finish_reason) = if let Some(pos) = eos_pos {
-            let text = self
-                .tokenizer()
-                .decode(&generated_ids[..pos])
-                .unwrap_or_default();
-            (text, FinishReason::Eos)
+        let kept = &generated_ids[..eos_pos.unwrap_or(generated_ids.len())];
+        let mut stream = TokenTextStream::new(self.tokenizer(), prompt_tokens);
+        let mut final_text: String = kept
+            .iter()
+            .map(|&id| stream.push(self.tokenizer(), id))
+            .collect();
+        final_text.push_str(&stream.finish());
+        let finish_reason = if eos_pos.is_some() {
+            FinishReason::Eos
         } else {
-            (text, FinishReason::Length)
+            FinishReason::Length
         };
 
         let stats = executor.stats;
@@ -189,7 +192,7 @@ where
         if completion_tokens == 1 {
             prompt_eval_duration_ms = now.duration_since(prefill_start).as_millis() as u64;
         } else {
-            crate::server::metrics::record_itl(now.duration_since(last_token).as_secs_f64());
+            crate::telemetry::record::record_itl(now.duration_since(last_token).as_secs_f64());
         }
         last_token = now;
 

@@ -29,7 +29,6 @@ mod management;
 pub mod metrics;
 pub mod multimodal;
 mod multimodal_audio;
-mod pooling;
 mod reasoning;
 mod rerank;
 mod responses;
@@ -37,15 +36,15 @@ mod responses_media;
 mod responses_types;
 mod routes;
 mod scheduled;
-pub mod slo;
 mod startup;
 mod streaming;
-#[cfg(test)]
-pub(crate) mod test_recorder;
 mod tls;
 mod tool_calls;
 mod tools;
 
+pub use crate::telemetry::slo;
+#[cfg(test)]
+pub(crate) use crate::telemetry::test_recorder;
 pub use handlers::AppState;
 pub use reasoning::{
     prompt_opens_reasoning, split_reasoning, split_reasoning_for_format, ReasoningParser,

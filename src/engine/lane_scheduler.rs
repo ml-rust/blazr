@@ -234,8 +234,8 @@ mod tests {
 
     #[test]
     fn queue_depth_follows_submit_admit_and_cancel() {
-        use crate::server::metrics::names::QUEUE_DEPTH;
-        use crate::server::test_recorder::TestRecorder;
+        use crate::telemetry::names::QUEUE_DEPTH;
+        use crate::telemetry::test_recorder::TestRecorder;
 
         let recorder = TestRecorder::install();
         let scheduler = LaneScheduler::new(2).expect("new");

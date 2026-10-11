@@ -4,8 +4,10 @@
 use anyhow::{anyhow, Result};
 
 use super::RuntimeArgs;
-use crate::config::resolve::{resolve_num_ctx, resolve_run_device};
-use crate::config::{DeviceChoice, FileConfig, InferenceConfig, InferenceOverlay, VisionOverrides};
+use crate::config::resolve::{resolve_dtype, resolve_num_ctx, resolve_run_device};
+use crate::config::{
+    DeviceChoice, DtypeRequest, FileConfig, InferenceConfig, InferenceOverlay, VisionOverrides,
+};
 
 /// What every model-loading command applies after the load.
 #[derive(Debug, Clone, Default)]
@@ -16,15 +18,24 @@ pub struct LoadSettings {
     pub inference: InferenceOverlay,
     /// `--mmproj` and the image token flags.
     pub vision: VisionOverrides,
+    /// `--dtype`, then `inference.dtype`. The loader reads it before any
+    /// weight loads. `None` takes the model's `torch_dtype`, else f32.
+    pub dtype: Option<DtypeRequest>,
 }
 
 impl LoadSettings {
     /// Resolve for a command without device flags.
-    pub fn resolve(num_ctx: Option<usize>, vision: VisionOverrides, file: &FileConfig) -> Self {
+    pub fn resolve(
+        num_ctx: Option<usize>,
+        vision: VisionOverrides,
+        dtype: Option<boostr::DType>,
+        file: &FileConfig,
+    ) -> Self {
         Self {
             num_ctx: resolve_num_ctx(num_ctx, file),
             inference: file.inference.clone(),
             vision,
+            dtype: resolve_dtype(dtype, file),
         }
     }
 
@@ -37,15 +48,15 @@ impl LoadSettings {
     }
 }
 
-/// The CUDA device index for `chat` and `bench`, from the `device` key.
-pub fn build_cuda_index(file: &FileConfig) -> Result<usize> {
-    DeviceChoice::build_cuda_index(file.device).map_err(|e| anyhow!(e))
+/// The GPU index for `chat` and `bench`, from the `device` key.
+pub fn build_gpu_index(file: &FileConfig) -> Result<usize> {
+    DeviceChoice::build_gpu_index(file.device).map_err(|e| anyhow!(e))
 }
 
 /// Settings for `run` and `generate`.
 #[derive(Debug, Clone)]
 pub struct RunSettings {
-    /// `--cpu`, then `device`, then CUDA 0.
+    /// `--cpu`, then `device`, then GPU 0 of the build, else the CPU.
     pub device: DeviceChoice,
     /// `--gpu-layers`. No key sets it.
     pub gpu_layers: i32,
@@ -64,7 +75,12 @@ impl RuntimeArgs {
             gpu_layers: self.gpu_layers,
             paged_attention: self.paged_attention,
             graphs: self.graphs,
-            load: LoadSettings::resolve(self.num_ctx, self.vision.into_overrides(), file),
+            load: LoadSettings::resolve(
+                self.num_ctx,
+                self.vision.into_overrides(),
+                self.dtype.dtype,
+                file,
+            ),
         }
     }
 }

@@ -8,23 +8,35 @@ use boostr::model::{
     AttentionConfig, HuggingFaceConfig, HybridConfig, MoeConfig, SsmConfig, UniversalConfig,
 };
 
-use crate::config::{BlazrConfig, InferenceConfig};
+use boostr::{DType, Runtime};
+
+use crate::config::{
+    compute_dtype, dtype_name, torch_dtype, BlazrConfig, DtypeRequest, InferenceConfig,
+};
 use crate::model::detect::DetectedConfig;
 
-/// Detect dtype from config.json's torch_dtype field
-pub fn detect_dtype_from_config(dir: &Path) -> &'static str {
-    let config_path = dir.join("config.json");
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            match json.get("torch_dtype").and_then(|v| v.as_str()) {
-                Some("bfloat16") => return "bf16",
-                Some("float16") => return "f16",
-                Some("float32") => return "f32",
-                _ => {}
-            }
-        }
-    }
-    "f16" // Default
+/// The dtype a model's `config.json` names in `torch_dtype`. `None` when
+/// the file, the key or a known value is missing.
+pub fn model_torch_dtype(dir: &Path) -> Option<DType> {
+    let content = std::fs::read_to_string(dir.join("config.json")).ok()?;
+    torch_dtype_of(&content)
+}
+
+/// The `torch_dtype` that the text of a `config.json` names.
+pub fn torch_dtype_of(config_json: &str) -> Option<DType> {
+    let json = serde_json::from_str::<serde_json::Value>(config_json).ok()?;
+    json.get("torch_dtype")
+        .and_then(|v| v.as_str())
+        .and_then(torch_dtype)
+}
+
+/// The compute dtype of a regular SafeTensors checkpoint in `dir` on
+/// runtime `R`: `request`, then `torch_dtype`, then the backend default.
+pub fn checkpoint_compute_dtype<R: Runtime<DType = DType>>(
+    dir: Option<&Path>,
+    request: Option<&DtypeRequest>,
+) -> DType {
+    compute_dtype::<R>(request, dir.and_then(model_torch_dtype))
 }
 
 /// The `inference` section of a model's `config.json`, read before any
@@ -38,39 +50,51 @@ pub fn model_config_inference(path: &Path) -> Option<InferenceConfig> {
         .map(|config| config.inference)
 }
 
-/// Load config or create from detected architecture
-pub fn load_or_create_config(dir: &Path, detected: &DetectedConfig) -> Result<BlazrConfig> {
-    let config_path = dir.join("config.json");
-    let dtype = detect_dtype_from_config(dir);
+/// Load config or create from detected architecture, with `dtype` as the
+/// compute dtype the caller resolved.
+pub fn load_or_create_config(
+    dir: &Path,
+    detected: &DetectedConfig,
+    dtype: DType,
+) -> Result<BlazrConfig> {
+    let content = std::fs::read_to_string(dir.join("config.json")).ok();
+    config_from_text(content.as_deref(), detected, dtype)
+}
 
-    if config_path.exists() {
-        match BlazrConfig::from_json(&config_path) {
-            Ok(mut config) => {
-                config.inference.dtype = dtype.to_string();
-                return Ok(config);
-            }
-            Err(_) => {
-                if let Ok(content) = std::fs::read_to_string(&config_path) {
-                    if let Ok(model_config) = serde_json::from_str::<UniversalConfig>(&content) {
-                        return Ok(BlazrConfig::from_universal_with_dtype(model_config, dtype));
-                    }
-                    if let Ok(hf_config) = HuggingFaceConfig::from_json(&content) {
-                        return Ok(BlazrConfig::from_universal_with_dtype(
-                            hf_config.to_universal(),
-                            dtype,
-                        ));
-                    }
-                }
-            }
+/// [`load_or_create_config`] over the text of a `config.json`. The text is
+/// a blazr config, a boostr `UniversalConfig`, or a Hugging Face config.
+/// `None`, or text that is none of them, falls back to `detected`.
+pub fn config_from_text(
+    config_json: Option<&str>,
+    detected: &DetectedConfig,
+    dtype: DType,
+) -> Result<BlazrConfig> {
+    let dtype = dtype_name(dtype)?;
+    if let Some(content) = config_json {
+        if let Ok(mut config) = serde_json::from_str::<BlazrConfig>(content) {
+            config.inference.dtype = dtype.to_string();
+            return Ok(config);
+        }
+        if let Ok(model_config) = serde_json::from_str::<UniversalConfig>(content) {
+            return Ok(BlazrConfig::from_universal_with_dtype(model_config, dtype));
+        }
+        if let Ok(hf_config) = HuggingFaceConfig::from_json(content) {
+            return Ok(BlazrConfig::from_universal_with_dtype(
+                hf_config.to_universal(),
+                dtype,
+            ));
         }
     }
-
     Ok(config_from_detected_with_dtype(detected, dtype))
 }
 
-/// Create BlazrConfig from detected architecture
-pub fn config_from_detected(detected: &DetectedConfig) -> BlazrConfig {
-    config_from_detected_with_dtype(detected, "f16")
+/// Create BlazrConfig from detected architecture, with `dtype` as the
+/// compute dtype the caller resolved.
+pub fn config_from_detected(detected: &DetectedConfig, dtype: DType) -> Result<BlazrConfig> {
+    Ok(config_from_detected_with_dtype(
+        detected,
+        dtype_name(dtype)?,
+    ))
 }
 
 /// Create BlazrConfig from detected architecture with specified dtype
@@ -260,6 +284,71 @@ fn has_mixed_layer_types(layer_types: &[crate::model::detect::LayerType]) -> boo
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use crate::config::DtypeSource;
+    use boostr::CpuRuntime;
+
+    /// A model directory whose `config.json` names `torch_dtype`.
+    fn model_dir(torch_dtype: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let field = torch_dtype
+            .map(|d| format!(",\n  \"torch_dtype\": \"{d}\""))
+            .unwrap_or_default();
+        let json = format!(
+            "{{\n  \"architectures\": [\"LlamaForCausalLM\"],\n  \"vocab_size\": 32,\n  \
+             \"hidden_size\": 8,\n  \"num_hidden_layers\": 1,\n  \
+             \"num_attention_heads\": 2{field}\n}}"
+        );
+        std::fs::write(dir.path().join("config.json"), json).unwrap();
+        dir
+    }
+
+    #[test]
+    fn torch_dtype_is_the_model_step() {
+        let dir = model_dir(Some("float32"));
+        assert_eq!(model_torch_dtype(dir.path()), Some(DType::F32));
+        assert_eq!(model_torch_dtype(model_dir(None).path()), None);
+        assert_eq!(
+            checkpoint_compute_dtype::<CpuRuntime>(Some(dir.path()), None),
+            DType::F32
+        );
+        // No torch_dtype: the backend default.
+        assert_eq!(
+            checkpoint_compute_dtype::<CpuRuntime>(Some(model_dir(None).path()), None),
+            DType::F32
+        );
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn request_beats_torch_dtype() {
+        let dir = model_dir(Some("float32"));
+        let request = DtypeRequest {
+            dtype: DType::BF16,
+            source: DtypeSource::File,
+        };
+        assert_eq!(
+            checkpoint_compute_dtype::<CpuRuntime>(Some(dir.path()), Some(&request)),
+            DType::BF16
+        );
+        let bf16 = model_dir(Some("bfloat16"));
+        assert_eq!(
+            checkpoint_compute_dtype::<CpuRuntime>(Some(bf16.path()), None),
+            DType::BF16
+        );
+    }
+
+    /// The resolved dtype is the config's compute dtype, and the KV cache
+    /// dtype follows it.
+    #[test]
+    fn config_records_the_compute_dtype_for_the_kv_cache() {
+        let dir = model_dir(Some("bfloat16"));
+        let detected = DetectedConfig::default();
+        let config = load_or_create_config(dir.path(), &detected, DType::F32).unwrap();
+        assert_eq!(config.dtype(), "f32");
+        assert_eq!(config.compute_dtype().unwrap(), DType::F32);
+        assert_eq!(config.kv_cache_dtype().unwrap(), DType::F32);
+        assert!(load_or_create_config(dir.path(), &detected, DType::I32).is_err());
+    }
 
     #[test]
     fn test_huggingface_config_rope_scaling() {

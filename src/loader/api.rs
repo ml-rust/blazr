@@ -6,7 +6,7 @@ use boostr::model::{LoadedModel, UniversalConfig};
 use boostr::ops::TensorOps;
 use boostr::{DType, Runtime};
 
-use crate::config::BlazrConfig;
+use crate::config::{fixed_format_dtype, BlazrConfig, DtypeRequest};
 
 use super::detect::{detect_model_source, ModelFormat};
 use super::gguf;
@@ -24,12 +24,30 @@ pub fn load_model<R: Runtime<DType = DType>, P: AsRef<Path>>(
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
+    load_model_as(path, device, None)
+}
+
+/// [`load_model`] for a user compute dtype `request`.
+///
+/// `request` comes first, then the model's `torch_dtype`, then the backend
+/// default. See `config::compute_dtype`. `None` skips the first step.
+pub fn load_model_as<R: Runtime<DType = DType>, P: AsRef<Path>>(
+    path: P,
+    device: &R::Device,
+    request: Option<&DtypeRequest>,
+) -> Result<(LoadedModel<R>, BlazrConfig)>
+where
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
+{
     let path = path.as_ref();
     let source = detect_model_source(path)?;
 
     match source.format {
-        ModelFormat::SafeTensors => safetensors::load_safetensors(path, device),
-        ModelFormat::Gguf => gguf::load_gguf(path, device),
+        ModelFormat::SafeTensors => safetensors::load_safetensors(path, device, request),
+        ModelFormat::Gguf => {
+            fixed_format_dtype("GGUF", DType::F32, request);
+            gguf::load_gguf(path, device)
+        }
     }
 }
 
@@ -40,6 +58,7 @@ pub fn load_model_tp<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
     comm: std::sync::Arc<dyn boostr::runtime::Communicator>,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
@@ -48,7 +67,7 @@ where
     let source = detect_model_source(path)?;
 
     match source.format {
-        ModelFormat::SafeTensors => safetensors::load_safetensors_tp(path, device, comm),
+        ModelFormat::SafeTensors => safetensors::load_safetensors_tp(path, device, comm, request),
         ModelFormat::Gguf => Err(anyhow::anyhow!(
             "Tensor parallelism is not supported for GGUF format"
         )),
@@ -85,6 +104,7 @@ pub fn load_model_with_offloading<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
     options: OffloadingOptions,
+    request: Option<&DtypeRequest>,
 ) -> Result<(LoadedModel<R>, BlazrConfig, OffloadingInfo)>
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
@@ -94,9 +114,10 @@ where
 
     match source.format {
         ModelFormat::SafeTensors => {
-            safetensors::load_safetensors_with_offloading(path, device, options)
+            safetensors::load_safetensors_with_offloading(path, device, options, request)
         }
         ModelFormat::Gguf => {
+            fixed_format_dtype("GGUF", DType::F32, request);
             let (model, config) = gguf::load_gguf(path, device)?;
             Ok((
                 model,

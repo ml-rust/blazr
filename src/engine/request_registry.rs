@@ -19,6 +19,7 @@ use boostr::inference::scheduler::SequenceId;
 
 use super::types::GeneratedToken;
 use crate::config::GenerationConfig;
+use crate::tokenizer::{AnyTokenizer, TokenTextStream};
 
 /// Tokens a request buffers before the driver waits on its reader.
 const TOKEN_CHANNEL_CAPACITY: usize = 32;
@@ -69,6 +70,8 @@ struct RequestMeta {
     done_tx: Option<oneshot::Sender<()>>,
     prompt_tokens: Vec<u32>,
     token_history: Vec<u32>,
+    /// The request's text decoder, built at its first token.
+    text: Option<TokenTextStream>,
 }
 
 /// The requests a scheduler is carrying, keyed by sequence id.
@@ -116,6 +119,7 @@ impl RequestRegistry {
             done_tx: Some(done_tx),
             prompt_tokens: prompt_tokens.clone(),
             token_history: prompt_tokens,
+            text: None,
         };
         self.lock_meta()?.insert(seq_id, meta);
         Ok(RequestHandle {
@@ -189,6 +193,31 @@ impl RequestRegistry {
                 m.token_history.push(token);
             }
         }
+    }
+
+    /// The text `token_id` adds to `seq_id`'s response.
+    ///
+    /// The request's own streaming decoder renders it, primed with the
+    /// prompt. See [`TokenTextStream::next_text`] for `is_eos` and
+    /// `is_final`. Empty when the request is gone.
+    pub fn token_text(
+        &self,
+        seq_id: SequenceId,
+        tokenizer: &AnyTokenizer,
+        token_id: u32,
+        is_eos: bool,
+        is_final: bool,
+    ) -> String {
+        let Ok(mut meta) = self.meta.lock() else {
+            return String::new();
+        };
+        let Some(m) = meta.get_mut(&seq_id) else {
+            return String::new();
+        };
+        let prompt = &m.prompt_tokens;
+        m.text
+            .get_or_insert_with(|| TokenTextStream::new(tokenizer, prompt))
+            .next_text(tokenizer, token_id, is_eos, is_final)
     }
 
     /// Send `token` to `seq_id`'s caller.

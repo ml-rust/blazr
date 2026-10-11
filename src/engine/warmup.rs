@@ -13,8 +13,6 @@ use boostr::{
     SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
-use crate::config::parse_dtype;
-
 use super::executor::Executor;
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -99,7 +97,7 @@ where
             .mamba_config()
             .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
         let num_layers = self.model().num_layers();
-        let warmup_dtype = parse_dtype(self.config().dtype())?;
+        let warmup_dtype = self.config().compute_dtype()?;
 
         let mut ssm_state =
             LayeredSsmState::new(num_layers, 1, mamba_config, warmup_dtype, self.device())?;
@@ -116,7 +114,7 @@ where
         let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
         let head_dim = self.model().head_dim().unwrap_or(64);
         let block_size = self.config().inference.block_size;
-        let kv_dtype = parse_dtype(self.config().dtype())?;
+        let kv_dtype = self.config().kv_cache_dtype()?;
 
         let num_blocks = 4;
         // Use shared allocator if available, otherwise create a small one for warmup
@@ -203,7 +201,7 @@ where
         let num_layers = self.model().num_layers();
         let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
         let head_dim = self.model().head_dim().unwrap_or(64);
-        let kv_dtype = parse_dtype(self.config().dtype())?;
+        let kv_dtype = self.config().kv_cache_dtype()?;
 
         let mut kv_cache = LayeredKvCache::new_positional(
             num_layers,
@@ -216,16 +214,20 @@ where
             self.device(),
         )
         .map_err(|e| anyhow!("Failed to create warmup KV cache: {}", e))?;
+        let fresh_cache = super::tensor_parallel::KvCacheSpec {
+            initial_capacity: 16,
+            max_seq_len: 16,
+            dtype: kv_dtype,
+        };
+        let _tp_guard = self.tp_generation_try_guard()?;
 
         let _ = self
-            .model()
-            .forward_with_kv_cache(warmup_input, &mut kv_cache, 0)
-            .map_err(|e| anyhow!("Warmup prefill forward pass failed: {}", e))?;
+            .forward_contiguous(warmup_input, &mut kv_cache, 0, Some(fresh_cache))
+            .map_err(|e| anyhow!("Warmup prefill forward pass failed: {e:#}"))?;
 
         let _ = self
-            .model()
-            .forward_with_kv_cache(warmup_input, &mut kv_cache, 1)
-            .map_err(|e| anyhow!("Warmup decode forward pass failed: {}", e))?;
+            .forward_contiguous(warmup_input, &mut kv_cache, 1, None)
+            .map_err(|e| anyhow!("Warmup decode forward pass failed: {e:#}"))?;
         Ok(())
     }
 }

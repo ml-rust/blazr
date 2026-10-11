@@ -12,8 +12,115 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### Added
+
+- **User config file** — `~/.blazr/config.yaml` holds the `server`,
+  `inference` and `generation` sections beside the user keys. `run`,
+  `serve`, `generate`, `chat`, `bench`, `list`, `info`, `pull`, `swarm` and
+  `disagg` read it. Each value comes from the CLI flag, then the
+  environment variable, then the file, then the built-in default.
+- **Config `inference` section** — the file's `inference` keys apply over
+  every model's own `config.json`. For `inference.*` keys the model's
+  `config.json` sits between the file and the built-in default.
+- **Config keys** — `default_model` names the model when a command names
+  none. `device` takes `cpu`, `cuda` or `cuda:N`. `model_dir` sets the model
+  directory after `BLAZR_MODEL_DIR`. `num_ctx` sets the initial KV cache
+  size, `serve` included.
+- **`server` keys** — `serve` reads `port`, `host`, `tls_cert`, `tls_key`,
+  `max_concurrent_requests`, `request_timeout_secs`, `cors_enabled`,
+  `cors_origins`, `request_logging`, `max_body_size`,
+  `max_inflight_tokens`, `slo` and `reasoning_format` from the file. These
+  values were fixed before. The swarm leader and the disaggregated router
+  read the same section.
+- **Config hot reload** — `serve` swaps in each version of the file that
+  parses, as a whole. A file that fails to parse keeps the running config
+  and logs an error. A deleted file resets every key to its default.
+- **Live keys** — `generation` keys and `server.reasoning_format` apply to
+  the next request. Every other changed key logs a warning to restart
+  `serve`.
+- **Data-parallel replicas** — `serve --data-parallel <N>` or
+  `inference.data_parallel` loads `N` copies of the start model. A CUDA
+  build puts copy `i` on CUDA device `device + i`. A CPU build loads CPU
+  copies. Each copy runs its own batching scheduler.
+- **Data-parallel checks** — `serve` refuses `0` replicas. It refuses more
+  than one replica with no start model, or with tensor parallelism above 1.
+  A CUDA build refuses more replicas than the devices from the `device`
+  index up.
+- **Cache-aware router** — with replicas, a request goes to the replica
+  that holds its longest known prompt prefix. A request with no known
+  prefix goes to the least loaded replica. A warm replica more than 4
+  requests above the least loaded one gives up the request.
+- **SLO batch-growth hold** — while the rolling P95 TTFT or P95 ITL is over
+  its `server.slo` target, the continuous-batching schedulers admit no
+  sequences beyond the running count. An idle scheduler still admits one.
+  Running sequences keep decoding.
+- **SLO samples** — ITL and end-to-end latency samples now feed the SLO
+  checker beside TTFT.
+- **Metrics** — `blazr_slo_batch_growth_held` is `1` while a breach holds
+  batch growth. `blazr_data_parallel_replicas` reports the replica count.
+  `blazr_replica_active_requests` reports in-flight requests per
+  `replica`.
+- **Recorded metrics** — `blazr_queue_depth` counts queued sequences in
+  the batching schedulers plus requests waiting for an HTTP slot.
+  `blazr_slo_violations_total` counts breaches with `metric` and
+  `percentile` labels. `serve` recorded neither before.
+- **`/health`** — the response carries `data_parallel_replicas`.
+- **Flags** — `swarm --host` and `disagg --host` set the HTTP API address.
+  `swarm --api-key` sets the leader's API key, with `BLAZR_API_KEY` as the
+  fallback.
+
 ### Changed
 
+- **CLI sampling defaults** — with no flag and no config, `--temperature`
+  now falls back to `1.0` instead of `0.7`. `--top-p` falls back to `1.0`
+  instead of `0.9`. This applies to `run`, `generate` and `chat`. The
+  sampling flags take the `generation` section before the built-in value.
+- **`chat --num-ctx`** — the flag falls back to `num_ctx`, else `2048`
+  instead of `4096`.
+- **Flag fallbacks** — `--max-tokens`, `--top-k`, `--min-p`,
+  `--repeat-penalty`, `--repeat-last-n`, `--num-ctx`, `--host`, `--port`,
+  `--reasoning-format`, `--tls-cert` and `--tls-key` fall back to the file
+  instead of fixed clap defaults. `--paged-attention` and `--graphs` fall
+  back to `inference.paged_attention` and `inference.graphs`.
+- **`inference.graphs`** — `run` and `generate` read the key. `serve` logs
+  a warning when it is set, because `serve` does not capture graphs.
+- **Model argument** — `run`, `generate`, `chat`, `bench`, `serve`,
+  `swarm` and `disagg` take `default_model` when no model is given. A
+  command that needs a model and finds neither exits with an error that
+  names `default_model`.
+- **Request defaults** — a request field the request omits takes the live
+  `generation` section. `max_tokens` on completions, chat and infill now
+  defaults to `2048` instead of `256`. `max_output_tokens` on
+  `/v1/responses` defaults to `2048` instead of `4096`.
+- **Config file errors** — a config file that does not read or parse exits
+  with an error that names the file and line. Before, `serve` logged a
+  warning and ran on defaults. An unknown key logs a warning that names
+  it.
+- **Older keys** — the top-level `port`, `temperature` and `max_tokens`
+  still parse as `server.port`, `generation.temperature` and
+  `generation.max_tokens`. Setting an older key and its section key
+  together is an error.
+- **Device** — `run` and `generate` without `--cpu` run on the CUDA index
+  from `device`, else device 0. In a CUDA build, `serve`, `chat`, `bench`,
+  `swarm` and `disagg` refuse `device: cpu`.
+- **Model directory** — `list`, `info`, `pull`, `serve` and the cluster
+  roles resolve it from `BLAZR_MODEL_DIR`, then `model_dir`, then
+  `./models`.
+- **TLS** — the certificate and the key each come from a flag or from
+  `server.tls_cert` and `server.tls_key`. One without the other is an
+  error.
+- **Concurrency limit** — middleware replaces the tower layer for
+  `server.max_concurrent_requests`. A request over the limit waits for a
+  slot and counts in `blazr_queue_depth`. `/health` and `/metrics` skip
+  the limit, so probes and scrapes answer while the server is saturated.
+- **Tensor parallelism** — the degree comes from `BLAZR_TP_SIZE`, then
+  `inference.tensor_parallel_size` in the file, then the model's
+  `config.json`, then `1`. `serve` checks it before any model loads. A
+  degree of `0`, or a `BLAZR_TP_SIZE` that is not a whole number, is an
+  error. The loader checks that the head counts divide by the degree
+  before weights load.
+- **Model `config.json`** — blazr ignores its `server` and `generation`
+  sections. The loader always sets the dtype from the checkpoint.
 - **`speak`** — the CUDA build runs Kokoro and VITS on the GPU, as it runs
   Whisper and VoxCPM2. `--device cpu` keeps them on the CPU.
 - **`speak`** — a Kokoro take follows `--seed`: one seed gives the same take
@@ -22,8 +129,25 @@ preview on crates.io that shares no code with it.
   device, as `--asr-model` loads Whisper. A CUDA build serves them from the
   configured CUDA device instead of the CPU or device 0.
 
+### Removed
+
+- **`decode` command** — the hidden command had no implementation.
+- **MoE expert offload** — the subsystem never moved experts to host
+  memory, so it is gone with its `inference.moe_offload` and
+  `inference.moe_gpu_experts` keys. A config that still sets either key
+  parses and ignores it. In `config.yaml` each logs an unknown-key warning.
+- **Unused `inference` keys** — `weights_path`, `device`, `flash_attention`
+  and `kv_cache` had no reader and are gone. `dtype` is no longer a config
+  key. A model `config.json` that sets them still parses and ignores them.
+  In `config.yaml` each logs an unknown-key warning.
+
 ### Fixed
 
+- **Image input** — a raw base64 `image_url` that does not decode to a PNG,
+  JPEG, WebP or GIF image fails with `Invalid image_url: expected a data:
+  URI, an http(s) URL, or base64 of a PNG, JPEG, WebP, or GIF image`.
+  Before, it passed on as `application/octet-stream`. A local file path
+  fails with an `Invalid image_url` error.
 - **`serve`** — `/v1/audio/transcriptions` and `/v1/audio/speech` make the
   server's CUDA device current on the worker thread before they run a
   model. Transcription runs on a blocking worker instead of the request's

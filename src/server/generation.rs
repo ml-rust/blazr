@@ -57,41 +57,48 @@ pub struct SamplingParams {
 }
 
 impl SamplingParams {
-    pub fn into_gen_config(self) -> GenerationConfig {
-        let logit_bias = self
-            .logit_bias
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(k, v)| k.parse::<u32>().ok().map(|id| (id, v)))
-            .collect();
+    /// The request's sampling values over `defaults`, the live
+    /// `generation` section. Each value the request omits takes the default.
+    pub fn into_gen_config(self, defaults: &GenerationConfig) -> GenerationConfig {
+        let d = defaults.clone();
+        let logit_bias = match self.logit_bias {
+            Some(bias) => bias
+                .into_iter()
+                .filter_map(|(k, v)| k.parse::<u32>().ok().map(|id| (id, v)))
+                .collect(),
+            None => d.logit_bias,
+        };
         GenerationConfig {
-            max_tokens: self.max_tokens.unwrap_or(256),
-            temperature: self.temperature.unwrap_or(1.0),
-            top_p: self.top_p.unwrap_or(1.0),
-            top_k: self.top_k.unwrap_or(0),
-            min_p: self.min_p.unwrap_or(0.05),
-            repeat_penalty: self.repeat_penalty.unwrap_or(1.1),
-            frequency_penalty: self.frequency_penalty.unwrap_or(0.0),
-            presence_penalty: self.presence_penalty.unwrap_or(0.0),
-            stop_sequences: self.stop.unwrap_or_default(),
-            seed: self.seed,
+            max_tokens: self.max_tokens.unwrap_or(d.max_tokens),
+            temperature: self.temperature.unwrap_or(d.temperature),
+            top_p: self.top_p.unwrap_or(d.top_p),
+            top_k: self.top_k.unwrap_or(d.top_k),
+            min_p: self.min_p.unwrap_or(d.min_p),
+            repeat_penalty: self.repeat_penalty.unwrap_or(d.repeat_penalty),
+            frequency_penalty: self.frequency_penalty.unwrap_or(d.frequency_penalty),
+            presence_penalty: self.presence_penalty.unwrap_or(d.presence_penalty),
+            stop_sequences: self.stop.unwrap_or(d.stop_sequences),
+            seed: self.seed.or(d.seed),
             logit_bias,
-            logprobs: self.logprobs.unwrap_or(false),
-            top_logprobs: self.top_logprobs.unwrap_or(5).min(20),
-            json_mode: self.json_mode,
-            mirostat_mode: self.mirostat_mode.unwrap_or(0),
-            mirostat_tau: self.mirostat_tau.unwrap_or(5.0),
-            mirostat_eta: self.mirostat_eta.unwrap_or(0.1),
-            dynatemp_range: self.dynatemp_range.unwrap_or(0.0),
-            dynatemp_exponent: self.dynatemp_exponent.unwrap_or(1.0),
-            dry_multiplier: self.dry_multiplier.unwrap_or(0.0),
-            dry_base: self.dry_base.unwrap_or(2),
-            dry_allowed_length: self.dry_allowed_length.unwrap_or(0),
-            dry_sequence_breakers: self.dry_sequence_breakers.unwrap_or_default(),
-            typical_p: self.typical_p.unwrap_or(0.0),
-            grammar: self.grammar,
-            lora_adapter: self.lora_adapter,
-            ..Default::default()
+            logprobs: self.logprobs.unwrap_or(d.logprobs),
+            top_logprobs: self.top_logprobs.unwrap_or(d.top_logprobs).min(20),
+            json_mode: self.json_mode || d.json_mode,
+            mirostat_mode: self.mirostat_mode.unwrap_or(d.mirostat_mode),
+            mirostat_tau: self.mirostat_tau.unwrap_or(d.mirostat_tau),
+            mirostat_eta: self.mirostat_eta.unwrap_or(d.mirostat_eta),
+            dynatemp_range: self.dynatemp_range.unwrap_or(d.dynatemp_range),
+            dynatemp_exponent: self.dynatemp_exponent.unwrap_or(d.dynatemp_exponent),
+            dry_multiplier: self.dry_multiplier.unwrap_or(d.dry_multiplier),
+            dry_base: self.dry_base.unwrap_or(d.dry_base),
+            dry_allowed_length: self.dry_allowed_length.unwrap_or(d.dry_allowed_length),
+            dry_sequence_breakers: self
+                .dry_sequence_breakers
+                .unwrap_or(d.dry_sequence_breakers),
+            typical_p: self.typical_p.unwrap_or(d.typical_p),
+            grammar: self.grammar.or(d.grammar),
+            lora_adapter: self.lora_adapter.or(d.lora_adapter),
+            repeat_last_n: d.repeat_last_n,
+            verbose_prompt: d.verbose_prompt,
         }
     }
 }
@@ -162,17 +169,19 @@ async fn forward_with_stop_sequences<S>(
 {
     let mut stream = std::pin::pin!(stream);
     let mut accumulated = String::new();
-    let mut last_token_time = std::time::Instant::now();
+    let start = std::time::Instant::now();
+    let mut last_token_time = start;
     let mut token_count = 0usize;
 
     while let Some(result) = stream.next().await {
         match result {
             Ok(token) => {
                 token_count += 1;
-                // Record inter-token latency (skip first token — that's TTFT)
-                if token_count > 1 {
-                    let itl = last_token_time.elapsed().as_secs_f64();
-                    super::metrics::record_itl(itl);
+                // The first token closes the TTFT. Each later one is an ITL sample.
+                if token_count == 1 {
+                    metrics::record_ttft(start.elapsed().as_secs_f64());
+                } else {
+                    metrics::record_itl(last_token_time.elapsed().as_secs_f64());
                 }
                 last_token_time = std::time::Instant::now();
                 accumulated.push_str(&token.text);
@@ -234,65 +243,13 @@ async fn forward_with_stop_sequences<S>(
                         error: Some(e.to_string()),
                     })
                     .await;
-                break;
+                return;
             }
         }
     }
-}
-
-/// Result of a batched generation via the configured scheduler
-pub struct BatchedGenerationResult {
-    pub text: String,
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
-    pub finish_reason: FinishReason,
-    pub prompt_eval_duration_ms: u64,
-}
-
-/// Submit a request to the configured scheduler and collect all generated
-/// tokens. Used by chat/completion handlers when batched generation is on.
-pub async fn generate_via_scheduler(
-    request_scheduler: &dyn crate::engine::GenerationScheduler,
-    prompt_tokens: Vec<u32>,
-    gen_config: &GenerationConfig,
-) -> Result<BatchedGenerationResult, String> {
-    let prompt_len = prompt_tokens.len();
-    let start = std::time::Instant::now();
-
-    let mut handle = request_scheduler
-        .submit(prompt_tokens, gen_config.clone())
-        .map_err(|e| format!("scheduler submit failed: {}", e))?;
-
-    let mut text = String::new();
-    let mut completion_tokens = 0;
-    let mut finish = FinishReason::Length;
-
-    while let Some(result) = handle.token_rx.recv().await {
-        match result {
-            Ok(token) => {
-                text.push_str(&token.text);
-                completion_tokens += 1;
-                if let Some(reason) = token.finish_reason {
-                    finish = reason;
-                    break;
-                }
-            }
-            Err(e) => {
-                return Err(format!("generation error: {}", e));
-            }
-        }
+    if token_count > 0 {
+        metrics::record_e2e(start.elapsed().as_secs_f64());
     }
-
-    // Estimate prompt eval as time to first token (approximation)
-    let prompt_eval_ms = start.elapsed().as_millis() as u64;
-
-    Ok(BatchedGenerationResult {
-        text,
-        prompt_tokens: prompt_len,
-        completion_tokens,
-        finish_reason: finish,
-        prompt_eval_duration_ms: prompt_eval_ms,
-    })
 }
 
 /// Record generation metrics (tokens, TTFT, throughput) after a non-streaming request.
@@ -306,6 +263,7 @@ pub fn record_generation_metrics(
 ) {
     metrics::record_tokens(prompt_tokens, completion_tokens);
     metrics::record_ttft(prompt_eval_ms as f64 / 1000.0);
+    metrics::record_e2e(elapsed.as_secs_f64());
     let tps = if elapsed.as_secs_f64() > 0.0 {
         completion_tokens as f64 / elapsed.as_secs_f64()
     } else {
@@ -336,5 +294,73 @@ pub fn decode_context_prefix(
             .map_err(|e| e.to_string())
     } else {
         Ok(String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> SamplingParams {
+        SamplingParams {
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            repeat_penalty: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            logit_bias: None,
+            logprobs: None,
+            top_logprobs: None,
+            json_mode: false,
+            mirostat_mode: None,
+            mirostat_tau: None,
+            mirostat_eta: None,
+            dynatemp_range: None,
+            dynatemp_exponent: None,
+            dry_multiplier: None,
+            dry_base: None,
+            dry_allowed_length: None,
+            dry_sequence_breakers: None,
+            typical_p: None,
+            grammar: None,
+            lora_adapter: None,
+        }
+    }
+
+    #[test]
+    fn omitted_values_take_the_live_defaults() {
+        let defaults = GenerationConfig {
+            max_tokens: 77,
+            temperature: 0.3,
+            repeat_last_n: 9,
+            stop_sequences: vec!["END".into()],
+            ..Default::default()
+        };
+        let config = params().into_gen_config(&defaults);
+        assert_eq!(config.max_tokens, 77);
+        assert_eq!(config.temperature, 0.3);
+        assert_eq!(config.repeat_last_n, 9);
+        assert_eq!(config.stop_sequences, ["END"]);
+    }
+
+    #[test]
+    fn request_values_win_over_the_defaults() {
+        let request = SamplingParams {
+            max_tokens: Some(5),
+            temperature: Some(0.0),
+            stop: Some(Vec::new()),
+            top_logprobs: Some(50),
+            ..params()
+        };
+        let config = request.into_gen_config(&GenerationConfig::default());
+        assert_eq!(config.max_tokens, 5);
+        assert_eq!(config.temperature, 0.0);
+        assert!(config.stop_sequences.is_empty());
+        assert_eq!(config.top_logprobs, 20);
     }
 }

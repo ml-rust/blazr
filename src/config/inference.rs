@@ -4,86 +4,20 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Device configuration for inference
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum DeviceConfig {
-    /// Simple device string (e.g., "cuda:0", "cpu")
-    Simple(String),
-    /// Detailed device configuration
-    Detailed {
-        /// Device type: "cuda", "cpu"
-        device_type: String,
-        /// Device ID (for multi-GPU)
-        #[serde(default)]
-        device_id: usize,
-    },
-}
-
-impl Default for DeviceConfig {
-    fn default() -> Self {
-        DeviceConfig::Simple("cuda:0".to_string())
-    }
-}
-
-impl DeviceConfig {
-    /// Get device type ("cuda" or "cpu")
-    pub fn device_type(&self) -> &str {
-        match self {
-            DeviceConfig::Simple(s) => {
-                if s.starts_with("cuda") {
-                    "cuda"
-                } else {
-                    "cpu"
-                }
-            }
-            DeviceConfig::Detailed { device_type, .. } => device_type,
-        }
-    }
-
-    /// Get device ID (for multi-GPU)
-    pub fn device_id(&self) -> usize {
-        match self {
-            DeviceConfig::Simple(s) => s
-                .strip_prefix("cuda:")
-                .and_then(|id| id.parse().ok())
-                .unwrap_or(0),
-            DeviceConfig::Detailed { device_id, .. } => *device_id,
-        }
-    }
-
-    /// Check if using CUDA
-    pub fn is_cuda(&self) -> bool {
-        self.device_type() == "cuda"
-    }
-}
-
-/// Inference-specific configuration
+/// Inference-specific configuration.
+///
+/// A model's `config.json` sets these per model. The `inference` section of
+/// `~/.blazr/config.yaml` replaces each key it sets, for every model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceConfig {
-    /// Path to model weights (SafeTensors, GGUF, etc.)
-    #[serde(default)]
-    pub weights_path: Option<PathBuf>,
-
-    /// Device configuration
-    #[serde(default)]
-    pub device: DeviceConfig,
-
-    /// Maximum context length (overrides model default if smaller)
+    /// Maximum context length. Replaces the model maximum sequence length.
     #[serde(default)]
     pub max_context_len: Option<usize>,
 
-    /// Data type for inference (f32, f16, bf16)
-    #[serde(default = "default_dtype")]
+    /// Data type for inference (f32, f16, bf16). The loader sets it from the
+    /// checkpoint, so it is not a config key.
+    #[serde(skip, default = "default_dtype")]
     pub dtype: String,
-
-    /// Enable flash attention if available
-    #[serde(default = "default_true")]
-    pub flash_attention: bool,
-
-    /// Enable KV cache
-    #[serde(default = "default_true")]
-    pub kv_cache: bool,
 
     /// Maximum batch size for batched inference
     #[serde(default = "default_max_batch_size")]
@@ -151,19 +85,26 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub speculative: Option<SpeculativeDecodingConfig>,
 
-    /// Tensor parallelism degree (default: 1 = single GPU).
-    /// When > 1, shards model across multiple GPUs using NCCL all-reduce.
-    /// Requires CUDA and NCCL support.
+    /// Tensor parallelism degree. 1 runs on one GPU.
+    /// Above 1, `blazr serve` shards a SafeTensors model across GPUs with
+    /// NCCL all-reduce. `BLAZR_TP_SIZE` overrides it. Needs CUDA and NCCL.
     #[serde(default = "default_tensor_parallel")]
     pub tensor_parallel_size: usize,
 
-    /// Enable graph capture for greedy decode (backend-agnostic).
+    /// Data-parallel replicas of the start model for `blazr serve`.
     ///
-    /// After prompt prefill, captures the single-token decode forward pass as a
-    /// compute graph. Subsequent decode steps replay it with minimal dispatch overhead.
-    /// Requires a stable KV cache pre-allocated at full capacity.
-    /// Incompatible with paged_attention. Falls back gracefully if the backend
-    /// does not support graph capture (`Runtime::supports_graph_capture()`).
+    /// Above 1, `blazr serve` loads one copy per device: CUDA devices from
+    /// the `device` index up on a CUDA build, CPU copies on a CPU build.
+    /// `--data-parallel` overrides it. Only the user config file sets it. A
+    /// model's `config.json` value is ignored.
+    #[serde(default = "default_data_parallel")]
+    pub data_parallel: usize,
+
+    /// CUDA graph capture for greedy decode in `blazr run` and `generate`.
+    ///
+    /// After prefill, the single-token decode step is captured once and
+    /// replayed per token. A run that samples or applies a penalty decodes
+    /// eagerly. `--graphs` sets it from the command line.
     #[serde(default)]
     pub graphs: bool,
 
@@ -182,10 +123,6 @@ pub struct InferenceConfig {
 
 fn default_dtype() -> String {
     "f16".to_string()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_max_batch_size() -> usize {
@@ -221,6 +158,10 @@ fn default_tensor_parallel() -> usize {
     1
 }
 
+fn default_data_parallel() -> usize {
+    1
+}
+
 fn default_spec_tokens() -> usize {
     5
 }
@@ -228,13 +169,9 @@ fn default_spec_tokens() -> usize {
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            weights_path: None,
-            device: DeviceConfig::default(),
             max_context_len: None,
             dtype: default_dtype(),
-            flash_attention: true,
-            kv_cache: true,
-            max_batch_size: 1,
+            max_batch_size: default_max_batch_size(),
             paged_attention: false,
             block_size: default_block_size(),
             num_blocks: 0,
@@ -245,7 +182,8 @@ impl Default for InferenceConfig {
             prefill_chunk_size: 0,
             kv_pool_blocks: 0,
             speculative: None,
-            tensor_parallel_size: 1,
+            tensor_parallel_size: default_tensor_parallel(),
+            data_parallel: default_data_parallel(),
             graphs: false,
             mmproj: None,
             image_min_tokens: None,

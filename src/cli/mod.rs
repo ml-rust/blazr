@@ -13,6 +13,7 @@ mod disaggregated;
 mod disaggregated_forward;
 mod info;
 mod list;
+mod load_settings;
 #[cfg(feature = "audio")]
 mod narration;
 mod ps;
@@ -21,6 +22,7 @@ mod run;
 mod run_repl;
 mod serve;
 mod serve_batching;
+mod serve_replicas;
 #[cfg(feature = "distributed")]
 mod swarm;
 #[cfg(feature = "distributed")]
@@ -36,6 +38,7 @@ pub use convert::convert;
 pub use disaggregated::{run_disagg_decode_worker, run_disagg_prefill_worker, run_disagg_router};
 pub use info::info;
 pub use list::list;
+pub use load_settings::{build_cuda_index, LoadSettings, RunSettings};
 #[cfg(feature = "audio")]
 pub use narration::{sound_review, speak, transcribe, SoundReviewArgs, SpeakArgs, TranscribeArgs};
 pub use ps::ps;

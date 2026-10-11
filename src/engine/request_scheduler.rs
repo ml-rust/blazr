@@ -14,11 +14,14 @@ use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
 
 use boostr::inference::memory::CpuBlockAllocator;
+use boostr::inference::prefix_cache::PrefixCache;
 use boostr::inference::scheduler::{
     ScheduledBatch, SchedulerConfig, SequenceId, SequenceRequest, SequenceScheduler, SequenceState,
 };
 
+use super::queue_depth::QueueDepth;
 use super::request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
+use super::slo_policy::SloBatchPolicy;
 use super::types::GeneratedToken;
 use crate::config::GenerationConfig;
 
@@ -50,34 +53,64 @@ pub struct RequestScheduler {
     notify_tx: mpsc::Sender<()>,
     /// Receiver end (held by the scheduling loop)
     notify_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    /// Waiting plus preempted sequences, published as `blazr_queue_depth`.
+    queue_depth: QueueDepth,
+    /// Holds batch growth while a P95 latency target is breached.
+    slo_policy: Option<Arc<SloBatchPolicy>>,
+    /// `SchedulerConfig::max_batch_size`, the cap the policy sizes against.
+    max_batch_size: usize,
 }
 
 impl RequestScheduler {
     /// Create a new request scheduler with the given allocator and config
     pub fn new(allocator: CpuBlockAllocator, config: SchedulerConfig) -> Arc<Self> {
-        let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
-        Arc::new(Self {
-            inner: Mutex::new(SequenceScheduler::new(allocator, config)),
-            registry: RequestRegistry::new(),
-            notify_tx,
-            notify_rx: Mutex::new(Some(notify_rx)),
-        })
+        Self::build(allocator, config, None, None)
     }
 
     /// Create a request scheduler with prefix caching enabled.
     pub fn with_prefix_cache(
         allocator: CpuBlockAllocator,
         config: SchedulerConfig,
-        prefix_cache: boostr::inference::prefix_cache::PrefixCache<CpuBlockAllocator>,
+        prefix_cache: PrefixCache<CpuBlockAllocator>,
+    ) -> Arc<Self> {
+        Self::build(allocator, config, Some(prefix_cache), None)
+    }
+
+    /// Create a request scheduler with an optional prefix cache and an
+    /// optional SLO batch policy.
+    pub fn build(
+        allocator: CpuBlockAllocator,
+        config: SchedulerConfig,
+        prefix_cache: Option<PrefixCache<CpuBlockAllocator>>,
+        slo_policy: Option<Arc<SloBatchPolicy>>,
     ) -> Arc<Self> {
         let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
-        let scheduler = SequenceScheduler::new(allocator, config).with_prefix_cache(prefix_cache);
+        let max_batch_size = config.max_batch_size;
+        let mut scheduler = SequenceScheduler::new(allocator, config);
+        if let Some(cache) = prefix_cache {
+            scheduler = scheduler.with_prefix_cache(cache);
+        }
         Arc::new(Self {
             inner: Mutex::new(scheduler),
             registry: RequestRegistry::new(),
             notify_tx,
             notify_rx: Mutex::new(Some(notify_rx)),
+            queue_depth: QueueDepth::new(),
+            slo_policy,
+            max_batch_size,
         })
+    }
+
+    /// Publish the waiting count of `sched` as this scheduler's queue depth.
+    fn publish_depth(&self, sched: &SequenceScheduler<CpuBlockAllocator>) {
+        let stats = sched.stats();
+        self.queue_depth
+            .set(stats.waiting_count + stats.preempted_count);
+    }
+
+    /// Requests waiting for a batch slot or for token-budget admission.
+    pub fn queue_depth(&self) -> usize {
+        self.queue_depth.get()
     }
 
     /// Submit a new inference request. Returns a handle for receiving tokens.
@@ -96,6 +129,7 @@ impl RequestScheduler {
                 .lock()
                 .map_err(|e| anyhow!("scheduler lock: {e}"))?;
             sched.add_request(request).map_err(|e| anyhow!("{e}"))?;
+            self.publish_depth(&sched);
         }
 
         let handle = self.registry.insert(seq_id, prompt_tokens, gen_config)?;
@@ -114,18 +148,28 @@ impl RequestScheduler {
                 .lock()
                 .map_err(|e| anyhow!("scheduler lock: {e}"))?;
             sched.abort_sequence(seq_id).map_err(|e| anyhow!("{e}"))?;
+            self.publish_depth(&sched);
         }
         self.registry.remove(seq_id)
     }
 
     /// Schedule the next batch of work. Called by the scheduling loop.
     /// Returns None if no work is available.
+    ///
+    /// With an SLO policy, a P95 breach stops the batch from growing past
+    /// the sequences already running.
     pub fn schedule_batch(&self) -> Result<Option<ScheduledBatch>> {
         let mut sched = self
             .inner
             .lock()
             .map_err(|e| anyhow!("scheduler lock: {e}"))?;
-        sched.schedule().map_err(|e| anyhow!("{e}"))
+        let limit = match &self.slo_policy {
+            Some(policy) => policy.batch_limit(sched.stats().running_count, self.max_batch_size),
+            None => self.max_batch_size,
+        };
+        let batch = sched.schedule_with_limit(limit).map_err(|e| anyhow!("{e}"));
+        self.publish_depth(&sched);
+        batch
     }
 
     /// Notify the scheduler that prefill completed for a sequence
@@ -246,5 +290,103 @@ impl GenerationScheduler for RequestScheduler {
 
     fn block_stats(&self) -> Option<boostr::inference::memory::BlockAllocatorStats> {
         RequestScheduler::block_stats(self)
+    }
+
+    fn queue_depth(&self) -> usize {
+        RequestScheduler::queue_depth(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LatencySlo;
+    use crate::server::metrics::names::QUEUE_DEPTH;
+    use crate::server::test_recorder::TestRecorder;
+
+    fn scheduler(
+        max_batch_size: usize,
+        policy: Option<Arc<SloBatchPolicy>>,
+    ) -> Arc<RequestScheduler> {
+        let config = SchedulerConfig {
+            max_batch_size,
+            max_batch_tokens: 4096,
+            block_size: 4,
+            ..Default::default()
+        };
+        RequestScheduler::build(CpuBlockAllocator::new(256, 4), config, None, policy)
+    }
+
+    fn gen_config() -> GenerationConfig {
+        GenerationConfig {
+            max_tokens: 8,
+            ..GenerationConfig::default()
+        }
+    }
+
+    fn prefills(scheduler: &RequestScheduler) -> usize {
+        scheduler
+            .schedule_batch()
+            .ok()
+            .flatten()
+            .map_or(0, |batch| batch.prefill_sequences.len())
+    }
+
+    #[test]
+    fn queue_depth_follows_submit_schedule_and_cancel() {
+        let recorder = TestRecorder::install();
+        let scheduler = scheduler(2, None);
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            handles.push(
+                scheduler
+                    .submit(vec![1, 2, 3], gen_config())
+                    .expect("submit"),
+            );
+        }
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(3.0));
+
+        // Two slots: two requests start, one keeps waiting.
+        assert_eq!(prefills(&scheduler), 2);
+        assert_eq!(scheduler.queue_depth(), 1);
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(1.0));
+
+        scheduler.cancel(handles[2].seq_id).expect("cancel");
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(0.0));
+
+        drop(scheduler);
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(0.0));
+    }
+
+    #[test]
+    fn an_slo_breach_stops_batch_growth_until_latency_recovers() {
+        let slo = LatencySlo {
+            ttft_p50_ms: None,
+            ttft_p95_ms: Some(100),
+            ttft_p99_ms: None,
+            itl_p50_ms: None,
+            itl_p95_ms: Some(20),
+            itl_p99_ms: None,
+            e2e_p99_ms: None,
+        };
+        let policy = Arc::new(SloBatchPolicy::from_slo(&slo).expect("policy"));
+        let scheduler = scheduler(4, Some(Arc::clone(&policy)));
+
+        let _first = scheduler.submit(vec![1, 2], gen_config()).expect("submit");
+        assert_eq!(prefills(&scheduler), 1);
+
+        // The P95 ITL breaks its target: the running batch of one stays one.
+        policy.observe_itl_ms(80.0);
+        let _second = scheduler.submit(vec![3, 4], gen_config()).expect("submit");
+        let _third = scheduler.submit(vec![5, 6], gen_config()).expect("submit");
+        assert_eq!(prefills(&scheduler), 0);
+        assert_eq!(scheduler.queue_depth(), 2);
+
+        // Fast samples bring the P95 under target: both waiting requests join.
+        for _ in 0..40 {
+            policy.observe_itl_ms(5.0);
+        }
+        assert_eq!(prefills(&scheduler), 2);
+        assert_eq!(scheduler.queue_depth(), 0);
     }
 }

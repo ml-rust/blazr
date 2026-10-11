@@ -15,14 +15,15 @@ use axum::{
 
 use super::chat_vision::{decode_image_sources, image_route, marked_text, ImageRoute};
 use super::generation::{
-    chat_prompt_error_response, error_response, generate_via_scheduler, overloaded_response,
-    record_generation_metrics, validate_generation_params,
+    chat_prompt_error_response, error_response, overloaded_response, record_generation_metrics,
+    validate_generation_params,
 };
 use super::handlers::AppState;
 use super::metrics;
 use super::responses_types::{
     output_items, ResponsesInput, ResponsesRequest, ResponsesResponse, ResponsesUsage,
 };
+use super::scheduled::generate_text_routed;
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, RenderOptions};
 
 /// POST /v1/responses — OpenAI Responses API
@@ -33,7 +34,7 @@ pub async fn responses(
     if let Err(e) = validate_generation_params(
         request.temperature,
         request.top_p,
-        Some(request.max_output_tokens),
+        request.max_output_tokens,
     ) {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
@@ -123,12 +124,14 @@ pub async fn responses(
         }
     }
 
+    // Each value the request omits takes the live `generation` default.
+    let defaults = state.config().generation.clone();
     let gen_config = crate::config::GenerationConfig {
-        max_tokens: request.max_output_tokens,
-        temperature: request.temperature.unwrap_or(1.0),
-        top_p: request.top_p.unwrap_or(1.0),
-        stop_sequences: request.stop.unwrap_or_default(),
-        ..Default::default()
+        max_tokens: request.max_output_tokens.unwrap_or(defaults.max_tokens),
+        temperature: request.temperature.unwrap_or(defaults.temperature),
+        top_p: request.top_p.unwrap_or(defaults.top_p),
+        stop_sequences: request.stop.unwrap_or(defaults.stop_sequences.clone()),
+        ..defaults
     };
 
     // Token budget admission
@@ -136,6 +139,11 @@ pub async fn responses(
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
+
+    // The executor and scheduler this request runs on. With data
+    // parallelism, the router picks a replica here.
+    let placement = state.route(executor, &prompt_tokens);
+    let executor = Arc::clone(&placement.executor);
 
     metrics::adjust_decode_slots(1.0);
     let start = Instant::now();
@@ -151,20 +159,8 @@ pub async fn responses(
         executor
             .generate_multimodal_text(&prompt_tokens, &media.images, &media.audio, &gen_config)
             .await
-    } else if let Some(ref rs) = state.request_scheduler {
-        match generate_via_scheduler(rs.as_ref(), prompt_tokens.clone(), &gen_config).await {
-            Ok(r) => Ok(crate::engine::GenerationResult {
-                text: r.text,
-                prompt_tokens: r.prompt_tokens,
-                completion_tokens: r.completion_tokens,
-                finish_reason: r.finish_reason,
-                prompt_eval_duration_ms: r.prompt_eval_duration_ms,
-                token_logprobs: None,
-            }),
-            Err(e) => Err(anyhow::anyhow!(e)),
-        }
     } else {
-        executor.generate_text(&prompt_tokens, &gen_config).await
+        generate_text_routed(&placement, &prompt_tokens, &gen_config).await
     };
 
     match gen_result {
@@ -186,7 +182,7 @@ pub async fn responses(
                 object: "response",
                 created_at: chrono::Utc::now().timestamp(),
                 model: request.model,
-                output: output_items(&prompt, result.text, state.reasoning_format),
+                output: output_items(&prompt, result.text, state.reasoning_format()),
                 usage: ResponsesUsage {
                     input_tokens: result.prompt_tokens,
                     output_tokens: result.completion_tokens,

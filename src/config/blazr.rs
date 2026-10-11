@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use boostr::model::UniversalConfig;
 use boostr::DType;
 
-use super::{GenerationConfig, InferenceConfig, ServerConfig};
+use super::InferenceConfig;
 
 /// Parse a dtype string into a `DType`.
 ///
@@ -29,9 +29,12 @@ pub fn parse_dtype(s: &str) -> Result<DType> {
     }
 }
 
-/// Blazr configuration
+/// A model's configuration: boostr's `UniversalConfig` plus the per-model
+/// `inference` section of its `config.json`.
 ///
-/// Extends boostr's UniversalConfig with inference and server settings.
+/// Server and generation settings live in `~/.blazr/config.yaml`. A model
+/// `config.json` that still holds `server` or `generation` parses, and
+/// those sections are ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlazrConfig {
     /// Model architecture (from boostr::model::UniversalConfig)
@@ -41,14 +44,6 @@ pub struct BlazrConfig {
     /// Inference-specific settings
     #[serde(default)]
     pub inference: InferenceConfig,
-
-    /// Server settings (only for `blazr serve`)
-    #[serde(default)]
-    pub server: Option<ServerConfig>,
-
-    /// Default generation settings
-    #[serde(default)]
-    pub generation: GenerationConfig,
 }
 
 impl BlazrConfig {
@@ -71,8 +66,6 @@ impl BlazrConfig {
         Self {
             model,
             inference: InferenceConfig::default(),
-            server: None,
-            generation: GenerationConfig::default(),
         }
     }
 
@@ -82,12 +75,7 @@ impl BlazrConfig {
             dtype: dtype.to_string(),
             ..Default::default()
         };
-        Self {
-            model,
-            inference,
-            server: None,
-            generation: GenerationConfig::default(),
-        }
+        Self { model, inference }
     }
 
     /// Get the inference dtype
@@ -148,8 +136,6 @@ impl Default for BlazrConfig {
                 quant_formats: Vec::new(),
             },
             inference: InferenceConfig::default(),
-            server: None,
-            generation: GenerationConfig::default(),
         }
     }
 }
@@ -157,7 +143,7 @@ impl Default for BlazrConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::UserConfig;
+    use crate::config::{GenerationConfig, ServerConfig};
 
     #[test]
     fn test_blazr_config_yaml() {
@@ -176,26 +162,19 @@ attention:
   sliding_window: 4096
 
 inference:
-  weights_path: ./model.safetensors
-  device: cuda:0
-  dtype: f16
   max_context_len: 4096
 
 server:
   port: 8080
-  host: 0.0.0.0
-  max_concurrent_requests: 16
 
 generation:
-  max_tokens: 2048
   temperature: 0.7
 "#;
+        // Old model configs carry `server` and `generation`: they still parse.
         let config: BlazrConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.model_type(), "mistral");
         assert_eq!(config.vocab_size(), 32000);
         assert_eq!(config.max_seq_len(), 4096); // Uses inference override
-        assert!(config.server.is_some());
-        assert_eq!(config.server.unwrap().port, 8080);
     }
 
     #[test]
@@ -244,8 +223,6 @@ max_seq_len: 512
         assert_eq!(config.num_layers(), 2);
         // No inference override, should use model's max_seq_len
         assert_eq!(config.max_seq_len(), 512);
-        assert!(config.server.is_none());
-        assert_eq!(config.generation.max_tokens, 2048); // default
     }
 
     #[test]
@@ -266,12 +243,13 @@ max_seq_len: 512
             "hidden_size": 4096,
             "num_layers": 32,
             "max_seq_len": 8192,
-            "inference": { "dtype": "f32" },
-            "generation": { "temperature": 0.5 }
+            "inference": { "dtype": "f32", "max_batch_size": 4 }
         }"#;
         let config: BlazrConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.model_type(), "mistral");
-        assert_eq!(config.generation.temperature, 0.5);
+        assert_eq!(config.inference.max_batch_size, 4);
+        // The loader sets dtype from the checkpoint: the key is ignored.
+        assert_eq!(config.dtype(), "f16");
     }
 
     #[test]
@@ -336,50 +314,12 @@ inference:
     }
 
     #[test]
-    fn test_user_config_default() {
-        let config = UserConfig::default();
-        assert!(config.default_model.is_none());
-        assert!(config.device.is_none());
-        assert!(config.num_ctx.is_none());
-        assert!(config.port.is_none());
-        assert!(config.temperature.is_none());
-    }
-
-    #[test]
-    fn test_user_config_yaml() {
-        let yaml = r#"
-default_model: mistral-7b
-device: cuda
-num_ctx: 4096
-port: 9090
-temperature: 0.8
-max_tokens: 1024
-"#;
-        let config: UserConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert_eq!(config.default_model.unwrap(), "mistral-7b");
-        assert_eq!(config.device.unwrap(), "cuda");
-        assert_eq!(config.num_ctx.unwrap(), 4096);
-        assert_eq!(config.port.unwrap(), 9090);
-        assert_eq!(config.temperature.unwrap(), 0.8);
-        assert_eq!(config.max_tokens.unwrap(), 1024);
-    }
-
-    #[test]
     fn test_generation_config_yaml_partial() {
         // Only some fields specified, rest should be defaults
-        let yaml = r#"
-model_type: test
-vocab_size: 100
-hidden_size: 64
-num_layers: 1
-max_seq_len: 512
-generation:
-  temperature: 0.0
-"#;
-        let config: BlazrConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert_eq!(config.generation.temperature, 0.0);
-        assert_eq!(config.generation.max_tokens, 2048); // default
-        assert_eq!(config.generation.top_p, 1.0); // default
+        let config: GenerationConfig = serde_saphyr::from_str("temperature: 0.0\n").unwrap();
+        assert_eq!(config.temperature, 0.0);
+        assert_eq!(config.max_tokens, 2048); // default
+        assert_eq!(config.top_p, 1.0); // default
     }
 
     #[test]

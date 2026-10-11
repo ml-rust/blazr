@@ -8,8 +8,8 @@ use anyhow::{anyhow, Result};
 use boostr::CudaRuntime;
 
 use super::run_repl::{interactive_repl, print_generation_stream};
-use super::RuntimeArgs;
-use crate::config::GenerationConfig;
+use super::RunSettings;
+use crate::config::{DeviceChoice, GenerationConfig};
 use crate::engine::vision_tower::{VisionTower, IMAGE_MARKER_TEXT};
 use crate::engine::Executor;
 #[cfg(feature = "cuda")]
@@ -26,23 +26,32 @@ pub async fn run(
     prompt: Option<String>,
     chat_template: Option<String>,
     gen_config: GenerationConfig,
-    runtime: RuntimeArgs,
+    runtime: RunSettings,
     images: Vec<PathBuf>,
 ) -> Result<()> {
     let images = read_images(&images)?;
-    if runtime.cpu {
-        run_cpu(model, prompt, chat_template, gen_config, runtime, images).await
-    } else {
+    match runtime.device {
+        DeviceChoice::Cpu => {
+            run_cpu(model, prompt, chat_template, gen_config, runtime, images).await
+        }
         #[cfg(feature = "cuda")]
-        {
-            run_cuda(model, prompt, chat_template, gen_config, runtime, images).await
+        DeviceChoice::Cuda(index) => {
+            run_cuda(
+                model,
+                prompt,
+                chat_template,
+                gen_config,
+                runtime,
+                index,
+                images,
+            )
+            .await
         }
         #[cfg(not(feature = "cuda"))]
-        {
-            anyhow::bail!(
-                "CUDA support is not enabled. Rebuild with --features cuda, or use --cpu flag."
-            )
-        }
+        DeviceChoice::Cuda(_) => anyhow::bail!(
+            "CUDA support is not enabled. Rebuild with --features cuda, or pass --cpu, or set \
+             device: cpu in ~/.blazr/config.yaml"
+        ),
     }
 }
 
@@ -52,19 +61,14 @@ async fn run_cuda(
     prompt: Option<String>,
     chat_template: Option<String>,
     gen_config: GenerationConfig,
-    runtime: RuntimeArgs,
+    runtime: RunSettings,
+    cuda_index: usize,
     images: Vec<Vec<u8>>,
 ) -> Result<()> {
-    let RuntimeArgs {
-        gpu_layers,
-        num_ctx,
-        paged_attention,
-        graphs,
-        vision,
-        ..
-    } = runtime;
+    let gpu_layers = runtime.gpu_layers;
+    let num_ctx = runtime.load.num_ctx;
     // Initialize device
-    let device = boostr::CudaDevice::new(0);
+    let device = boostr::CudaDevice::new(cuda_index);
 
     tracing::info!("Loading model: {}", model);
 
@@ -107,19 +111,19 @@ async fn run_cuda(
         }
     };
 
-    // Enable paged attention if requested
+    // The user file's inference keys, then the flags.
+    runtime.apply(&mut config.inference)?;
+    let paged_attention = config.inference.paged_attention;
+    let graphs = config.inference.graphs;
     if paged_attention {
-        config.inference.paged_attention = true;
         tracing::info!(
             "Paged attention enabled (block_size={})",
             config.inference.block_size
         );
     }
     if graphs {
-        config.inference.graphs = true;
         tracing::info!("CUDA graph mode enabled");
     }
-    vision.into_overrides().apply(&mut config.inference);
 
     // Pre-load all CUDA PTX modules to avoid JIT compilation on first use
     {
@@ -206,12 +210,15 @@ async fn run_cpu(
     prompt: Option<String>,
     chat_template: Option<String>,
     gen_config: GenerationConfig,
-    runtime: RuntimeArgs,
+    runtime: RunSettings,
     images: Vec<Vec<u8>>,
 ) -> Result<()> {
-    let RuntimeArgs {
-        num_ctx, vision, ..
-    } = runtime;
+    let num_ctx = runtime.load.num_ctx;
+    if runtime.paged_attention || runtime.graphs {
+        tracing::warn!(
+            "--paged-attention and --graphs apply on CUDA only. The CPU run ignores them"
+        );
+    }
 
     // Initialize CPU device
     let device = boostr::CpuDevice::new();
@@ -235,7 +242,8 @@ async fn run_cpu(
             (loaded_model, config, tokenizer)
         }
     };
-    vision.into_overrides().apply(&mut config.inference);
+    // The CPU path has no paged or graph decode, so only the load keys apply.
+    runtime.load.apply(&mut config.inference)?;
     let template = ChatTemplate::detect(
         Path::new(&model),
         config.model_type(),

@@ -344,14 +344,12 @@ pub async fn run_router_http_server(
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn resolve_model_path(model: &str) -> std::path::PathBuf {
+/// `model` as given when it is absolute or exists, else under `model_dir`.
+pub fn resolve_model_path(model: &str, model_dir: &std::path::Path) -> std::path::PathBuf {
     let p = std::path::Path::new(model);
     if p.is_absolute() || p.exists() {
         p.to_path_buf()
     } else {
-        let model_dir = std::env::var("BLAZR_MODEL_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("./models"));
         model_dir.join(model)
     }
 }

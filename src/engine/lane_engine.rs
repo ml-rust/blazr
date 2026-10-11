@@ -132,9 +132,11 @@ impl LaneEngine {
         self.executor.qwen35_lane_close().await;
     }
 
-    /// Put waiting requests into free lanes until one runs out.
+    /// Put waiting requests into free lanes until one runs out, or until
+    /// the SLO policy holds lane filling.
     async fn admit_waiting(&mut self) {
-        while self.live < self.active.len() {
+        while self.live < self.active.len() && self.live < self.scheduler.admission_limit(self.live)
+        {
             let Some(seq_id) = self.scheduler.next_waiting() else {
                 break;
             };

@@ -95,7 +95,7 @@ Completions and chat accept these fields. Infill accepts a subset.
 
 | Field                   | Type             | Default | Meaning                                                                       |
 | ----------------------- | ---------------- | ------- | ----------------------------------------------------------------------------- |
-| `max_tokens`            | integer          | `256`   | Maximum tokens to generate. Must be greater than `0`.                         |
+| `max_tokens`            | integer          | `2048`  | Maximum tokens to generate. Must be greater than `0`.                         |
 | `temperature`           | number           | `1.0`   | Sampling temperature. Range `0` to `2`.                                       |
 | `top_p`                 | number           | `1.0`   | Nucleus sampling. Range `0` to `1`.                                           |
 | `top_k`                 | integer          | `0`     | Top-k sampling limit.                                                         |
@@ -123,6 +123,8 @@ Completions and chat accept these fields. Infill accepts a subset.
 | `keep_alive`            | string           | none    | Time the model stays loaded after the request. See [keep_alive](#keep_alive). |
 | `lora_adapter`          | string           | none    | Name of a loaded LoRA adapter to apply. See [LoRA adapters](#lora-adapters).  |
 | `user`                  | string           | none    | Caller identifier, passed to generation metrics.                              |
+
+Each field the request omits takes its value from the `generation` section of `~/.blazr/config.yaml`. The table shows the built-in values. Changes to `generation` apply to the next request without a restart.
 
 ### Structured output
 
@@ -419,7 +421,7 @@ Tool calls appear only in non-streaming responses.
 | `deepseek` | Default. Reasoning goes to `reasoning_content`. The answer goes to `content`. |
 | `none`     | Raw model output goes to `content`, tags included.                            |
 
-The chat request field overrides the server default. The Responses and Anthropic routes use only the server default. The server default comes from the `--reasoning-format` flag.
+The chat request field overrides the server default. The Responses and Anthropic routes use only the server default. The server default comes from `--reasoning-format`, then `server.reasoning_format`, then `deepseek`.
 
 ### Image and audio input
 
@@ -444,6 +446,13 @@ Chat messages accept image and audio parts in `content`.
 | `input_audio` | `input_audio.data`, `input_audio.format` | Base64 audio.                                              |
 
 - A value that is neither a `data:` URI nor an `http(s)` URL decodes as plain base64. The server does not read local file paths.
+- Raw base64 must decode to a PNG, JPEG, WebP, or GIF image. Any other value fails with this message:
+
+  ```
+  Invalid image_url: expected a data: URI, an http(s) URL, or base64 of a PNG, JPEG, WebP, or GIF image
+  ```
+
+- Base64 that fails to decode fails with `Invalid image_url: expected a data: URI, an http(s) URL, or base64 (<decode error>)`.
 - A `http(s)` fetch that returns a non-success status returns `400`.
 
 Image routing depends on the loaded model:
@@ -467,7 +476,7 @@ An OpenAI Responses API request. This route does not stream.
 | `model`             | string           | required | Model name.                             |
 | `input`             | string or array  | required | User text, or an array of input items.  |
 | `instructions`      | string           | none     | System message placed before the input. |
-| `max_output_tokens` | integer          | `4096`   | Maximum tokens to generate.             |
+| `max_output_tokens` | integer          | `2048`   | Maximum tokens to generate.             |
 | `temperature`       | number           | `1.0`    | Same as the sampling field.             |
 | `top_p`             | number           | `1.0`    | Same as the sampling field.             |
 | `stop`              | array of strings | none     | Stop sequences.                         |
@@ -669,7 +678,7 @@ Fills code between a prefix and a suffix. The model tokenizer must define the fi
 | `model`                                  | string            | required          | Model name.                                                     |
 | `prefix`                                 | string            | required          | Text before the cursor.                                         |
 | `suffix`                                 | string            | `""`              | Text after the cursor.                                          |
-| `max_tokens`                             | integer           | `256`             | Maximum tokens to generate.                                     |
+| `max_tokens`                             | integer           | `2048`            | Maximum tokens to generate.                                     |
 | `temperature`, `top_p`, `top_k`, `min_p` | number or integer | sampling defaults | See [Sampling fields](#sampling-fields).                        |
 | `stream`                                 | boolean           | `false`           | Stream the response as SSE with `text_completion.chunk` events. |
 | `stop`                                   | array of strings  | none              | Stop sequences.                                                 |
@@ -1000,7 +1009,7 @@ curl http://localhost:8080/api/copy \
 | ------ | ------ | --------------------------------------------- |
 | `name` | string | Hugging Face repository, such as `org/model`. |
 
-Downloads the model into `$BLAZR_MODEL_DIR/<model-name>`. The default directory is `./models`. The response is `application/x-ndjson`, one JSON object per line.
+Downloads the model into `<model_dir>/<model-name>`. The server resolves `model_dir` from `BLAZR_MODEL_DIR`, then the `model_dir` config key, then `./models`. The response is `application/x-ndjson`, one JSON object per line.
 
 ```json
 {"status":"pulling config.json"}
@@ -1119,9 +1128,12 @@ curl http://localhost:8080/health
 {
   "status": "ok",
   "version": "0.1.0",
-  "loaded_models": ["llama-3.2-1b"]
+  "loaded_models": ["llama-3.2-1b"],
+  "data_parallel_replicas": 1
 }
 ```
+
+`data_parallel_replicas` is the number of copies of the start model that serve requests. It is `1` without `inference.data_parallel` or `--data-parallel`.
 
 `gpu_memory` appears only in a CUDA build when the device reports memory. Its fields are `used_bytes`, `free_bytes`, `total_bytes`, `used_gb`, and `total_gb`.
 
@@ -1158,6 +1170,8 @@ Completions, chat, and infill return this `usage` object. Responses and Anthropi
 
 `max_inflight_tokens` counts each request as its prompt tokens plus `max_tokens`. A request that exceeds the budget returns `503` with a `Retry-After: 5` header.
 
+`GET /health` and `GET /metrics` skip the `max_concurrent_requests` limit. Probes and scrapes answer while the server is saturated.
+
 ## Status codes
 
 | Status | Error type                                                                     | Returned when                                                                                                                  |
@@ -1177,8 +1191,6 @@ Completions, chat, and infill return this `usage` object. Responses and Anthropi
 | `503`  | `server_overloaded`                                                            | In-flight token budget exceeded. Includes `Retry-After: 5`.                                                                    |
 | `503`  | `slot_allocation_failed`                                                       | Slot allocation failed.                                                                                                        |
 | `503`  | `not_implemented`                                                              | TTS model has no synthesis engine.                                                                                             |
-
-Hmm: 413 type not stated. Fine.
 
 ## Source of truth
 

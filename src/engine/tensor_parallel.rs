@@ -13,8 +13,6 @@
 //! boostr provides: `ColumnParallelLinear`, `RowParallelLinear`, NCCL communicator.
 //! blazr owns: configuration, validation, and wiring into the executor.
 
-use crate::config::InferenceConfig;
-
 /// Tensor parallelism runtime state.
 ///
 /// Holds the communicator and rank/world_size for the duration of inference.
@@ -67,36 +65,54 @@ impl TensorParallelState {
     }
 }
 
-/// Validate that the tensor parallelism configuration is feasible.
+/// Query and key/value head counts that tensor parallelism shards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TpHeads {
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+}
+
+/// Check that a tensor parallel degree can run.
+///
+/// `serve` calls it at start with `heads` unset, before any model loads.
+/// The loader calls it again with the model's heads, before weights load.
 ///
 /// Checks:
-/// - CUDA feature is enabled when tp_size > 1
-/// - num_kv_heads is divisible by tp_size (required for head sharding)
-/// - num_attention_heads is divisible by tp_size
-pub fn validate_tp_config(
-    config: &InferenceConfig,
-    num_heads: usize,
-    num_kv_heads: usize,
-) -> Result<(), String> {
-    let tp = config.tensor_parallel_size;
-    if tp <= 1 {
+/// - `tp_size` is at least 1.
+/// - Above 1, the build has the `cuda` and `nccl` features.
+/// - The query and key/value head counts divide by `tp_size`.
+pub fn validate_tp_config(tp_size: usize, heads: Option<TpHeads>) -> Result<(), String> {
+    if tp_size == 0 {
+        return Err(
+            "tensor_parallel_size is 0. Set inference.tensor_parallel_size or BLAZR_TP_SIZE \
+             to 1 or more"
+                .to_string(),
+        );
+    }
+    if tp_size == 1 {
         return Ok(());
     }
-
-    if cfg!(not(feature = "cuda")) {
-        return Err("Tensor parallelism requires the 'cuda' feature".to_string());
-    }
-
-    if !num_heads.is_multiple_of(tp) {
+    if cfg!(not(all(feature = "cuda", feature = "nccl"))) {
         return Err(format!(
-            "num_attention_heads ({}) must be divisible by tensor_parallel_size ({})",
-            num_heads, tp
+            "tensor_parallel_size {tp_size} needs the cuda and nccl features. Rebuild with \
+             --features cuda,nccl, or set the size to 1"
         ));
     }
-    if !num_kv_heads.is_multiple_of(tp) {
+    let Some(heads) = heads else {
+        return Ok(());
+    };
+    if !heads.num_heads.is_multiple_of(tp_size) {
         return Err(format!(
-            "num_kv_heads ({}) must be divisible by tensor_parallel_size ({})",
-            num_kv_heads, tp
+            "num_attention_heads ({}) does not divide by tensor_parallel_size ({tp_size}). \
+             Pick a size that divides it",
+            heads.num_heads
+        ));
+    }
+    if !heads.num_kv_heads.is_multiple_of(tp_size) {
+        return Err(format!(
+            "num_kv_heads ({}) does not divide by tensor_parallel_size ({tp_size}). Pick a \
+             size that divides it",
+            heads.num_kv_heads
         ));
     }
     Ok(())
@@ -184,24 +200,37 @@ mod tests {
         assert_eq!(state.shard_range(10), (7, 10)); // 3
     }
 
-    #[test]
-    fn test_validate_single_gpu_always_ok() {
-        let config = InferenceConfig {
-            tensor_parallel_size: 1,
-            ..Default::default()
-        };
-        assert!(validate_tp_config(&config, 32, 8).is_ok());
-        assert!(validate_tp_config(&config, 7, 3).is_ok());
+    fn heads(num_heads: usize, num_kv_heads: usize) -> Option<TpHeads> {
+        Some(TpHeads {
+            num_heads,
+            num_kv_heads,
+        })
     }
 
     #[test]
-    #[cfg(feature = "cuda")]
+    fn test_validate_single_gpu_always_ok() {
+        assert!(validate_tp_config(1, heads(32, 8)).is_ok());
+        assert!(validate_tp_config(1, heads(7, 3)).is_ok());
+        assert!(validate_tp_config(1, None).is_ok());
+    }
+
+    #[test]
+    fn test_validate_zero_is_an_error() {
+        assert!(validate_tp_config(0, None).is_err());
+    }
+
+    #[test]
+    #[cfg(not(all(feature = "cuda", feature = "nccl")))]
+    fn test_validate_needs_cuda_and_nccl() {
+        let err = validate_tp_config(2, None).unwrap_err();
+        assert!(err.contains("cuda,nccl"), "{err}");
+    }
+
+    #[test]
+    #[cfg(all(feature = "cuda", feature = "nccl"))]
     fn test_validate_divisible() {
-        let config = InferenceConfig {
-            tensor_parallel_size: 4,
-            ..Default::default()
-        };
-        assert!(validate_tp_config(&config, 32, 8).is_ok());
-        assert!(validate_tp_config(&config, 32, 6).is_err());
+        assert!(validate_tp_config(4, None).is_ok());
+        assert!(validate_tp_config(4, heads(32, 8)).is_ok());
+        assert!(validate_tp_config(4, heads(32, 6)).is_err());
     }
 }

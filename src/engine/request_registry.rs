@@ -54,6 +54,12 @@ pub trait GenerationScheduler: Send + Sync {
     fn block_stats(&self) -> Option<BlockAllocatorStats> {
         None
     }
+
+    /// Requests this scheduler holds that wait for a slot or for
+    /// token-budget admission.
+    fn queue_depth(&self) -> usize {
+        0
+    }
 }
 
 /// Per-request state stored beside whichever scheduler queued it.

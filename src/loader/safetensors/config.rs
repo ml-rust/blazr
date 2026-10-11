@@ -8,7 +8,7 @@ use boostr::model::{
     AttentionConfig, HuggingFaceConfig, HybridConfig, MoeConfig, SsmConfig, UniversalConfig,
 };
 
-use crate::config::BlazrConfig;
+use crate::config::{BlazrConfig, InferenceConfig};
 use crate::model::detect::DetectedConfig;
 
 /// Detect dtype from config.json's torch_dtype field
@@ -25,6 +25,17 @@ pub fn detect_dtype_from_config(dir: &Path) -> &'static str {
         }
     }
     "f16" // Default
+}
+
+/// The `inference` section of a model's `config.json`, read before any
+/// weight loads. `None` when the file is missing or is not a blazr config.
+///
+/// `path` is the model directory or a file inside it.
+pub fn model_config_inference(path: &Path) -> Option<InferenceConfig> {
+    let dir = if path.is_dir() { path } else { path.parent()? };
+    BlazrConfig::from_json(dir.join("config.json"))
+        .ok()
+        .map(|config| config.inference)
 }
 
 /// Load config or create from detected architecture

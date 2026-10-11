@@ -13,14 +13,14 @@ use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
 use super::chat_vision::{decode_request_media, image_route, ImageRoute};
 use super::generation::{
     apply_keep_alive, chat_prompt_error_response, convert_logprobs, decode_context_prefix,
-    error_response, generate_via_scheduler, overloaded_response, policy_error_response,
-    record_generation_metrics, stream_images_with_stop_sequences,
-    stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
-    HasSamplingFields, Usage,
+    error_response, overloaded_response, policy_error_response, record_generation_metrics,
+    stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
+    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
 use super::reasoning::{split_reasoning_for_format, ReasoningParser};
+use super::scheduled::generate_text_routed;
 use super::streaming::{create_chat_stream, StreamToken};
 use super::tool_calls::extract_tool_calls;
 use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg};
@@ -187,14 +187,23 @@ pub async fn chat_completions(
         }
     }
 
-    let gen_config = request.sampling_params().into_gen_config();
-    let reasoning_format = request.reasoning_format.unwrap_or(state.reasoning_format);
+    let gen_config = request
+        .sampling_params()
+        .into_gen_config(&state.config().generation);
+    let reasoning_format = request
+        .reasoning_format
+        .unwrap_or_else(|| state.reasoning_format());
 
     // Token budget admission control
     let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
+
+    // The executor and scheduler this request runs on. With data
+    // parallelism, the router picks a replica here.
+    let placement = state.route(executor, &prompt_tokens);
+    let executor = Arc::clone(&placement.executor);
 
     if request.stream.unwrap_or(false) {
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
@@ -205,6 +214,7 @@ pub async fn chat_completions(
 
         metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
+            let _placement = placement;
             match route {
                 ImageRoute::Tower => {
                     stream_images_with_stop_sequences(
@@ -272,21 +282,8 @@ pub async fn chat_completions(
                         &iter_config,
                     )
                     .await
-            } else if let Some(ref rs) = state.request_scheduler {
-                match generate_via_scheduler(rs.as_ref(), prompt_tokens.clone(), &iter_config).await
-                {
-                    Ok(r) => Ok(crate::engine::GenerationResult {
-                        text: r.text,
-                        prompt_tokens: r.prompt_tokens,
-                        completion_tokens: r.completion_tokens,
-                        finish_reason: r.finish_reason,
-                        prompt_eval_duration_ms: r.prompt_eval_duration_ms,
-                        token_logprobs: None,
-                    }),
-                    Err(e) => Err(anyhow::anyhow!(e)),
-                }
             } else {
-                executor.generate_text(&prompt_tokens, &iter_config).await
+                generate_text_routed(&placement, &prompt_tokens, &iter_config).await
             };
 
             match gen_result {

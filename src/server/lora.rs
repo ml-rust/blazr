@@ -1,7 +1,7 @@
 //! LoRA adapter management HTTP handlers
 //!
 //! Endpoints:
-//!   POST   /v1/lora/load      — Load an adapter from disk and register it with a model
+//!   POST   /v1/lora           — Load an adapter from disk and register it with a model
 //!   DELETE /v1/lora/{name}    — Unload a named adapter from a model
 //!   GET    /v1/lora            — List all loaded adapters for a model
 
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::generation::error_response;
 use super::handlers::AppState;
 
-/// Request body for `POST /v1/lora/load`
+/// Request body for `POST /v1/lora`
 #[derive(Deserialize)]
 pub struct LoadLoraRequest {
     /// Name of the base model to attach this adapter to (same model identifier used in completions)
@@ -41,7 +41,7 @@ pub struct ListLorasResponse {
     pub adapters: Vec<LoraAdapterEntry>,
 }
 
-/// `POST /v1/lora/load`
+/// `POST /v1/lora`
 ///
 /// Loads a HuggingFace PEFT-format LoRA adapter from the given path and attaches
 /// it to the named model.  The model is loaded into the scheduler if not already running.

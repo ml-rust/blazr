@@ -139,7 +139,7 @@ pub struct GenerationConfig {
     /// Name of a LoRA adapter to apply for this generation request.
     ///
     /// The adapter must have been loaded into the executor's `LoraAdapterRegistry`
-    /// beforehand via `POST /v1/lora/load` (or `Executor::load_lora`).
+    /// beforehand via `POST /v1/lora` (or `Executor::load_lora`).
     /// If `None`, the base model weights are used unchanged.
     #[serde(default)]
     pub lora_adapter: Option<String>,

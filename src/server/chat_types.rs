@@ -99,7 +99,7 @@ pub struct ChatRequest {
     #[serde(default)]
     pub user: Option<String>,
     /// LoRA adapter name to activate for this request.
-    /// The adapter must be loaded beforehand via `POST /v1/lora/load`.
+    /// The adapter must be loaded beforehand via `POST /v1/lora`.
     #[serde(default)]
     pub lora_adapter: Option<String>,
 }

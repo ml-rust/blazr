@@ -8,9 +8,9 @@ use colored::Colorize;
 use crate::loader::{detect_model_source, get_gguf_info, ModelFormat};
 use crate::model::chat_template::ChatTemplate;
 
-/// Show model information
-pub async fn info(model: String) -> Result<()> {
-    let model_path = find_model_path(&model)?;
+/// Show model information. A bare name is looked up in `model_dir`.
+pub async fn info(model: String, model_dir: PathBuf) -> Result<()> {
+    let model_path = find_model_path(&model, &model_dir)?;
 
     eprintln!("{}: {}", "Model".bold(), model);
     eprintln!("{}: {}", "Path".bold(), model_path.display());
@@ -54,7 +54,7 @@ fn print_chat_template(path: &std::path::Path, model_type: &str) {
     }
 }
 
-fn find_model_path(model: &str) -> Result<PathBuf> {
+fn find_model_path(model: &str, model_dir: &std::path::Path) -> Result<PathBuf> {
     // Try direct path
     let direct = PathBuf::from(model);
     if direct.exists() {
@@ -62,10 +62,6 @@ fn find_model_path(model: &str) -> Result<PathBuf> {
     }
 
     // Try in model directory
-    let model_dir = std::env::var("BLAZR_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./models"));
-
     let in_dir = model_dir.join(model);
     if in_dir.exists() {
         return Ok(in_dir);

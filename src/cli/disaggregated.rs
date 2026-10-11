@@ -13,6 +13,7 @@ use colored::Colorize;
 use nexar::NexarClient;
 use std::sync::Arc;
 
+use crate::config::{ClusterSettings, ServerConfig};
 use crate::distributed::disaggregated::{DecodeWorker, DisaggConfig, DisaggRouter, PrefillWorker};
 use crate::distributed::transport;
 
@@ -33,12 +34,12 @@ type ServerRuntime = boostr::CpuRuntime;
 ///
 /// The router accepts HTTP inference requests and dispatches them to prefill
 /// workers, then coordinates the decode workers and streams tokens back over
-/// the HTTP response.
+/// the HTTP response. `server_config` holds the HTTP host and port.
 pub async fn run_disagg_router(
     listen_addr: String,
     prefill_addrs: Vec<String>,
     decode_addrs: Vec<String>,
-    port: u16,
+    server_config: ServerConfig,
 ) -> Result<()> {
     eprintln!();
     eprintln!(
@@ -50,7 +51,7 @@ pub async fn run_disagg_router(
     eprintln!("  Listen: {}", listen_addr.bold());
     eprintln!("  Prefill workers: {:?}", prefill_addrs);
     eprintln!("  Decode workers: {:?}", decode_addrs);
-    eprintln!("  HTTP API: 0.0.0.0:{}", port);
+    eprintln!("  HTTP API: {}", server_config.addr());
     eprintln!();
 
     let num_prefill = prefill_addrs.len();
@@ -102,12 +103,6 @@ pub async fn run_disagg_router(
     );
 
     // Start HTTP server that uses the router to handle requests.
-    let server_config = crate::config::ServerConfig {
-        port,
-        host: "0.0.0.0".to_string(),
-        ..Default::default()
-    };
-
     // Build a scheduler backed by the router's token generation.
     // We use a simple no-model scheduler since the router delegates compute
     // to remote workers.
@@ -117,15 +112,18 @@ pub async fn run_disagg_router(
 /// Run a disaggregated prefill worker.
 ///
 /// The worker:
-/// 1. Loads the model from `model`.
+/// 1. Loads the model `settings` names.
 /// 2. Connects to the router via nexar.
 /// 3. Builds a prefill forward function over the loaded model.
 /// 4. Runs `PrefillWorker::run_loop()`.
 pub async fn run_disagg_prefill_worker(
-    model: String,
     router_addr: String,
     listen_addr: String,
+    settings: &ClusterSettings,
 ) -> Result<()> {
+    let model = settings
+        .require_model("disagg prefill")
+        .map_err(anyhow::Error::msg)?;
     eprintln!();
     eprintln!(
         "  {} v{}",
@@ -166,13 +164,13 @@ pub async fn run_disagg_prefill_worker(
             .ok_or_else(|| anyhow::anyhow!("Prefill worker could not find its rank in mesh"))?,
     );
 
-    // Load model.
+    // Load model on the `device` key's CUDA index.
     #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(0);
+    let device = boostr::CudaDevice::new(settings.cuda_index);
     #[cfg(not(feature = "cuda"))]
     let device = boostr::CpuDevice::new();
 
-    let model_path = resolve_model_path(&model);
+    let model_path = resolve_model_path(&model, &settings.model_dir);
     let (loaded_model, _blazr_config) =
         crate::loader::load_model::<ServerRuntime, _>(&model_path, &device)?;
     let model = Arc::new(loaded_model);
@@ -214,15 +212,18 @@ pub async fn run_disagg_prefill_worker(
 /// Run a disaggregated decode worker.
 ///
 /// The worker:
-/// 1. Loads the model from `model`.
+/// 1. Loads the model `settings` names.
 /// 2. Connects to the router via nexar.
 /// 3. Builds a decode step function over the loaded model.
 /// 4. Runs `DecodeWorker::run_loop()`.
 pub async fn run_disagg_decode_worker(
-    model: String,
     router_addr: String,
     listen_addr: String,
+    settings: &ClusterSettings,
 ) -> Result<()> {
+    let model = settings
+        .require_model("disagg decode")
+        .map_err(anyhow::Error::msg)?;
     eprintln!();
     eprintln!(
         "  {} v{}",
@@ -260,13 +261,13 @@ pub async fn run_disagg_decode_worker(
             .ok_or_else(|| anyhow::anyhow!("Decode worker could not find its rank in mesh"))?,
     );
 
-    // Load model.
+    // Load model on the `device` key's CUDA index.
     #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(0);
+    let device = boostr::CudaDevice::new(settings.cuda_index);
     #[cfg(not(feature = "cuda"))]
     let device = boostr::CpuDevice::new();
 
-    let model_path = resolve_model_path(&model);
+    let model_path = resolve_model_path(&model, &settings.model_dir);
     let (loaded_model, _blazr_config) =
         crate::loader::load_model::<ServerRuntime, _>(&model_path, &device)?;
     let model = Arc::new(loaded_model);

@@ -143,6 +143,16 @@ where
         config_from_detected(&detected)
     };
 
+    // Check the head split before any weight loads.
+    if let Some(attention) = &config.model.attention {
+        let heads = crate::engine::tensor_parallel::TpHeads {
+            num_heads: attention.num_heads,
+            num_kv_heads: attention.num_kv_heads.unwrap_or(attention.num_heads),
+        };
+        crate::engine::tensor_parallel::validate_tp_config(comm.world_size(), Some(heads))
+            .map_err(|e| anyhow!("{e}"))?;
+    }
+
     tracing::info!(
         "Loading tensor-parallel model (rank={}, world_size={})",
         comm.rank(),

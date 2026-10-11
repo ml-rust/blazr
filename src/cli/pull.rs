@@ -14,14 +14,9 @@ use crate::loader::hub_client::{sync_client, sync_get, sync_model};
 /// Threshold above which we show a byte-level copy progress bar (10 MB)
 const PROGRESS_BAR_THRESHOLD: u64 = 10 * 1024 * 1024;
 
-/// Pull model from HuggingFace Hub
-pub async fn pull(repo: String, file: Option<String>, output: Option<PathBuf>) -> Result<()> {
-    let output_dir = output.unwrap_or_else(|| {
-        std::env::var("BLAZR_MODEL_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./models"))
-    });
-
+/// Pull model from HuggingFace Hub into `output_dir`: `--output`, then
+/// `BLAZR_MODEL_DIR`, then `model_dir`, then `./models`.
+pub async fn pull(repo: String, file: Option<String>, output_dir: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&output_dir)?;
 
     eprintln!("{} from {}", "Downloading".green().bold(), repo.bold());

@@ -1,117 +1,125 @@
-//! Data parallelism: multi-replica inference with request-level sharding.
+//! Data parallelism: one model loaded once per replica, requests spread
+//! across the replicas.
 //!
-//! Runs multiple identical copies of a model (replicas) and distributes
-//! incoming requests across them. Supports round-robin and cache-aware routing.
+//! A replica is whatever serves one copy of the model. `blazr serve` uses
+//! an executor plus its batching scheduler. Tests use a mock. The
+//! [`CacheAwareRouter`] picks the replica for each request. The returned
+//! [`ReplicaLease`] counts the request against that replica until it drops.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use boostr::model::ModelClient;
-use boostr::ops::TensorOps;
-use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
-    TypeConversionOps, UnaryOps,
-};
+use super::cache_router::{CacheAwareRouter, RouteReason};
 
-use super::Executor;
-use crate::engine::cache_router::CacheAwareRouter;
-
-/// Data-parallel model serving across multiple replicas
-pub struct DataParallelGroup<R: Runtime<DType = DType>> {
-    /// Replicas of the same model
-    replicas: Vec<Arc<Executor<R>>>,
-    /// Cache-aware router (if enabled) or round-robin fallback
-    router: Router<R>,
-    /// Model name
+/// Replicas of one model and the router that spreads requests over them.
+#[derive(Debug)]
+pub struct DataParallelGroup<T> {
     model_name: String,
+    replicas: Vec<T>,
+    router: CacheAwareRouter,
 }
 
-enum Router<R: Runtime<DType = DType>> {
-    RoundRobin(AtomicUsize),
-    CacheAware(CacheAwareRouter<R>),
-}
-
-impl<R: Runtime<DType = DType>> DataParallelGroup<R>
-where
-    R::Client: TensorOps<R>
-        + ScalarOps<R>
-        + ConvOps<R>
-        + NormalizationOps<R>
-        + UnaryOps<R>
-        + ActivationOps<R>
-        + BinaryOps<R>
-        + TypeConversionOps<R>
-        + SamplingOps<R>
-        + boostr::GrammarDfaOps<R>
-        + ModelClient<R>
-        + boostr::quant::DequantOps<R>
-        + boostr::quant::QuantMatmulOps<R>,
-{
-    /// Create a new data-parallel group from pre-loaded replicas.
-    pub fn new(model_name: String, replicas: Vec<Arc<Executor<R>>>) -> Result<Self> {
-        if replicas.is_empty() {
-            return Err(anyhow!("DataParallelGroup requires at least one replica"));
-        }
-        Ok(Self {
-            replicas,
-            router: Router::RoundRobin(AtomicUsize::new(0)),
-            model_name,
-        })
-    }
-
-    /// Create with cache-aware routing
-    pub fn with_cache_aware_routing(
-        model_name: String,
-        replicas: Vec<Arc<Executor<R>>>,
-    ) -> Result<Self> {
-        if replicas.is_empty() {
-            return Err(anyhow!("DataParallelGroup requires at least one replica"));
-        }
-        let router = CacheAwareRouter::new(replicas.clone());
-        Ok(Self {
-            replicas,
-            router: Router::CacheAware(router),
-            model_name,
-        })
-    }
-
-    /// Select the best replica for a request.
+impl<T> DataParallelGroup<T> {
+    /// A group over `replicas` of `model_name`.
     ///
-    /// With round-robin: cycles through replicas.
-    /// With cache-aware: picks replica most likely to have warm KV cache for the prefix.
-    pub fn select(&self, prompt_prefix: Option<&str>) -> Arc<Executor<R>> {
-        match &self.router {
-            Router::RoundRobin(counter) => {
-                let idx = counter.fetch_add(1, Ordering::Relaxed) % self.replicas.len();
-                Arc::clone(&self.replicas[idx])
-            }
-            Router::CacheAware(router) => router.route(prompt_prefix),
+    /// # Errors
+    ///
+    /// An error when `replicas` is empty.
+    pub fn new(model_name: String, replicas: Vec<T>) -> Result<Self> {
+        if replicas.is_empty() {
+            return Err(anyhow!(
+                "a data-parallel group of '{model_name}' got no replica. Set \
+                 inference.data_parallel to 1 or more"
+            ));
         }
+        let router = CacheAwareRouter::new(replicas.len());
+        Ok(Self {
+            model_name,
+            replicas,
+            router,
+        })
     }
 
-    /// Number of replicas in this group
-    pub fn num_replicas(&self) -> usize {
-        self.replicas.len()
-    }
-
-    /// Model name
+    /// The model every replica serves.
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
 
-    /// Get all replicas
-    pub fn replicas(&self) -> &[Arc<Executor<R>>] {
+    /// The number of replicas.
+    pub fn num_replicas(&self) -> usize {
+        self.replicas.len()
+    }
+
+    /// Every replica, in device order.
+    pub fn replicas(&self) -> &[T] {
         &self.replicas
     }
 
-    /// Notify the router that a request with this prefix was served by a replica.
-    /// Only meaningful with cache-aware routing.
-    pub fn record_served(&self, replica_idx: usize, prompt_prefix: &str) {
-        if let Router::CacheAware(ref router) = self.router {
-            router.record(replica_idx, prompt_prefix);
+    /// Requests in flight on replica `index`.
+    pub fn active(&self, index: usize) -> usize {
+        self.router.active(index)
+    }
+
+    /// Pick the replica for `prompt_tokens` and count the request on it.
+    ///
+    /// The chosen replica is recorded as the holder of the prompt's
+    /// prefixes, so a later request that shares them goes there too.
+    pub fn select(self: &Arc<Self>, prompt_tokens: &[u32]) -> ReplicaLease<T> {
+        let (index, reason) = self.router.route(prompt_tokens);
+        self.router.acquire(index);
+        self.router.record(index, prompt_tokens);
+        ReplicaLease {
+            group: Arc::clone(self),
+            index,
+            reason,
         }
+    }
+}
+
+/// Route through `group` when it serves the request's model.
+///
+/// `serves` tells whether a replica serves the model the request named. It
+/// is read on the first replica. `None` means the request takes the
+/// single-executor path.
+pub fn route_through<T>(
+    group: Option<&Arc<DataParallelGroup<T>>>,
+    serves: impl FnOnce(&T) -> bool,
+    prompt_tokens: &[u32],
+) -> Option<ReplicaLease<T>> {
+    let group = group?;
+    let first = group.replicas.first()?;
+    serves(first).then(|| group.select(prompt_tokens))
+}
+
+/// One request's hold on a replica. Dropping it ends the request there.
+#[derive(Debug)]
+pub struct ReplicaLease<T> {
+    group: Arc<DataParallelGroup<T>>,
+    index: usize,
+    reason: RouteReason,
+}
+
+impl<T> ReplicaLease<T> {
+    /// The chosen replica's index.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Why the router chose this replica.
+    pub fn reason(&self) -> RouteReason {
+        self.reason
+    }
+
+    /// The chosen replica.
+    pub fn replica(&self) -> &T {
+        &self.group.replicas[self.index]
+    }
+}
+
+impl<T> Drop for ReplicaLease<T> {
+    fn drop(&mut self) {
+        self.group.router.release(self.index);
     }
 }
 
@@ -119,15 +127,88 @@ where
 mod tests {
     use super::*;
 
-    // Note: Full tests require model loading. These test the routing logic only.
+    /// A stand-in for an executor: a device name and a model name.
+    #[derive(Debug)]
+    struct MockReplica {
+        device: &'static str,
+        model: &'static str,
+    }
+
+    fn group(n: usize) -> Arc<DataParallelGroup<MockReplica>> {
+        const DEVICES: [&str; 4] = ["cpu:0", "cpu:1", "cpu:2", "cpu:3"];
+        let replicas = DEVICES[..n]
+            .iter()
+            .map(|&device| MockReplica {
+                device,
+                model: "tiny",
+            })
+            .collect();
+        Arc::new(DataParallelGroup::new("tiny".into(), replicas).expect("group"))
+    }
+
+    fn prompt(seed: u32, len: usize) -> Vec<u32> {
+        (0..len as u32).map(|i| seed * 10_000 + i).collect()
+    }
 
     #[test]
-    fn test_round_robin_counter() {
-        let counter = AtomicUsize::new(0);
-        let n = 3;
-        for expected in 0..9 {
-            let idx = counter.fetch_add(1, Ordering::Relaxed) % n;
-            assert_eq!(idx, expected % n);
-        }
+    fn an_empty_group_is_an_error() {
+        let err = DataParallelGroup::<MockReplica>::new("m".into(), Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("inference.data_parallel"), "{err}");
+    }
+
+    #[test]
+    fn concurrent_cold_requests_spread_least_loaded() {
+        let group = group(3);
+        let leases: Vec<_> = (0..3).map(|i| group.select(&prompt(i, 64))).collect();
+        let mut used: Vec<usize> = leases.iter().map(ReplicaLease::index).collect();
+        used.sort_unstable();
+        assert_eq!(used, vec![0, 1, 2]);
+        assert!(leases
+            .iter()
+            .all(|l| l.reason() == RouteReason::LeastLoaded));
+        // A fourth cold request joins a replica with one request, not two.
+        let fourth = group.select(&prompt(9, 64));
+        assert_eq!(group.active(fourth.index()), 2);
+    }
+
+    #[test]
+    fn a_follow_up_with_a_shared_prefix_returns_to_its_warm_replica() {
+        let group = group(4);
+        let conversation = prompt(5, 96);
+        let first = group.select(&conversation);
+        let warm = first.index();
+        drop(first);
+
+        // Load the warm replica a little. The prefix still wins.
+        let _busy = group.select(&conversation);
+        let mut next_turn = conversation.clone();
+        next_turn.extend(prompt(6, 30));
+        let follow_up = group.select(&next_turn);
+        assert_eq!(follow_up.index(), warm);
+        assert_eq!(follow_up.reason(), RouteReason::Warm(96));
+        assert_eq!(
+            follow_up.replica().device,
+            ["cpu:0", "cpu:1", "cpu:2", "cpu:3"][warm]
+        );
+    }
+
+    #[test]
+    fn a_lease_counts_until_it_drops() {
+        let group = group(2);
+        let lease = group.select(&prompt(1, 32));
+        let index = lease.index();
+        assert_eq!(group.active(index), 1);
+        drop(lease);
+        assert_eq!(group.active(index), 0);
+    }
+
+    #[test]
+    fn route_through_takes_the_group_only_for_its_model() {
+        let group = group(2);
+        let tokens = prompt(1, 32);
+        assert!(route_through::<MockReplica>(None, |_| true, &tokens).is_none());
+        assert!(route_through(Some(&group), |r| r.model == "other", &tokens).is_none());
+        let lease = route_through(Some(&group), |r| r.model == "tiny", &tokens);
+        assert!(lease.is_some_and(|l| l.replica().model == "tiny"));
     }
 }

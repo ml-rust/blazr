@@ -12,9 +12,9 @@ pub struct ResponsesRequest {
     pub model: String,
     /// Input: string prompt or array of input items
     pub input: ResponsesInput,
-    /// Max output tokens
-    #[serde(default = "default_max_tokens")]
-    pub max_output_tokens: usize,
+    /// Max output tokens. Unset takes the live `generation.max_tokens`.
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
     /// Temperature
     #[serde(default)]
     pub temperature: Option<f32>,
@@ -39,10 +39,6 @@ pub struct ResponsesRequest {
     #[serde(default)]
     #[allow(dead_code)]
     pub metadata: Option<serde_json::Value>,
-}
-
-fn default_max_tokens() -> usize {
-    4096
 }
 
 /// Input can be a string or array of input items
@@ -277,7 +273,7 @@ mod tests {
         }"#;
         let req: ResponsesRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.instructions.unwrap(), "You are helpful");
-        assert_eq!(req.max_output_tokens, 100);
+        assert_eq!(req.max_output_tokens, Some(100));
     }
 
     #[test]

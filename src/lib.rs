@@ -39,7 +39,7 @@ pub mod tls;
 pub mod tokenizer;
 
 // Re-export key types
-pub use config::{BlazrConfig, GenerationConfig, ServerConfig, UserConfig};
+pub use config::{BlazrConfig, FileConfig, GenerationConfig, ServerConfig};
 pub use engine::{BatchEngine, Executor, RequestScheduler, Scheduler};
 pub use loader::{load_model, ModelFormat, ModelSource};
 pub use model::{ChatMessage, ChatTemplate};

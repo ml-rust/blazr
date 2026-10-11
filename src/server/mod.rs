@@ -16,6 +16,7 @@ mod chat;
 mod chat_types;
 mod chat_vision;
 mod completions;
+mod concurrency;
 mod config_watch;
 mod embeddings;
 mod encoding;
@@ -35,9 +36,12 @@ mod responses;
 mod responses_media;
 mod responses_types;
 mod routes;
+mod scheduled;
 pub mod slo;
 mod startup;
 mod streaming;
+#[cfg(test)]
+pub(crate) mod test_recorder;
 mod tls;
 mod tool_calls;
 mod tools;
@@ -48,5 +52,5 @@ pub use reasoning::{
     ReasoningTags,
 };
 pub use routes::api_routes;
-pub use startup::{start, start_with_batch};
+pub use startup::{start, start_with_batch, LiveSettings};
 pub use streaming::{create_chat_stream, create_completion_stream, StreamToken};

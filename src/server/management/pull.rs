@@ -2,7 +2,7 @@
 //! NDJSON progress.
 
 use axum::{
-    extract::Json,
+    extract::{Json, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -10,17 +10,24 @@ use hf_hub::repository::RepoTypeModel;
 use hf_hub::HFRepository;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::loader::hub_client::{async_client, async_get, async_model};
+use crate::server::handlers::AppState;
 
-/// POST /api/pull — Pull model from HuggingFace with streaming progress
-pub async fn pull_model(Json(request): Json<PullRequest>) -> Response {
+/// POST /api/pull — Pull model from HuggingFace with streaming progress.
+/// The model lands in the scheduler's model directory.
+pub async fn pull_model(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PullRequest>,
+) -> Response {
     use axum::body::Body;
     use futures::stream;
 
     let (tx, rx) = mpsc::channel::<String>(32);
     let repo = request.name.clone();
+    let model_dir = state.scheduler.model_dir().to_path_buf();
 
     // Spawn download in background
     tokio::spawn(async move {
@@ -35,9 +42,6 @@ pub async fn pull_model(Json(request): Json<PullRequest>) -> Response {
         let repo_api = async_model(&client, &repo);
 
         let model_name = repo.split('/').next_back().unwrap_or(&repo);
-        let model_dir = std::env::var("BLAZR_MODEL_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("./models"));
         let dest = model_dir.join(model_name);
         let _ = tokio::fs::create_dir_all(&dest).await;
 

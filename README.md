@@ -248,15 +248,15 @@ blazr sound-review  Review rendered sound effects (audio)
 
 | Flag            | Default  | Description                                                       |
 | --------------- | -------- | ----------------------------------------------------------------- |
-| `--model`       | required | Local path or HuggingFace model ID                                |
-| `--prompt`      | required | Input text                                                        |
+| `--model`       | `default_model` | Model name or path                                             |
+| `--prompt`      | none     | Input text. Required for `generate`.                              |
 | `--max-tokens`  | 2048     | Maximum tokens to generate                                        |
-| `--temperature` | 0.7      | Sampling temperature (0 = greedy)                                 |
-| `--top-p`       | 0.9      | Nucleus sampling threshold                                        |
+| `--temperature` | 1.0      | Sampling temperature (0 = greedy)                                 |
+| `--top-p`       | 1.0      | Nucleus sampling threshold                                        |
 | `--top-k`       | 0        | Top-k sampling (0 = off)                                          |
-| `--cpu`         | false    | Force CPU inference                                               |
+| `--cpu`         | `cuda:0` | Force CPU inference. Default device: `device` config key, else `cuda:0` |
 | `--mmproj`      | none     | Qwen3-VL mmproj GGUF for image inputs (`qwen35` models only)      |
-| `--image`       | none     | Image file placed before the prompt; needs `--mmproj`; repeatable |
+| `--image`       | none     | Image file placed before the prompt. Needs `--mmproj`. Repeatable. `generate` only. |
 
 ### Server Options
 
@@ -265,6 +265,7 @@ blazr sound-review  Review rendered sound effects (audio)
 | `--model`                                   | none               | Local path or name under `$BLAZR_MODEL_DIR` (default `./models`); without it, models load on demand            |
 | `--port`                                    | 8080               | Port to listen on                                                                                              |
 | `--host`                                    | 0.0.0.0            | Host to bind to                                                                                                |
+| `--data-parallel`                           | 1                  | Copies of the start model, one per CUDA device or CPU copy. Above 1 needs `--model` and tensor parallelism at 1. |
 | `--chat-template`                           | model's own        | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file |
 | `--mmproj`                                  | none               | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model; enables `image_url` parts in `/v1/chat/completions`       |
 | `--image-min-tokens` / `--image-max-tokens` | mmproj values      | Token range every image is resized into                                                                        |

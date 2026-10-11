@@ -2,36 +2,39 @@
 
 use clap::Parser;
 
-/// Shared sampling parameters for text generation
+/// Shared sampling parameters for text generation. An unset flag takes the
+/// `generation` section of `~/.blazr/config.yaml`, then the built-in default.
 #[derive(Parser, Debug, Clone)]
 pub struct SamplingArgs {
-    /// Maximum tokens to generate
-    #[arg(long, default_value = "2048")]
-    pub max_tokens: usize,
+    /// Maximum tokens to generate [default: generation.max_tokens, else 2048]
+    #[arg(long)]
+    pub max_tokens: Option<usize>,
 
-    /// Sampling temperature (0 = greedy)
-    #[arg(long, default_value = "0.7")]
-    pub temperature: f32,
+    /// Sampling temperature, 0 = greedy [default: generation.temperature, else 1.0]
+    #[arg(long)]
+    pub temperature: Option<f32>,
 
-    /// Top-p nucleus sampling
-    #[arg(long, default_value = "0.9")]
-    pub top_p: f32,
+    /// Top-p nucleus sampling [default: generation.top_p, else 1.0]
+    #[arg(long)]
+    pub top_p: Option<f32>,
 
-    /// Top-k sampling (0 = disabled)
-    #[arg(long, default_value = "0")]
-    pub top_k: usize,
+    /// Top-k sampling, 0 = off [default: generation.top_k, else 0]
+    #[arg(long)]
+    pub top_k: Option<usize>,
 
-    /// Min-p sampling threshold (filters tokens with prob < min_p * max_prob)
-    #[arg(long, default_value = "0.05")]
-    pub min_p: f32,
+    /// Min-p threshold: drops tokens with prob < min_p * max_prob
+    /// [default: generation.min_p, else 0.05]
+    #[arg(long)]
+    pub min_p: Option<f32>,
 
-    /// Repetition penalty (1.0 = no penalty)
-    #[arg(long, default_value = "1.1")]
-    pub repeat_penalty: f32,
+    /// Repetition penalty, 1.0 = off [default: generation.repeat_penalty, else 1.1]
+    #[arg(long)]
+    pub repeat_penalty: Option<f32>,
 
-    /// Number of recent tokens for repetition penalty window
-    #[arg(long, default_value = "64")]
-    pub repeat_last_n: usize,
+    /// Recent tokens the repetition penalty covers
+    /// [default: generation.repeat_last_n, else 64]
+    #[arg(long)]
+    pub repeat_last_n: Option<usize>,
 }
 
 /// Vision tower flags shared by `run`, `generate`, `chat` and `serve`.
@@ -69,21 +72,22 @@ pub struct RuntimeArgs {
     #[arg(long, default_value = "0", allow_hyphen_values = true)]
     pub gpu_layers: i32,
 
-    /// Use CPU instead of GPU
+    /// Use CPU instead of GPU [default: the `device` key, else cuda:0]
     #[arg(long)]
     pub cpu: bool,
 
-    /// Context window size (like Ollama's num_ctx). Default: 2048.
-    /// This controls the initial KV cache allocation. The cache will grow
-    /// dynamically if needed (up to the model's max_position_embeddings).
-    #[arg(long, default_value = "2048")]
-    pub num_ctx: usize,
+    /// Initial KV cache size, like Ollama's num_ctx. The cache grows as
+    /// needed, up to the model's maximum. [default: num_ctx, else 2048]
+    #[arg(long)]
+    pub num_ctx: Option<usize>,
 
     /// Use paged attention (vLLM-style block-based KV cache)
+    /// [default: inference.paged_attention]
     #[arg(long)]
     pub paged_attention: bool,
 
     /// Use compute graph capture for greedy decode (requires --temperature 0)
+    /// [default: inference.graphs]
     #[arg(long)]
     pub graphs: bool,
 
@@ -92,9 +96,9 @@ pub struct RuntimeArgs {
 }
 
 impl SamplingArgs {
-    /// Convert to a GenerationConfig
-    pub fn into_gen_config(self) -> crate::config::GenerationConfig {
-        crate::config::GenerationConfig {
+    /// The given flags. `verbose_prompt` is the `-v` or `--verbose-prompt` switch.
+    pub fn into_flags(self, verbose_prompt: bool) -> crate::config::GenerationFlags {
+        crate::config::GenerationFlags {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
@@ -102,7 +106,7 @@ impl SamplingArgs {
             min_p: self.min_p,
             repeat_penalty: self.repeat_penalty,
             repeat_last_n: self.repeat_last_n,
-            ..Default::default()
+            verbose_prompt,
         }
     }
 }

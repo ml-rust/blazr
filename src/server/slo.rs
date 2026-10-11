@@ -1,190 +1,244 @@
-//! Latency SLO (Service Level Objective) enforcement.
+//! Latency SLO (Service Level Objective) checks.
 //!
-//! Tracks rolling percentiles for TTFT, ITL, and end-to-end latency.
-//! Logs warnings and increments Prometheus counters on SLO violations.
+//! The checker keeps rolling windows of TTFT, ITL and end-to-end latency.
+//! Each new sample reads the configured percentiles of its window. Each
+//! percentile above its `server.slo` threshold logs a warning and adds 1 to
+//! `blazr_slo_violations_total{metric, percentile}`. The P95 TTFT and ITL
+//! targets also drive [`SloBatchPolicy`], which holds batch growth.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::Instant;
 
+use super::metrics::names::SLO_VIOLATIONS_TOTAL;
 use crate::config::LatencySlo;
+use crate::engine::latency_window::LatencyWindow;
+use crate::engine::SloBatchPolicy;
 
-/// SLO metric name for Prometheus counter
-const SLO_VIOLATIONS_TOTAL: &str = "blazr_slo_violations_total";
-
-/// Rolling window size for percentile estimation
+/// Samples each checker window holds.
 const WINDOW_SIZE: usize = 1000;
 
-/// SLO checker that tracks recent latency samples and checks against thresholds.
+/// The process's SLO state, set once at server start from `server.slo`.
+static STATE: OnceLock<SloState> = OnceLock::new();
+
+struct SloState {
+    checker: SloChecker,
+    policy: Option<Arc<SloBatchPolicy>>,
+}
+
+/// Check every later latency sample against `slo`, and return the batch
+/// policy its P95 targets set, if any.
+///
+/// `server.slo` is a restart-only key. A second call with the same
+/// thresholds returns the first policy. A call with other thresholds keeps
+/// the first ones and logs a warning.
+pub fn install(slo: LatencySlo) -> Option<Arc<SloBatchPolicy>> {
+    let state = STATE.get_or_init(|| SloState {
+        policy: SloBatchPolicy::from_slo(&slo).map(Arc::new),
+        checker: SloChecker::new(slo.clone()),
+    });
+    if state.checker.config != slo {
+        tracing::warn!("server.slo is already set for this process. The first thresholds stay");
+    }
+    state.policy.clone()
+}
+
+/// Register a zero series for each configured threshold. Call this once the
+/// process recorder is installed, so alerts see the series before a breach.
+pub fn publish() {
+    if let Some(state) = STATE.get() {
+        state.checker.publish();
+    }
+}
+
+/// Record a time to first token, when an SLO is installed.
+pub fn observe_ttft_ms(ms: f64) {
+    if let Some(state) = STATE.get() {
+        state.checker.record_ttft_ms(ms);
+        if let Some(policy) = &state.policy {
+            policy.observe_ttft_ms(ms);
+        }
+    }
+}
+
+/// Record an inter-token latency, when an SLO is installed.
+pub fn observe_itl_ms(ms: f64) {
+    if let Some(state) = STATE.get() {
+        state.checker.record_itl_ms(ms);
+        if let Some(policy) = &state.policy {
+            policy.observe_itl_ms(ms);
+        }
+    }
+}
+
+/// Record an end-to-end request latency, when an SLO is installed.
+pub fn observe_e2e_ms(ms: f64) {
+    if let Some(state) = STATE.get() {
+        state.checker.record_e2e_ms(ms);
+    }
+}
+
+/// Lock a window. A panic in another holder leaves plain samples behind,
+/// so the data stays usable.
+fn lock(window: &Mutex<LatencyWindow>) -> MutexGuard<'_, LatencyWindow> {
+    window.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The latency kinds and the percentiles each one checks.
+const TTFT: &str = "ttft";
+const ITL: &str = "itl";
+const E2E: &str = "e2e";
+
+/// Checks each latency sample against the configured thresholds.
 pub struct SloChecker {
     config: LatencySlo,
-    ttft_samples: Mutex<RollingWindow>,
-    itl_samples: Mutex<RollingWindow>,
-    e2e_samples: Mutex<RollingWindow>,
+    ttft_samples: Mutex<LatencyWindow>,
+    itl_samples: Mutex<LatencyWindow>,
+    e2e_samples: Mutex<LatencyWindow>,
 }
 
 impl SloChecker {
     pub fn new(config: LatencySlo) -> Self {
-        // Register the SLO violations counter
-        metrics::describe_counter!(SLO_VIOLATIONS_TOTAL, "Total SLO violations detected");
-
         Self {
             config,
-            ttft_samples: Mutex::new(RollingWindow::new(WINDOW_SIZE)),
-            itl_samples: Mutex::new(RollingWindow::new(WINDOW_SIZE)),
-            e2e_samples: Mutex::new(RollingWindow::new(WINDOW_SIZE)),
+            ttft_samples: Mutex::new(LatencyWindow::new(WINDOW_SIZE, None)),
+            itl_samples: Mutex::new(LatencyWindow::new(WINDOW_SIZE, None)),
+            e2e_samples: Mutex::new(LatencyWindow::new(WINDOW_SIZE, None)),
         }
     }
 
-    /// Record a TTFT sample (in milliseconds) and check SLO
+    /// Every (metric, percentile, threshold) the config sets.
+    fn thresholds(&self) -> Vec<(&'static str, usize, u64)> {
+        let c = &self.config;
+        [
+            (TTFT, 50, c.ttft_p50_ms),
+            (TTFT, 95, c.ttft_p95_ms),
+            (TTFT, 99, c.ttft_p99_ms),
+            (ITL, 50, c.itl_p50_ms),
+            (ITL, 95, c.itl_p95_ms),
+            (ITL, 99, c.itl_p99_ms),
+            (E2E, 99, c.e2e_p99_ms),
+        ]
+        .into_iter()
+        .filter_map(|(metric, p, ms)| ms.map(|ms| (metric, p, ms)))
+        .collect()
+    }
+
+    /// Register a zero counter series for each configured threshold.
+    pub fn publish(&self) {
+        for (metric, percentile, _) in self.thresholds() {
+            violations(metric, percentile).increment(0);
+        }
+    }
+
+    /// Record a TTFT sample in milliseconds and check its thresholds.
     pub fn record_ttft_ms(&self, ttft_ms: f64) {
-        let mut window = self.ttft_samples.lock().unwrap();
-        window.push(ttft_ms);
-
-        if window.len() >= 100 {
-            self.check_percentile(&window, ttft_ms, "ttft", self.config.ttft_p50_ms, 50);
-            self.check_percentile(&window, ttft_ms, "ttft", self.config.ttft_p95_ms, 95);
-            self.check_percentile(&window, ttft_ms, "ttft", self.config.ttft_p99_ms, 99);
-        }
+        self.record(&self.ttft_samples, TTFT, ttft_ms);
     }
 
-    /// Record an ITL sample (in milliseconds) and check SLO
+    /// Record an ITL sample in milliseconds and check its thresholds.
     pub fn record_itl_ms(&self, itl_ms: f64) {
-        let mut window = self.itl_samples.lock().unwrap();
-        window.push(itl_ms);
-
-        if window.len() >= 100 {
-            self.check_percentile(&window, itl_ms, "itl", self.config.itl_p50_ms, 50);
-            self.check_percentile(&window, itl_ms, "itl", self.config.itl_p95_ms, 95);
-            self.check_percentile(&window, itl_ms, "itl", self.config.itl_p99_ms, 99);
-        }
+        self.record(&self.itl_samples, ITL, itl_ms);
     }
 
-    /// Record an end-to-end latency sample (in milliseconds) and check SLO
+    /// Record an end-to-end latency sample in milliseconds and check it.
     pub fn record_e2e_ms(&self, e2e_ms: f64) {
-        let mut window = self.e2e_samples.lock().unwrap();
-        window.push(e2e_ms);
-
-        if window.len() >= 100 {
-            self.check_percentile(&window, e2e_ms, "e2e", self.config.e2e_p99_ms, 99);
-        }
+        self.record(&self.e2e_samples, E2E, e2e_ms);
     }
 
-    fn check_percentile(
-        &self,
-        window: &RollingWindow,
-        _sample: f64,
-        metric: &str,
-        threshold: Option<u64>,
-        percentile: usize,
-    ) {
-        if let Some(threshold_ms) = threshold {
-            let actual = window.percentile(percentile);
+    fn record(&self, window: &Mutex<LatencyWindow>, metric: &str, sample_ms: f64) {
+        let mut window = lock(window);
+        window.push(Instant::now(), sample_ms);
+        for (kind, percentile, threshold_ms) in self.thresholds() {
+            if kind != metric {
+                continue;
+            }
+            let Some(actual) = window.percentile(percentile) else {
+                continue;
+            };
             if actual > threshold_ms as f64 {
                 tracing::warn!(
-                    metric = metric,
-                    percentile = format!("p{}", percentile).as_str(),
-                    actual_ms = format!("{:.1}", actual).as_str(),
-                    threshold_ms = threshold_ms,
+                    metric,
+                    percentile = format!("p{percentile}").as_str(),
+                    actual_ms = format!("{actual:.1}").as_str(),
+                    threshold_ms,
                     "SLO violation"
                 );
-                metrics::counter!(
-                    SLO_VIOLATIONS_TOTAL,
-                    "metric" => metric.to_string(),
-                    "percentile" => format!("p{}", percentile)
-                )
-                .increment(1);
+                violations(kind, percentile).increment(1);
             }
         }
     }
 }
 
-/// Fixed-size rolling window for percentile estimation
-struct RollingWindow {
-    samples: Vec<f64>,
-    max_size: usize,
-}
-
-impl RollingWindow {
-    fn new(max_size: usize) -> Self {
-        Self {
-            samples: Vec::with_capacity(max_size),
-            max_size,
-        }
-    }
-
-    fn push(&mut self, value: f64) {
-        if self.samples.len() >= self.max_size {
-            self.samples.remove(0);
-        }
-        self.samples.push(value);
-    }
-
-    fn len(&self) -> usize {
-        self.samples.len()
-    }
-
-    /// Compute approximate percentile (0-100)
-    fn percentile(&self, p: usize) -> f64 {
-        if self.samples.is_empty() {
-            return 0.0;
-        }
-        let mut sorted = self.samples.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = (p as f64 / 100.0 * (sorted.len() - 1) as f64) as usize;
-        sorted[idx.min(sorted.len() - 1)]
-    }
+/// The violation counter series for one metric and percentile.
+fn violations(metric: &'static str, percentile: usize) -> metrics::Counter {
+    metrics::counter!(
+        SLO_VIOLATIONS_TOTAL,
+        "metric" => metric,
+        "percentile" => format!("p{percentile}")
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::test_recorder::TestRecorder;
 
-    #[test]
-    fn test_rolling_window_percentile() {
-        let mut w = RollingWindow::new(100);
-        for i in 1..=100 {
-            w.push(i as f64);
-        }
-        assert!((w.percentile(50) - 50.0).abs() < 2.0);
-        assert!((w.percentile(95) - 95.0).abs() < 2.0);
-        assert!((w.percentile(99) - 99.0).abs() < 2.0);
-    }
-
-    #[test]
-    fn test_rolling_window_eviction() {
-        let mut w = RollingWindow::new(10);
-        for i in 0..20 {
-            w.push(i as f64);
-        }
-        assert_eq!(w.len(), 10);
-        // Should contain 10..20
-        assert_eq!(w.samples[0], 10.0);
-    }
-
-    #[test]
-    fn test_rolling_window_empty() {
-        let w = RollingWindow::new(10);
-        assert_eq!(w.percentile(50), 0.0);
-    }
-
-    #[test]
-    fn test_slo_checker_no_violation() {
-        // Install a test recorder
-        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
-
-        let config = LatencySlo {
-            ttft_p50_ms: Some(1000),
-            ttft_p95_ms: None,
+    fn slo() -> LatencySlo {
+        LatencySlo {
+            ttft_p50_ms: None,
+            ttft_p95_ms: Some(100),
             ttft_p99_ms: None,
             itl_p50_ms: None,
-            itl_p95_ms: None,
+            itl_p95_ms: Some(20),
             itl_p99_ms: None,
-            e2e_p99_ms: None,
-        };
-        let checker = SloChecker::new(config);
-        // Record 100 samples all under threshold
-        for _ in 0..100 {
-            checker.record_ttft_ms(50.0);
+            e2e_p99_ms: Some(1000),
         }
-        // No panic = no violation logged (we can't easily assert on tracing output)
+    }
+
+    fn count(recorder: &TestRecorder, metric: &str, percentile: &str) -> Option<f64> {
+        recorder.value(
+            SLO_VIOLATIONS_TOTAL,
+            &[("metric", metric), ("percentile", percentile)],
+        )
+    }
+
+    #[test]
+    fn samples_under_the_thresholds_count_nothing() {
+        let recorder = TestRecorder::install();
+        let checker = SloChecker::new(slo());
+        checker.publish();
+        for _ in 0..10 {
+            checker.record_ttft_ms(50.0);
+            checker.record_itl_ms(5.0);
+            checker.record_e2e_ms(500.0);
+        }
+        assert_eq!(count(&recorder, "ttft", "p95"), Some(0.0));
+        assert_eq!(count(&recorder, "itl", "p95"), Some(0.0));
+        assert_eq!(count(&recorder, "e2e", "p99"), Some(0.0));
+        // Unconfigured thresholds have no series.
+        assert_eq!(count(&recorder, "ttft", "p50"), None);
+    }
+
+    #[test]
+    fn the_first_breaching_request_counts_for_each_metric() {
+        let recorder = TestRecorder::install();
+        let checker = SloChecker::new(slo());
+        checker.record_ttft_ms(250.0);
+        checker.record_itl_ms(45.0);
+        checker.record_e2e_ms(4000.0);
+        assert_eq!(count(&recorder, "ttft", "p95"), Some(1.0));
+        assert_eq!(count(&recorder, "itl", "p95"), Some(1.0));
+        assert_eq!(count(&recorder, "e2e", "p99"), Some(1.0));
+    }
+
+    #[test]
+    fn one_slow_sample_among_many_fast_ones_keeps_p95_under_target() {
+        let recorder = TestRecorder::install();
+        let checker = SloChecker::new(slo());
+        for _ in 0..99 {
+            checker.record_ttft_ms(10.0);
+        }
+        checker.record_ttft_ms(500.0);
+        assert_eq!(count(&recorder, "ttft", "p95"), None);
     }
 }

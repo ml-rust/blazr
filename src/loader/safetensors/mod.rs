@@ -6,6 +6,7 @@ mod loaders;
 mod offloading;
 mod regular;
 
+pub use config::model_config_inference;
 pub use loaders::{
     load_safetensors, load_safetensors_tp, load_safetensors_with_config,
     load_safetensors_with_offloading,

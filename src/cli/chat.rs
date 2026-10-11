@@ -6,7 +6,8 @@ use anyhow::Result;
 use colored::Colorize;
 use futures::StreamExt;
 
-use crate::config::{GenerationConfig, VisionOverrides};
+use super::LoadSettings;
+use crate::config::GenerationConfig;
 use crate::engine::vision_tower::{IMAGE_MARKER_TEXT, MARKER_NAMES};
 use crate::engine::Executor;
 use crate::loader::{self, detect_model_source, ModelFormat};
@@ -20,31 +21,23 @@ type ChatRuntime = boostr::CudaRuntime;
 #[cfg(not(feature = "cuda"))]
 type ChatRuntime = boostr::CpuRuntime;
 
-/// Run interactive multi-turn chat
-#[allow(clippy::too_many_arguments)]
+/// Run interactive multi-turn chat. `gen_config` is resolved from the
+/// flags over the user config file. `cuda_index` comes from `device`.
 pub async fn chat(
     model: String,
     system: Option<String>,
     chat_template: Option<String>,
-    max_tokens: usize,
-    temperature: f32,
-    top_p: f32,
-    num_ctx: usize,
-    verbose: bool,
-    vision: VisionOverrides,
+    gen_config: GenerationConfig,
+    cuda_index: usize,
+    load: LoadSettings,
 ) -> Result<()> {
-    let gen_config = GenerationConfig {
-        max_tokens,
-        temperature,
-        top_p,
-        verbose_prompt: verbose,
-        ..Default::default()
-    };
-
     #[cfg(feature = "cuda")]
-    let executor = load_cuda(&model, num_ctx, &vision)?;
+    let executor = load_cuda(&model, cuda_index, &load)?;
     #[cfg(not(feature = "cuda"))]
-    let executor = load_cpu(&model, num_ctx, &vision)?;
+    let executor = {
+        let _ = cuda_index;
+        load_cpu(&model, &load)?
+    };
 
     // Detect chat template
     let model_path = std::path::Path::new(&model);
@@ -267,7 +260,7 @@ pub async fn chat(
 
 /// Load model from any format, detecting source and dispatching to the correct loader.
 macro_rules! load_model_from_source {
-    ($model:expr, $device:expr, $num_ctx:expr, $vision:expr) => {{
+    ($model:expr, $device:expr, $load:expr) => {{
         let source = detect_model_source(std::path::Path::new($model))?;
         let (loaded_model, mut config, tokenizer) = match source.format {
             ModelFormat::Gguf => {
@@ -281,19 +274,15 @@ macro_rules! load_model_from_source {
                 (m, c, tok)
             }
         };
-        $vision.apply(&mut config.inference);
-        Executor::new(loaded_model, config, tokenizer, $device, $num_ctx)?
+        $load.apply(&mut config.inference)?;
+        Executor::new(loaded_model, config, tokenizer, $device, $load.num_ctx)?
             .with_configured_vision_tower()
     }};
 }
 
 #[cfg(feature = "cuda")]
-fn load_cuda(
-    model: &str,
-    num_ctx: usize,
-    vision: &VisionOverrides,
-) -> Result<Executor<ChatRuntime>> {
-    let device = boostr::CudaDevice::new(0);
+fn load_cuda(model: &str, cuda_index: usize, load: &LoadSettings) -> Result<Executor<ChatRuntime>> {
+    let device = boostr::CudaDevice::new(cuda_index);
 
     // Pre-load CUDA modules
     let client = boostr::CudaClient::new(device.clone())
@@ -301,18 +290,14 @@ fn load_cuda(
     boostr::preload_inference_modules(&client)
         .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
 
-    load_model_from_source!(model, device, num_ctx, vision)
+    load_model_from_source!(model, device, load)
 }
 
 // Gated to mirror `load_cuda` above: each backend gets its own function
 // instead of an `unreachable!()` branch for the other, so no path panics
 // on a case the compiler can already rule out.
 #[cfg(not(feature = "cuda"))]
-fn load_cpu(
-    model: &str,
-    num_ctx: usize,
-    vision: &VisionOverrides,
-) -> Result<Executor<ChatRuntime>> {
+fn load_cpu(model: &str, load: &LoadSettings) -> Result<Executor<ChatRuntime>> {
     let device = boostr::CpuDevice::new();
-    load_model_from_source!(model, device, num_ctx, vision)
+    load_model_from_source!(model, device, load)
 }

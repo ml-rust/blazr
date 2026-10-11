@@ -2,7 +2,25 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use blazr::cli::{Cli, Commands};
+use blazr::cli::{Cli, Commands, LoadSettings};
+use blazr::config::{resolve, resolve_serve, EnvVars, FileConfig, GenerationFlags, ServeFlags};
+#[cfg(feature = "distributed")]
+use blazr::config::{resolve_cluster, ClusterFlags, ClusterSettings};
+
+/// `swarm` and `disagg` settings: flags over the environment and the file.
+#[cfg(feature = "distributed")]
+fn cluster_settings(flags: ClusterFlags) -> Result<ClusterSettings> {
+    let file = FileConfig::load()?;
+    let env = EnvVars::from_process()?;
+    resolve_cluster(flags, &env, &file).map_err(anyhow::Error::msg)
+}
+
+/// The model directory: `flag`, `BLAZR_MODEL_DIR`, `model_dir`, `./models`.
+fn model_dir(flag: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
+    let file = FileConfig::load()?;
+    let env = EnvVars::from_process()?;
+    Ok(resolve::resolve_model_dir(flag, &env, &file))
+}
 
 /// Whether `command` logs to standard error: the narration commands print
 /// their report on standard output.
@@ -63,14 +81,16 @@ async fn main() -> Result<()> {
             sampling,
             runtime,
         } => {
-            let mut gen_config = sampling.into_gen_config();
-            gen_config.verbose_prompt = verbose;
+            let file = FileConfig::load()?;
+            let model = resolve::require_model(model, &file).map_err(anyhow::Error::msg)?;
+            let gen_config =
+                resolve::resolve_generation(&sampling.into_flags(verbose), &file.generation);
             blazr::cli::run(
                 model,
                 prompt,
                 chat_template,
                 gen_config,
-                runtime,
+                runtime.resolve(&file),
                 Vec::new(),
             )
             .await?;
@@ -80,6 +100,7 @@ async fn main() -> Result<()> {
             chat_template,
             port,
             host,
+            data_parallel,
             api_key,
             api_key_file,
             tls_cert,
@@ -101,15 +122,27 @@ async fn main() -> Result<()> {
             reasoning_format,
             vision,
         } => {
-            blazr::cli::serve(
+            let file_path = FileConfig::path();
+            let file = FileConfig::load()?;
+            let env = EnvVars::from_process()?;
+            let flags = ServeFlags {
                 model,
-                chat_template,
                 port,
                 host,
-                api_key,
-                api_key_file,
                 tls_cert,
                 tls_key,
+                api_key,
+                reasoning_format,
+                voice_dir,
+                data_parallel,
+            };
+            let settings = resolve_serve(flags, &env, &file).map_err(anyhow::Error::msg)?;
+            blazr::cli::serve(
+                settings,
+                file,
+                file_path,
+                chat_template,
+                api_key_file,
                 vision_models,
                 #[cfg(feature = "audio")]
                 asr_models,
@@ -123,20 +156,18 @@ async fn main() -> Result<()> {
                 !tts_no_continuous_batching,
                 #[cfg(feature = "audio")]
                 tts_continuous_capacity,
-                voice_dir,
-                reasoning_format,
                 vision.into_overrides(),
             )
             .await?;
         }
         Commands::List { verbose } => {
-            blazr::cli::list(verbose).await?;
+            blazr::cli::list(verbose, model_dir(None)?).await?;
         }
         Commands::Info { model } => {
-            blazr::cli::info(model).await?;
+            blazr::cli::info(model, model_dir(None)?).await?;
         }
         Commands::Pull { repo, file, output } => {
-            blazr::cli::pull(repo, file, output).await?;
+            blazr::cli::pull(repo, file, model_dir(output)?).await?;
         }
         Commands::Generate {
             model,
@@ -146,8 +177,11 @@ async fn main() -> Result<()> {
             verbose_prompt,
             images,
         } => {
-            let mut gen_config = sampling.into_gen_config();
-            gen_config.verbose_prompt = verbose_prompt;
+            let file = FileConfig::load()?;
+            let model = resolve::require_model(model, &file).map_err(anyhow::Error::msg)?;
+            let gen_config =
+                resolve::resolve_generation(&sampling.into_flags(verbose_prompt), &file.generation);
+            let runtime = runtime.resolve(&file);
             blazr::cli::run(model, Some(prompt), None, gen_config, runtime, images).await?;
         }
         Commands::Chat {
@@ -161,18 +195,19 @@ async fn main() -> Result<()> {
             verbose,
             vision,
         } => {
-            blazr::cli::chat(
-                model,
-                system,
-                chat_template,
+            let file = FileConfig::load()?;
+            let model = resolve::require_model(model, &file).map_err(anyhow::Error::msg)?;
+            let flags = GenerationFlags {
                 max_tokens,
                 temperature,
                 top_p,
-                num_ctx,
-                verbose,
-                vision.into_overrides(),
-            )
-            .await?;
+                verbose_prompt: verbose,
+                ..Default::default()
+            };
+            let gen_config = resolve::resolve_generation(&flags, &file.generation);
+            let cuda_index = blazr::cli::build_cuda_index(&file)?;
+            let load = LoadSettings::resolve(num_ctx, vision.into_overrides(), &file);
+            blazr::cli::chat(model, system, chat_template, gen_config, cuda_index, load).await?;
         }
         Commands::Bench {
             model,
@@ -182,7 +217,20 @@ async fn main() -> Result<()> {
             json,
             concurrency,
         } => {
-            blazr::cli::bench(model, num_ctx, decode_tokens, runs, json, concurrency).await?;
+            let file = FileConfig::load()?;
+            let model = resolve::require_model(model, &file).map_err(anyhow::Error::msg)?;
+            let cuda_index = blazr::cli::build_cuda_index(&file)?;
+            let load = LoadSettings::resolve(num_ctx, Default::default(), &file);
+            blazr::cli::bench(
+                model,
+                load,
+                cuda_index,
+                decode_tokens,
+                runs,
+                json,
+                concurrency,
+            )
+            .await?;
         }
         Commands::Ps { server } => {
             blazr::cli::ps(server).await?;
@@ -204,9 +252,17 @@ async fn main() -> Result<()> {
             leader,
             swarm_port,
             port,
+            host,
+            api_key,
             mdns,
         } => {
-            blazr::cli::swarm(role, token, model, leader, swarm_port, port, mdns).await?;
+            let settings = cluster_settings(ClusterFlags {
+                model,
+                port,
+                host,
+                api_key,
+            })?;
+            blazr::cli::swarm(role, token, leader, swarm_port, mdns, settings).await?;
         }
         #[cfg(feature = "distributed")]
         Commands::Disagg {
@@ -217,37 +273,46 @@ async fn main() -> Result<()> {
             prefill,
             decode,
             port,
-        } => match role.as_str() {
-            "router" => {
-                let prefill_addrs = prefill.unwrap_or_default();
-                let decode_addrs = decode.unwrap_or_default();
-                blazr::cli::run_disagg_router(listen_addr, prefill_addrs, decode_addrs, port)
+            host,
+        } => {
+            let settings = cluster_settings(ClusterFlags {
+                model,
+                port,
+                host,
+                api_key: None,
+            })?;
+            match role.as_str() {
+                "router" => {
+                    let prefill_addrs = prefill.unwrap_or_default();
+                    let decode_addrs = decode.unwrap_or_default();
+                    blazr::cli::run_disagg_router(
+                        listen_addr,
+                        prefill_addrs,
+                        decode_addrs,
+                        settings.server,
+                    )
                     .await?;
+                }
+                "prefill" => {
+                    let raddr = router_addr.ok_or_else(|| {
+                        anyhow::anyhow!("--router-addr is required for disagg prefill role")
+                    })?;
+                    blazr::cli::run_disagg_prefill_worker(raddr, listen_addr, &settings).await?;
+                }
+                "decode" => {
+                    let raddr = router_addr.ok_or_else(|| {
+                        anyhow::anyhow!("--router-addr is required for disagg decode role")
+                    })?;
+                    blazr::cli::run_disagg_decode_worker(raddr, listen_addr, &settings).await?;
+                }
+                _ => {
+                    anyhow::bail!(
+                        "Invalid disagg role '{}'. Must be 'router', 'prefill', or 'decode'",
+                        role
+                    );
+                }
             }
-            "prefill" => {
-                let model_name = model.ok_or_else(|| {
-                    anyhow::anyhow!("--model is required for disagg prefill role")
-                })?;
-                let raddr = router_addr.ok_or_else(|| {
-                    anyhow::anyhow!("--router-addr is required for disagg prefill role")
-                })?;
-                blazr::cli::run_disagg_prefill_worker(model_name, raddr, listen_addr).await?;
-            }
-            "decode" => {
-                let model_name = model
-                    .ok_or_else(|| anyhow::anyhow!("--model is required for disagg decode role"))?;
-                let raddr = router_addr.ok_or_else(|| {
-                    anyhow::anyhow!("--router-addr is required for disagg decode role")
-                })?;
-                blazr::cli::run_disagg_decode_worker(model_name, raddr, listen_addr).await?;
-            }
-            _ => {
-                anyhow::bail!(
-                    "Invalid disagg role '{}'. Must be 'router', 'prefill', or 'decode'",
-                    role
-                );
-            }
-        },
+        }
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,
@@ -265,9 +330,6 @@ async fn main() -> Result<()> {
         #[cfg(feature = "audio")]
         Commands::SoundReview(_) => {
             std::process::exit(blazr::cli::sound_review(&narration_argv("sound-review")))
-        }
-        Commands::Decode { model: _, input: _ } => {
-            eprintln!("Decode command not yet implemented");
         }
     }
 

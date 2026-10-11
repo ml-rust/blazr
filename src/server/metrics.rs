@@ -33,6 +33,10 @@ pub mod names {
     pub const KV_CACHE_UTILIZATION: &str = "blazr_kv_cache_utilization_ratio";
     pub const PREFIX_CACHE_HITS: &str = "blazr_prefix_cache_hits_total";
     pub const PREFIX_CACHE_MISSES: &str = "blazr_prefix_cache_misses_total";
+    pub const SLO_VIOLATIONS_TOTAL: &str = "blazr_slo_violations_total";
+    pub const SLO_BATCH_HELD: &str = "blazr_slo_batch_growth_held";
+    pub const DATA_PARALLEL_REPLICAS: &str = "blazr_data_parallel_replicas";
+    pub const REPLICA_ACTIVE_REQUESTS: &str = "blazr_replica_active_requests";
 }
 
 /// Install the global Prometheus recorder and return its handle for rendering.
@@ -71,7 +75,24 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
     );
     metrics::describe_gauge!(
         names::QUEUE_DEPTH,
-        "Number of requests waiting for admission (HPA/KEDA signal)"
+        "Requests waiting for a decode slot or for token-budget admission (HPA/KEDA signal)"
+    );
+    metrics::gauge!(names::QUEUE_DEPTH).increment(0.0);
+    metrics::describe_counter!(
+        names::SLO_VIOLATIONS_TOTAL,
+        "Latency samples taken while a rolling percentile exceeds its server.slo threshold"
+    );
+    metrics::describe_gauge!(
+        names::SLO_BATCH_HELD,
+        "1 while a P95 TTFT or ITL breach holds batch growth, else 0"
+    );
+    metrics::describe_gauge!(
+        names::DATA_PARALLEL_REPLICAS,
+        "Data-parallel replicas of the model loaded at start"
+    );
+    metrics::describe_gauge!(
+        names::REPLICA_ACTIVE_REQUESTS,
+        "Requests in flight on each data-parallel replica, by replica"
     );
     metrics::describe_gauge!(
         names::ACTIVE_DECODE_SLOTS,
@@ -129,9 +150,15 @@ pub fn record_tokens(prompt_tokens: usize, completion_tokens: usize) {
     metrics::counter!(names::TOKENS_GENERATED).increment(completion_tokens as u64);
 }
 
-/// Record time-to-first-token (TTFT) in seconds
+/// Record time-to-first-token (TTFT) in seconds. The SLO checker sees it too.
 pub fn record_ttft(ttft_secs: f64) {
     metrics::histogram!(names::TIME_TO_FIRST_TOKEN).record(ttft_secs);
+    super::slo::observe_ttft_ms(ttft_secs * 1000.0);
+}
+
+/// Record end-to-end request latency in seconds for the SLO checker.
+pub fn record_e2e(e2e_secs: f64) {
+    super::slo::observe_e2e_ms(e2e_secs * 1000.0);
 }
 
 /// Record decode throughput (tokens/second) for a completed request
@@ -150,10 +177,11 @@ pub fn adjust_decode_slots(delta: f64) {
     }
 }
 
-/// Record inter-token latency (ITL) in seconds
+/// Record inter-token latency (ITL) in seconds. The SLO checker sees it too.
 pub fn record_itl(itl_secs: f64) {
     if itl_secs > 0.0 {
         metrics::histogram!(names::INTER_TOKEN_LATENCY).record(itl_secs);
+        super::slo::observe_itl_ms(itl_secs * 1000.0);
     }
 }
 
@@ -171,6 +199,15 @@ pub fn update_kv_cache_utilization(allocated_blocks: usize, total_blocks: usize)
     if total_blocks > 0 {
         let ratio = allocated_blocks as f64 / total_blocks as f64;
         metrics::gauge!(names::KV_CACHE_UTILIZATION).set(ratio);
+    }
+}
+
+/// Set the replica count gauge and each replica's in-flight request gauge.
+pub fn update_replicas(count: usize, load: &[usize]) {
+    metrics::gauge!(names::DATA_PARALLEL_REPLICAS).set(count as f64);
+    for (index, active) in load.iter().enumerate() {
+        metrics::gauge!(names::REPLICA_ACTIVE_REQUESTS, "replica" => index.to_string())
+            .set(*active as f64);
     }
 }
 
@@ -216,12 +253,19 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
         metrics::gauge!(names::TOKEN_BUDGET_UTILIZATION).set(ratio);
     }
 
-    // Update KV cache utilization from request scheduler
-    if let Some(ref rs) = state.request_scheduler {
-        if let Some(block_stats) = rs.block_stats() {
-            update_kv_cache_utilization(block_stats.allocated_blocks, block_stats.total_blocks);
-        }
-    }
+    // KV cache utilization over every batching scheduler's block pool
+    let (allocated, total) = state
+        .serving
+        .schedulers()
+        .iter()
+        .filter_map(|rs| rs.block_stats())
+        .fold((0, 0), |(a, t), stats| {
+            (a + stats.allocated_blocks, t + stats.total_blocks)
+        });
+    update_kv_cache_utilization(allocated, total);
+
+    // Data-parallel replica count and per-replica load
+    update_replicas(state.serving.replica_count(), &state.serving.replica_load());
 
     // Update VRAM usage (CUDA only)
     #[cfg(feature = "cuda")]

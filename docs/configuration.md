@@ -10,61 +10,97 @@ Blazr applies the first source that sets a value, in this order.
 | ----- | ------------------------------------ | ---------------------------------------------------------------------- |
 | 1     | CLI flag                             | Flags listed under [CLI flags](#cli-flags)                             |
 | 2     | Environment variable                 | Variables listed under [Environment variables](#environment-variables) |
-| 3     | `config.json` in the model directory | The `inference` section and the `dtype` value                          |
+| 3     | `~/.blazr/config.yaml`               | Keys listed under [User config file](#user-config-file)                |
 | 4     | Built-in default                     | Defaults listed in the tables on this page                             |
 
-The file `~/.blazr/config.yaml` belongs at position 3. No code path applies it. See [User config file](#user-config-file).
+For `inference.*` keys, the order is: flag, environment variable (`BLAZR_TP_SIZE` only), `config.yaml`, model `config.json`, default. The `inference` section of `config.yaml` replaces the matching value in every model.
 
 Exceptions to the order:
 
-- `--api-key` and `--token` take their value from `BLAZR_API_KEY` and `BLAZR_SWARM_TOKEN` through the clap `env` attribute. A flag on the command line wins over the variable.
+- `--token` takes its value from `BLAZR_SWARM_TOKEN` through the clap `env` attribute. A flag on the command line wins over the variable.
 - `--voice-dir` wins over `BLAZR_VOICE_DIR`.
-- `pull --output` wins over `BLAZR_MODEL_DIR`.
-- `--mmproj`, `--image-min-tokens`, and `--image-max-tokens` replace the matching `inference` values from `config.json` when set.
-- The `dtype` value from `config.json` is overwritten by `torch_dtype`. See [Model config.json](#model-configjson).
+- `pull --output` wins over `BLAZR_MODEL_DIR`, then `model_dir`.
+- `--mmproj`, `--image-min-tokens`, and `--image-max-tokens` replace the matching `inference` values when set.
+- The `dtype` value comes from the checkpoint's `torch_dtype`. No config key sets it. See [Model config.json](#model-configjson).
 
 ## User config file
 
 Path: `~/.blazr/config.yaml`. Format: YAML, parsed with `serde_saphyr`.
 
-`blazr serve` reads this file at startup. No other command reads it.
+These commands read this file at start:
 
-A missing file gives the built-in defaults. A file that cannot be read or parsed logs a warning and gives the built-in defaults.
+- `run`, `serve`, `generate`, `chat`, and `bench`
+- `list`, `info`, and `pull`
+- `swarm` and `disagg`
 
-Blazr parses this file. No code path reads its keys in this source tree. A key set in this file changes no behavior.
+A missing file gives the built-in defaults. A file that cannot be read or parsed exits with an error. A parse error names the file and line.
 
 Example:
 
 ```yaml
 default_model: mistral-7b
-device: cuda
+device: cuda:0
 num_ctx: 4096
 model_dir: /srv/models
-port: 9090
-temperature: 0.8
-max_tokens: 1024
+
+server:
+  port: 9090
+  max_concurrent_requests: 32
+
+inference:
+  max_batch_size: 8
+  paged_attention: true
+
+generation:
+  temperature: 0.8
+  max_tokens: 1024
 ```
 
-| Key             | Type    | Default | Meaning                      |
-| --------------- | ------- | ------- | ---------------------------- |
-| `default_model` | string  | unset   | Default model name or path   |
-| `device`        | string  | unset   | Device: `cuda` or `cpu`      |
-| `num_ctx`       | integer | unset   | Default context window size  |
-| `model_dir`     | string  | unset   | Model search directory       |
-| `port`          | integer | unset   | Default server port          |
-| `temperature`   | float   | unset   | Default sampling temperature |
-| `max_tokens`    | integer | unset   | Default maximum tokens       |
+| Key             | Type    | Default  | Meaning                                                                                                                  |
+| --------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `default_model` | string  | unset    | Model that a command uses when it names none                                                                             |
+| `device`        | string  | `cuda:0` | `cpu`, `cuda`, or `cuda:N`. `run` with `cpu` uses the CPU. `serve`, `chat`, `bench`, `swarm`, and `disagg` refuse `cpu` in a `cuda` build. |
+| `num_ctx`       | integer | `2048`   | Initial KV cache size in tokens for `run`, `generate`, `chat`, `bench`, and `serve`                                      |
+| `model_dir`     | string  | `./models` | Model search directory. `BLAZR_MODEL_DIR` overrides it.                                                               |
+| `port`          | integer | unset    | Older name of `server.port`                                                                                              |
+| `temperature`   | float   | unset    | Older name of `generation.temperature`                                                                                   |
+| `max_tokens`    | integer | unset    | Older name of `generation.max_tokens`                                                                                    |
+
+The `server`, `inference`, and `generation` sections hold the other keys. Old top-level keys still parse. Setting an old key and its section key together is an error.
+
+### Validation
+
+- An unknown key logs a warning that names the key. Blazr ignores the key.
+- A YAML error exits with an error that names the file and line.
+- An empty environment variable counts as unset.
+- A `BLAZR_TP_SIZE` that is not a whole number exits with an error.
+
+### Removed keys
+
+These keys no longer apply. Each one logs an unknown-key warning in `config.yaml`.
+
+| Key                         | Status                                                  |
+| --------------------------- | ------------------------------------------------------- |
+| `inference.flash_attention` | Removed                                                 |
+| `inference.kv_cache`        | Removed                                                 |
+| `inference.moe_offload`     | Removed with the MoE expert offload subsystem           |
+| `inference.moe_gpu_experts` | Removed with the MoE expert offload subsystem           |
+| `inference.weights_path`    | Removed                                                 |
+| `inference.device`          | Removed. Use the top-level `device` key.                |
+| `inference.dtype`           | Not a config key. The loader sets it from `torch_dtype`. |
 
 ## Model config.json
 
 Blazr reads `config.json` from the model directory for SafeTensors checkpoints. Blazr tries each parser in order. A parse error moves to the next parser. Blazr logs nothing when a parser fails.
 
-1. `BlazrConfig`: the top-level model keys, plus the `inference`, `server`, and `generation` sections.
+1. `BlazrConfig`: the top-level model keys, plus the `inference` section.
 2. `UniversalConfig`: the top-level model keys only.
 3. `HuggingFaceConfig`: the Hugging Face keys listed below.
 4. Values detected from the checkpoint, when `config.json` is missing or no parser accepts it.
 
-A type error in any blazr section fails parser 1. Parser 2 then reads the file and drops the sections.
+A type error in the `inference` section fails parser 1. Parser 2 then reads the file without that section.
+
+Blazr ignores `server` and `generation` in `config.json`. It ignores unknown `inference` keys without a warning. Only `config.yaml` sets `inference.data_parallel`.
 
 Example:
 
@@ -152,61 +188,69 @@ GGUF loads use `f32`.
 
 ### inference section
 
-Blazr reads this section from `config.json`. The defaults are the `InferenceConfig` defaults.
+Blazr reads this section from `config.json`. The `inference` section of `config.yaml` replaces these values for every model. The defaults are the `InferenceConfig` defaults.
 
-| Key                                  | Type             | Default             | Read by code | Meaning                                                                                        |
-| ------------------------------------ | ---------------- | ------------------- | ------------ | ---------------------------------------------------------------------------------------------- |
-| `weights_path`                       | path             | unset               | No           | Path to model weights                                                                          |
-| `device`                             | string or object | `cuda:0`            | No           | Device                                                                                         |
-| `max_context_len`                    | integer          | unset               | Yes          | Overrides the model maximum sequence length. Blazr does not compare the two values.            |
-| `dtype`                              | string           | `f16`               | Yes          | Inference dtype: `f32`, `f16`, or `bf16`. Overwritten for SafeTensors loads.                   |
-| `flash_attention`                    | boolean          | `true`              | No           | Enables flash attention                                                                        |
-| `kv_cache`                           | boolean          | `true`              | No           | Enables the KV cache                                                                           |
-| `max_batch_size`                     | integer          | `1`                 | Yes          | Batch size. Values of 1 or less use the single-sequence path.                                  |
-| `paged_attention`                    | boolean          | `false`             | Yes          | Enables the paged KV cache                                                                     |
-| `block_size`                         | integer          | `16`                | Yes          | Tokens per block for paged attention                                                           |
-| `num_blocks`                         | integer          | `0`                 | Yes          | KV cache blocks to pre-allocate for paged attention                                            |
-| `kv_pool_blocks`                     | integer          | `0`                 | Yes          | Blocks in the shared pool. `0` computes the count from `max_context_len` and `max_batch_size`. |
-| `prefix_cache`                       | boolean          | `false`             | Yes          | Reuses KV blocks for repeated prompt prefixes. Requires `paged_attention`.                     |
-| `max_cached_blocks`                  | integer          | `10000`             | Yes          | Cached prefix blocks to retain. Used when `prefix_cache` is `true`.                            |
-| `gpu_prefix_cache`                   | boolean          | `false`             | Yes          | GPU prefix cache lookup. Falls back to CPU lookup without CUDA.                                |
-| `gpu_prefix_cache_ram_tier`          | integer          | `5000`              | Yes          | RAM tier entries for the GPU prefix cache                                                      |
-| `prefill_chunk_size`                 | integer          | `0`                 | Yes          | Prompt tokens per prefill chunk. `0` processes the whole prompt at once.                       |
-| `speculative`                        | object           | unset               | Yes          | Speculative decoding. Blazr uses it when the section is set.                                   |
-| `speculative.draft_model`            | string           | required in section | Yes          | Draft model path. A relative path also resolves against the model directory.                   |
-| `speculative.num_speculative_tokens` | integer          | `5`                 | No           | Tokens speculated per step. No reader found.                                                   |
-| `speculative.adaptive_depth`         | boolean          | `false`             | No           | Adjusts speculation depth from the acceptance rate. No reader found.                           |
-| `tensor_parallel_size`               | integer          | `1`                 | No           | Parsed. No caller reads it. Tensor parallelism reads `BLAZR_TP_SIZE`.                          |
-| `graphs`                             | boolean          | `false`             | No           | CUDA graph capture for greedy decode. Set by `run --graphs`. No other reader found.            |
-| `mmproj`                             | path             | unset               | Yes          | Qwen3-VL mmproj GGUF for image inputs                                                          |
-| `image_min_tokens`                   | integer          | unset               | Yes          | Fewest output tokens per image. Unset keeps the mmproj value.                                  |
-| `image_max_tokens`                   | integer          | unset               | Yes          | Most output tokens per image. Unset keeps the mmproj value.                                    |
+| Key                                  | Type     | Default             | Meaning                                                                                                                      |
+| ------------------------------------ | -------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `max_context_len`                    | integer  | unset               | Overrides the model maximum sequence length. Blazr does not compare the two values.                                          |
+| `max_batch_size`                     | integer  | `1`                 | Batch size. Values of 1 or less use the single-sequence path.                                                                |
+| `paged_attention`                    | boolean  | `false`             | Enables the paged KV cache. `run` and `generate` also take `--paged-attention`.                                              |
+| `block_size`                         | integer  | `16`                | Tokens per block for paged attention                                                                                         |
+| `num_blocks`                         | integer  | `0`                 | KV cache blocks to pre-allocate for paged attention                                                                          |
+| `kv_pool_blocks`                     | integer  | `0`                 | Blocks in the shared pool. `0` computes the count from `max_context_len` and `max_batch_size`.                               |
+| `prefix_cache`                       | boolean  | `false`             | Reuses KV blocks for repeated prompt prefixes. Requires `paged_attention`.                                                   |
+| `max_cached_blocks`                  | integer  | `10000`             | Cached prefix blocks to retain. Used when `prefix_cache` is `true`.                                                          |
+| `gpu_prefix_cache`                   | boolean  | `false`             | GPU prefix cache lookup. Falls back to CPU lookup without CUDA.                                                              |
+| `gpu_prefix_cache_ram_tier`          | integer  | `5000`              | RAM tier entries for the GPU prefix cache                                                                                    |
+| `prefill_chunk_size`                 | integer  | `0`                 | Prompt tokens per prefill chunk. `0` processes the whole prompt at once.                                                     |
+| `speculative`                        | object   | unset               | Speculative decoding. Blazr uses it when the section is set.                                                                 |
+| `speculative.draft_model`            | string   | required in section | Draft model path. A relative path also resolves against the model directory.                                                 |
+| `speculative.num_speculative_tokens` | integer  | `5`                 | Tokens speculated per step.                                                                                                  |
+| `speculative.adaptive_depth`         | boolean  | `false`             | Adjusts speculation depth from the acceptance rate. Passed to boostr `SpeculativeConfig`.                                    |
+| `tensor_parallel_size`               | integer  | `1`                 | Tensor parallel degree. `BLAZR_TP_SIZE` overrides it for `serve`.                                                            |
+| `data_parallel`                      | integer  | `1`                 | Replicas of the start model for `serve`. Only `config.yaml` sets it. See [Data-parallel replicas](deployment.md#data-parallel-replicas). |
+| `graphs`                             | boolean  | `false`             | CUDA graph capture for greedy decode. `run` and `generate` read it. `serve` logs a warning when it is set.                   |
+| `mmproj`                             | path     | unset               | Qwen3-VL mmproj GGUF for image inputs                                                                                        |
+| `image_min_tokens`                   | integer  | unset               | Fewest output tokens per image. Unset keeps the mmproj value.                                                                |
+| `image_max_tokens`                   | integer  | unset               | Most output tokens per image. Unset keeps the mmproj value.                                                                  |
 
 Blazr applies no range check to these values in the config code.
 
 ### server section
 
-Blazr parses this section from `config.json`. No code path reads it. `blazr serve` builds its server values from CLI flags and the values below.
+Blazr reads this section from `config.yaml`. `blazr serve`, the swarm leader, and the disaggregated router use it. Flags override `port`, `host`, `tls_cert`, `tls_key`, and `reasoning_format`.
 
-| Key                       | Type           | Value in `blazr serve`         | Source                         |
-| ------------------------- | -------------- | ------------------------------ | ------------------------------ |
-| `port`                    | integer        | `8080`                         | `--port`                       |
-| `host`                    | string         | `0.0.0.0`                      | `--host`                       |
-| `max_concurrent_requests` | integer        | `16`                           | Fixed                          |
-| `request_timeout_secs`    | integer        | `300`                          | Fixed                          |
-| `cors_enabled`            | boolean        | `true`                         | Fixed                          |
-| `cors_origins`            | string array   | empty, which allows any origin | Fixed                          |
-| `request_logging`         | boolean        | `true`                         | Fixed                          |
-| `max_body_size`           | integer, bytes | `10485760`                     | Fixed                          |
-| `tls_cert`                | path           | unset                          | `--tls-cert`                   |
-| `tls_key`                 | path           | unset                          | `--tls-key`                    |
-| `max_inflight_tokens`     | integer        | `0`, which means unlimited     | Fixed                          |
-| `slo`                     | object         | unset                          | Parsed. No code path reads it. |
-| `reasoning_format`        | string         | `deepseek`                     | `--reasoning-format`           |
+| Key                       | Type           | Default                        | Flag                 | Meaning                                                                                  |
+| ------------------------- | -------------- | ------------------------------ | -------------------- | ---------------------------------------------------------------------------------------- |
+| `port`                    | integer        | `8080`                         | `--port`             | Port to listen on                                                                        |
+| `host`                    | string         | `0.0.0.0`                      | `--host`             | Address to bind to                                                                       |
+| `max_concurrent_requests` | integer        | `16`                           | none                 | HTTP requests in flight. Extra requests wait for a slot.                                 |
+| `request_timeout_secs`    | integer        | `300`                          | none                 | Request timeout. An exceeded request returns `408`.                                      |
+| `cors_enabled`            | boolean        | `true`                         | none                 | Enables CORS headers                                                                     |
+| `cors_origins`            | string array   | empty, which allows any origin | none                 | Allowed origins                                                                          |
+| `request_logging`         | boolean        | `true`                         | none                 | Logs one line per request                                                                |
+| `max_body_size`           | integer, bytes | `10485760`                     | none                 | Request body limit. An exceeded request returns `413`.                                   |
+| `tls_cert`                | path           | unset                          | `--tls-cert`         | PEM certificate file                                                                     |
+| `tls_key`                 | path           | unset                          | `--tls-key`          | PEM private key file                                                                     |
+| `max_inflight_tokens`     | integer        | `0`, which means unlimited     | none                 | In-flight token budget. An exceeded request returns `503`.                               |
+| `slo`                     | object         | unset                          | none                 | Latency thresholds. See [SLO thresholds](#slo-thresholds).                               |
+| `reasoning_format`        | string         | `deepseek`                     | `--reasoning-format` | Default reasoning split: `deepseek` or `none`. Reloads live.                             |
+
+#### SLO thresholds
+
+Each threshold is optional and in milliseconds. A sample over its threshold logs a warning and adds 1 to `blazr_slo_violations_total`.
+
+| Key                                         | Measures                    |
+| ------------------------------------------- | --------------------------- |
+| `ttft_p50_ms`, `ttft_p95_ms`, `ttft_p99_ms` | Time to first token         |
+| `itl_p50_ms`, `itl_p95_ms`, `itl_p99_ms`    | Inter-token latency         |
+| `e2e_p99_ms`                                | End-to-end request latency  |
+
+While the P95 TTFT or P95 ITL is over its threshold, batching admits no sequences beyond the running count. An idle scheduler still admits one sequence. The window holds the last 256 samples, none older than 30 seconds. A change to `server.slo` needs a restart.
 
 ### generation section
 
-Blazr parses this section from `config.json`. No code path reads it. The `run`, `generate`, and `chat` commands take their sampling values from CLI flags.
+Blazr reads this section from `config.yaml`. It sets the default for each sampling key. The matching `run`, `generate`, and `chat` flags override it. Requests that omit a value read the live section, and a reload changes it.
 
 Basic sampling:
 
@@ -266,24 +310,25 @@ JSON mode:
 | ----------- | ------- | ------- | --------------------------------------------------- |
 | `json_mode` | boolean | `false` | Retries up to 3 times when output is not valid JSON |
 
-Note that `temperature` defaults to `1.0` in this section, but the `run`, `generate`, and `chat` flags default to `0.7`.
-
 ## CLI flags
 
-Flag short forms come from the clap definitions. Defaults in parentheses come from the same definitions.
+Flag short forms come from the clap definitions. A default that names a key takes that key's value when the flag is absent.
+
+When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `default_model`.
 
 ### serve
 
 | Flag                                  | Default               | Meaning                                                                                                                      |
 | ------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `-m`, `--model <NAME\|PATH>`          | unset                 | Model to load at startup. Blazr loads no model when unset.                                                                   |
+| `-m`, `--model <NAME\|PATH>`          | `default_model`       | Model to load at startup. Blazr loads no model when unset.                                                                   |
 | `--chat-template <NAME\|FILE>`        | each model's template | Chat template for every served model. Built-in names: `chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`. |
-| `--port <PORT>`                       | `8080`                | Port to listen on                                                                                                            |
-| `--host <HOST>`                       | `0.0.0.0`             | Host to bind to                                                                                                              |
-| `--api-key <KEY>`                     | `BLAZR_API_KEY`       | API key for authentication                                                                                                   |
+| `--port <PORT>`                       | `server.port`, else `8080` | Port to listen on                                                                                                       |
+| `--host <HOST>`                       | `server.host`, else `0.0.0.0` | Host to bind to                                                                                                      |
+| `--data-parallel <N>`                 | `inference.data_parallel`, else `1` | Copies of the start model, one per device. See [Data-parallel replicas](deployment.md#data-parallel-replicas).   |
+| `--api-key <KEY>`                     | `BLAZR_API_KEY`       | API key for authentication. Flag wins over the variable.                                                                     |
 | `--api-key-file <PATH>`               | unset                 | File of API keys, one per line. Blank lines and lines starting with `#` are skipped.                                         |
-| `--tls-cert <PATH>`                   | unset                 | PEM certificate file. Requires `--tls-key`. Enables HTTPS.                                                                   |
-| `--tls-key <PATH>`                    | unset                 | PEM private key file. Requires `--tls-cert`.                                                                                 |
+| `--tls-cert <PATH>`                   | `server.tls_cert`     | PEM certificate file. Enables HTTPS with a key from `--tls-key` or `server.tls_key`.                                         |
+| `--tls-key <PATH>`                    | `server.tls_key`      | PEM private key file. Needs a certificate from `--tls-cert` or `server.tls_cert`.                                            |
 | `--vision-model <NAME=PATH>`          | none                  | Standalone vision embedder for `/v1/embeddings`. Repeatable.                                                                 |
 | `--asr-model <NAME=PATH>`             | none                  | Whisper model for `/v1/audio/transcriptions`. `audio` feature. Repeatable.                                                   |
 | `--tts-model <NAME=PATH>`             | none                  | TTS model for `/v1/audio/speech`. `audio` feature. Repeatable.                                                               |
@@ -292,7 +337,7 @@ Flag short forms come from the clap definitions. Defaults in parentheses come fr
 | `--tts-no-continuous-batching`        | off                   | Closes the VoxCPM2 batch between steps. `audio` feature.                                                                     |
 | `--tts-continuous-capacity <N>`       | `1024`                | Cache positions held per seated VoxCPM2 batch slot. `audio` feature.                                                         |
 | `--voice-dir <DIR>`                   | `BLAZR_VOICE_DIR`     | Kokoro voice file directory                                                                                                  |
-| `--reasoning-format <deepseek\|none>` | `deepseek`            | Default split of reasoning output in chat responses                                                                          |
+| `--reasoning-format <deepseek\|none>` | `server.reasoning_format`, else `deepseek` | Default split of reasoning output in chat responses                                                 |
 | `--mmproj <PATH>`                     | mmproj value          | Qwen3-VL mmproj GGUF for image inputs                                                                                        |
 | `--image-min-tokens <N>`              | mmproj value          | Fewest output tokens per image                                                                                               |
 | `--image-max-tokens <N>`              | mmproj value          | Most output tokens per image                                                                                                 |
@@ -306,16 +351,16 @@ Flag short forms come from the clap definitions. Defaults in parentheses come fr
 | `-p`, `--prompt <TEXT>`        | unset for `run`, required for `generate`         | Prompt. With a prompt, the command generates once and exits. Without one, `run` opens the REPL. |
 | `--chat-template <NAME\|FILE>` | model template, then built-in for the model type | Chat template. `run` and `chat` take this flag. `generate` does not.                            |
 | `-v`, `--verbose`              | off                                              | Shows token IDs and timing. `run` and `chat` take this flag. `generate` does not.               |
-| `--max-tokens <N>`             | `2048`                                           | Maximum tokens to generate                                                                      |
-| `--temperature <F>`            | `0.7`                                            | Sampling temperature. `0` selects greedy decoding.                                              |
-| `--top-p <F>`                  | `0.9`                                            | Nucleus sampling threshold                                                                      |
-| `--top-k <N>`                  | `0`                                              | Top-k sampling. `0` disables it.                                                                |
-| `--min-p <F>`                  | `0.05`                                           | Min-p threshold                                                                                 |
-| `--repeat-penalty <F>`         | `1.1`                                            | Repetition penalty. `1.0` disables it.                                                          |
-| `--repeat-last-n <N>`          | `64`                                             | Recent tokens the repetition penalty covers                                                     |
+| `--max-tokens <N>`             | `generation.max_tokens`, else `2048`             | Maximum tokens to generate                                                                      |
+| `--temperature <F>`            | `generation.temperature`, else `1.0`             | Sampling temperature. `0` selects greedy decoding.                                              |
+| `--top-p <F>`                  | `generation.top_p`, else `1.0`                   | Nucleus sampling threshold                                                                      |
+| `--top-k <N>`                  | `generation.top_k`, else `0`                     | Top-k sampling. `0` disables it.                                                                |
+| `--min-p <F>`                  | `generation.min_p`, else `0.05`                  | Min-p threshold                                                                                 |
+| `--repeat-penalty <F>`         | `generation.repeat_penalty`, else `1.1`          | Repetition penalty. `1.0` disables it.                                                          |
+| `--repeat-last-n <N>`          | `generation.repeat_last_n`, else `64`            | Recent tokens the repetition penalty covers                                                     |
 | `--gpu-layers <N>`             | `0`                                              | Layers on GPU. `-1` loads all layers on GPU. `0` selects automatically. CUDA path only.         |
 | `--cpu`                        | off                                              | Runs on CPU                                                                                     |
-| `--num-ctx <N>`                | `2048`                                           | Initial KV cache size. The cache grows as needed.                                               |
+| `--num-ctx <N>`                | `num_ctx`, else `2048`                           | Initial KV cache size. The cache grows as needed.                                               |
 | `--paged-attention`            | off                                              | Paged KV cache. CUDA path only.                                                                 |
 | `--graphs`                     | off                                              | CUDA graph capture for greedy decode. CUDA path only.                                           |
 | `--mmproj <PATH>`              | mmproj value                                     | Qwen3-VL mmproj GGUF for image inputs                                                           |
@@ -326,7 +371,7 @@ Flag short forms come from the clap definitions. Defaults in parentheses come fr
 
 Rules that apply to `run` and `generate`:
 
-- Without `--cpu`, the command uses CUDA. A build without the `cuda` feature exits with an error that names `--cpu`.
+- Without `--cpu`, the command runs on the CUDA index from `device`, else device 0. A build without the `cuda` feature exits with an error that names `--cpu`.
 - `--gpu-layers`, `--paged-attention`, and `--graphs` have no effect with `--cpu`.
 - `--graphs` needs `--temperature 0`, `--repeat-penalty 1.0`, and no frequency or presence penalty. The default `--repeat-penalty` of `1.1` makes the run ineligible. An ineligible run logs a warning and decodes eagerly.
 - `--image` needs `--mmproj` and `--prompt`.
@@ -337,16 +382,16 @@ Rules that apply to `run` and `generate`:
 | ------------------------------ | ------------------------------------------------ | ------------------------------------- |
 | `-s`, `--system <TEXT>`        | unset                                            | System prompt                         |
 | `--chat-template <NAME\|FILE>` | model template, then built-in for the model type | Chat template                         |
-| `--max-tokens <N>`             | `2048`                                           | Maximum tokens per turn               |
-| `--temperature <F>`            | `0.7`                                            | Sampling temperature                  |
-| `--top-p <F>`                  | `0.9`                                            | Nucleus sampling threshold            |
-| `--num-ctx <N>`                | `4096`                                           | Context window size                   |
+| `--max-tokens <N>`             | `generation.max_tokens`, else `2048`             | Maximum tokens per turn               |
+| `--temperature <F>`            | `generation.temperature`, else `1.0`             | Sampling temperature                  |
+| `--top-p <F>`                  | `generation.top_p`, else `1.0`                   | Nucleus sampling threshold            |
+| `--num-ctx <N>`                | `num_ctx`, else `2048`                           | Context window size                   |
 | `-v`, `--verbose`              | off                                              | Shows token IDs and timing            |
 | `--mmproj <PATH>`              | mmproj value                                     | Qwen3-VL mmproj GGUF for image inputs |
 | `--image-min-tokens <N>`       | mmproj value                                     | Fewest output tokens per image        |
 | `--image-max-tokens <N>`       | mmproj value                                     | Most output tokens per image          |
 
-`chat` has no `--cpu` flag. The device follows the build: CUDA with the `cuda` feature, CPU otherwise. The `/image <path>` command needs `--mmproj`. Other sampling keys take the `GenerationConfig` defaults.
+`chat` has no `--cpu` flag. In a `cuda` build it runs on the CUDA index from `device`. A `device: cpu` value is an error in that build. The `/image <path>` command needs `--mmproj`. Other sampling keys take the `generation` section.
 
 ### bench
 
@@ -368,7 +413,7 @@ Rules that apply to `run` and `generate`:
 | `info`        | `<MODEL>`                       | required                           | Model name or path                                            |
 | `pull`        | `<REPO>`                        | required                           | Hugging Face repository ID                                    |
 | `pull`        | `--file <NAME>`                 | unset                              | Fetches one file from the repository                          |
-| `pull`        | `-o`, `--output <DIR>`          | `BLAZR_MODEL_DIR`, then `./models` | Output directory                                              |
+| `pull`        | `-o`, `--output <DIR>`          | `BLAZR_MODEL_DIR`, then `model_dir`, then `./models` | Output directory                                              |
 | `ps`          | `--server <URL>`                | `http://localhost:8080`            | Server to query                                               |
 | `convert`     | `<INPUT>`                       | required                           | Input model path                                              |
 | `convert`     | `-o`, `--output <PATH>`         | auto-generated                     | Output path                                                   |
@@ -385,30 +430,37 @@ Rules that apply to `run` and `generate`:
 | -------- | ---------------------- | ------------------- | ---------------------------------------------------- |
 | `swarm`  | `--role <ROLE>`        | `worker`            | `leader` or `worker`                                 |
 | `swarm`  | `--token <TOKEN>`      | `BLAZR_SWARM_TOKEN` | Shared secret for swarm membership. Required.        |
-| `swarm`  | `-m`, `--model <NAME>` | unset               | Model to serve. Leader only.                         |
+| `swarm`  | `-m`, `--model <NAME>` | `default_model`     | Model to serve. Leader only.                         |
 | `swarm`  | `--leader <ADDR>`      | unset               | Leader address. Worker only.                         |
 | `swarm`  | `--swarm-port <PORT>`  | `9090`              | Port for the nexar transport                         |
-| `swarm`  | `--port <PORT>`        | `8080`              | HTTP API port. Leader only.                          |
+| `swarm`  | `--port <PORT>`        | `server.port`, else `8080` | HTTP API port. Leader only.                   |
+| `swarm`  | `--host <HOST>`        | `server.host`, else `0.0.0.0` | HTTP API host. Leader only.                |
+| `swarm`  | `--api-key <KEY>`      | `BLAZR_API_KEY`     | API key for the leader's HTTP API                    |
 | `swarm`  | `--mdns`               | off                 | Enables LAN discovery                                |
 | `disagg` | `--role <ROLE>`        | `router`            | `router`, `prefill`, or `decode`                     |
-| `disagg` | `-m`, `--model <NAME>` | unset               | Model. Required for `prefill` and `decode`.          |
+| `disagg` | `-m`, `--model <NAME>` | `default_model`     | Model. Required for `prefill` and `decode`.          |
 | `disagg` | `--listen-addr <ADDR>` | `0.0.0.0:9190`      | Address this node listens on                         |
 | `disagg` | `--router-addr <ADDR>` | unset               | Router address. Required for `prefill` and `decode`. |
 | `disagg` | `--prefill <ADDR>...`  | unset               | Prefill worker addresses. Router only.               |
 | `disagg` | `--decode <ADDR>...`   | unset               | Decode worker addresses. Router only.                |
-| `disagg` | `--port <PORT>`        | `8080`              | HTTP API port. Router only.                          |
+| `disagg` | `--port <PORT>`        | `server.port`, else `8080` | HTTP API port. Router only.                   |
+| `disagg` | `--host <HOST>`        | `server.host`, else `0.0.0.0` | HTTP API host. Router only.                |
+
+The swarm leader and the disaggregated router take the `server` section. Every role loads its model from `model_dir` on the `device` index.
 
 The narration commands `speak`, `transcribe`, and `sound-review` need the `audio` feature. Their flags live in `src/cli/narration/` and this page does not list them.
 
 ## Environment variables
 
+Blazr reads no `.env` file. Export these variables before the command runs.
+
 | Variable              | Default                       | Read by                                                                                  | Meaning                                                                                                                                                               |
 | --------------------- | ----------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BLAZR_MODEL_DIR`     | `./models`                    | `serve`, `list`, `info`, `pull`, `swarm`, the server pull handler, disaggregated forward | Model directory                                                                                                                                                       |
-| `BLAZR_API_KEY`       | unset                         | `serve --api-key`                                                                        | API key                                                                                                                                                               |
+| `BLAZR_API_KEY`       | unset                         | `serve --api-key`, `swarm --api-key`                                                                        | API key                                                                                                                                                               |
 | `BLAZR_SWARM_TOKEN`   | unset                         | `swarm --token`                                                                          | Swarm shared secret                                                                                                                                                   |
 | `BLAZR_VOICE_DIR`     | unset                         | `serve --voice-dir`                                                                      | Kokoro voice directory when the flag is unset                                                                                                                         |
-| `BLAZR_TP_SIZE`       | `1`                           | `serve`, scheduler model load                                                            | Tensor parallel degree. `serve` returns an error above `1` in a build without `cuda` and `nccl`. The scheduler also returns an error above `1` without both features. |
+| `BLAZR_TP_SIZE`       | unset                         | `serve`                                                                                  | Tensor parallel degree. Overrides `inference.tensor_parallel_size`. A value that is not a whole number is an error. `serve` returns an error above `1` in a build without `cuda` and `nccl`. The scheduler also returns an error above `1` without both features. |
 | `BLAZR_TP_RANK`       | `0`                           | Scheduler model load, `cuda` and `nccl` builds                                           | Tensor parallel rank                                                                                                                                                  |
 | `BOOSTR_MODELS_DIR`   | unset                         | Model search                                                                             | Model root, searched before the hub caches. Relative paths resolve against the working directory.                                                                     |
 | `HF_HUB_CACHE`        | unset                         | Model search                                                                             | Hugging Face hub cache, searched first                                                                                                                                |
@@ -427,8 +479,10 @@ The `.env.example` file lists `HF_TOKEN`. No code in `src/` reads that variable.
 Blazr reloads one file while `blazr serve` runs: `~/.blazr/config.yaml`.
 
 - The watcher checks the file's modification time every 5 seconds.
-- A change, or the file's creation, reloads all keys of the file.
-- No code path reads the reloaded keys. A reload changes no behavior in this source tree.
+- A change or a new file reloads the whole file. A deleted file resets every key to its default.
+- A file that fails to parse leaves the running config unchanged. The watcher logs an error.
+- `generation` keys and `server.reasoning_format` apply to the next request that omits a value.
+- Every other key needs a restart. The reload logs one warning for each changed key.
 
 Restart `blazr serve` after any other change:
 

@@ -26,17 +26,21 @@ pub mod grammar;
 pub(crate) mod grammar_json;
 pub(crate) mod grammar_parser;
 mod graph_session;
+mod keep_alive;
 mod lane_api;
 mod lane_engine;
 mod lane_prefill;
 mod lane_scheduler;
 mod lane_session;
+pub mod latency_window;
 pub mod lora;
 pub(crate) mod mirostat;
+mod queue_depth;
 pub mod request_registry;
 pub mod request_scheduler;
 pub(crate) mod sampling;
 mod scheduler;
+pub mod slo_policy;
 pub mod slots;
 pub mod speculative;
 pub mod tensor_parallel;
@@ -49,20 +53,23 @@ mod warmup;
 pub use boostr::inference::lane_decode::LaneDecodeMode;
 
 pub use batch_engine::BatchEngine;
-pub use data_parallel::DataParallelGroup;
+pub use cache_router::{CacheAwareRouter, RouteReason};
+pub use data_parallel::{route_through, DataParallelGroup, ReplicaLease};
 pub use executor::Executor;
 #[cfg(feature = "cuda")]
 pub use graph_session::{LlamaGraphSession, Qwen35GraphSession};
+pub use keep_alive::parse_keep_alive;
 #[cfg(feature = "cuda")]
 pub use lane_engine::LaneEngine;
-#[cfg(feature = "cuda")]
 pub use lane_scheduler::LaneScheduler;
 #[cfg(feature = "cuda")]
 pub use lane_session::{LaneAdmitted, LaneToken, Qwen35LaneSession};
 pub use lora::{load_lora_adapter, LoraAdapter, LoraAdapterRegistry};
+pub use queue_depth::{QueueDepth, Waiting};
 pub use request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
 pub use request_scheduler::RequestScheduler;
-pub use scheduler::{parse_keep_alive, AvailableModelInfo, Scheduler};
+pub use scheduler::{AvailableModelInfo, Scheduler};
+pub use slo_policy::SloBatchPolicy;
 pub use slots::SlotManager;
 pub use types::{FinishReason, GeneratedToken, GenerationResult, TokenLogprob};
 pub(crate) use unsupported::qwen35_unsupported;

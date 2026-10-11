@@ -177,14 +177,21 @@ where
     let prefill_start = std::time::Instant::now();
     let mut prompt_eval_duration_ms = 0u64;
     let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
+    let mut last_token = prefill_start;
 
     while let Some(token_result) = stream.next().await {
         let token = token_result?;
         completion_tokens += 1;
 
+        // The first token closes the prompt eval. Each later one is an ITL
+        // sample for the metrics and the SLO checks.
+        let now = std::time::Instant::now();
         if completion_tokens == 1 {
-            prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
+            prompt_eval_duration_ms = now.duration_since(prefill_start).as_millis() as u64;
+        } else {
+            crate::server::metrics::record_itl(now.duration_since(last_token).as_secs_f64());
         }
+        last_token = now;
 
         result.push_str(&token.text);
 

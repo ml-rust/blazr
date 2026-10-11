@@ -23,6 +23,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         loaded_models: loaded,
+        data_parallel_replicas: state.serving.replica_count(),
         gpu_memory,
     };
     (StatusCode::OK, Json(response)).into_response()
@@ -62,6 +63,9 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub loaded_models: Vec<String>,
+    /// Copies of the start model that serve requests. 1 without data
+    /// parallelism.
+    pub data_parallel_replicas: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_memory: Option<GpuMemoryInfo>,
 }

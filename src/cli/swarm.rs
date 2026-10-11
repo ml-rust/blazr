@@ -7,6 +7,7 @@ use colored::Colorize;
 use nexar::NexarClient;
 use std::sync::Arc;
 
+use crate::config::ClusterSettings;
 use crate::distributed::pipeline::PipelineSchedule;
 use crate::distributed::topology::{SwarmConfig, SwarmManager, SwarmNode, SwarmRole};
 use crate::distributed::transport;
@@ -19,16 +20,19 @@ type ServerRuntime = boostr::CudaRuntime;
 #[cfg(not(feature = "cuda"))]
 type ServerRuntime = boostr::CpuRuntime;
 
-/// Start swarm mode (leader or worker)
+/// Start swarm mode (leader or worker).
+///
+/// `settings` holds the model, model directory, device and the leader's
+/// HTTP `server` section, resolved from flags, environment and the file.
 pub async fn swarm(
     role: String,
     token: String,
-    model: Option<String>,
     leader: Option<String>,
     swarm_port: u16,
-    port: u16,
     mdns: bool,
+    settings: ClusterSettings,
 ) -> Result<()> {
+    let model = settings.model.clone();
     let swarm_role = match role.as_str() {
         "leader" => SwarmRole::Leader,
         "worker" => SwarmRole::Worker,
@@ -39,8 +43,10 @@ pub async fn swarm(
         anyhow::bail!("Worker nodes must specify --leader <addr> or --mdns for auto-discovery");
     }
 
-    if swarm_role == SwarmRole::Leader && model.is_none() {
-        anyhow::bail!("Leader must specify --model <name>");
+    if swarm_role == SwarmRole::Leader {
+        settings
+            .require_model("swarm leader")
+            .map_err(anyhow::Error::msg)?;
     }
 
     let config = SwarmConfig {
@@ -62,7 +68,7 @@ pub async fn swarm(
             eprintln!("  Role: {}", "leader".green().bold());
             eprintln!("  Model: {}", model.as_deref().unwrap_or("none").bold());
             eprintln!("  Swarm transport: 0.0.0.0:{}", swarm_port);
-            eprintln!("  HTTP API: 0.0.0.0:{}", port);
+            eprintln!("  HTTP API: {}", settings.server.addr());
         }
         SwarmRole::Worker => {
             eprintln!("  Role: {}", "worker".yellow().bold());
@@ -88,14 +94,28 @@ pub async fn swarm(
     );
 
     if swarm_role == SwarmRole::Leader {
-        run_leader(&mut manager, model.as_deref().unwrap(), port).await
+        let model_name = settings
+            .require_model("swarm leader")
+            .map_err(anyhow::Error::msg)?;
+        run_leader(&mut manager, &model_name, settings).await
     } else {
-        run_worker(&manager, leader.as_deref()).await
+        run_worker(&manager, leader.as_deref(), settings.cuda_index).await
     }
 }
 
 /// Leader: form cluster, assign layers, broadcast model path, start HTTP server.
-async fn run_leader(manager: &mut SwarmManager, model_name: &str, http_port: u16) -> Result<()> {
+async fn run_leader(
+    manager: &mut SwarmManager,
+    model_name: &str,
+    settings: ClusterSettings,
+) -> Result<()> {
+    let ClusterSettings {
+        model_dir,
+        cuda_index,
+        server: server_config,
+        api_key,
+        ..
+    } = settings;
     tracing::info!("Leader awaiting worker connections...");
 
     // Register self as the leader node
@@ -109,14 +129,13 @@ async fn run_leader(manager: &mut SwarmManager, model_name: &str, http_port: u16
     });
 
     // Load model on leader
-    let model_dir = std::env::var("BLAZR_MODEL_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("./models"));
-
     #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(0);
+    let device = boostr::CudaDevice::new(cuda_index);
     #[cfg(not(feature = "cuda"))]
-    let device = boostr::CpuDevice::new();
+    let device = {
+        let _ = cuda_index;
+        boostr::CpuDevice::new()
+    };
 
     let scheduler = std::sync::Arc::new(crate::engine::Scheduler::<ServerRuntime>::new(
         model_dir.clone(),
@@ -219,18 +238,17 @@ async fn run_leader(manager: &mut SwarmManager, model_name: &str, http_port: u16
     }
 
     // Start HTTP server (handles requests, coordinates pipeline)
-    let server_config = crate::config::ServerConfig {
-        port: http_port,
-        host: "0.0.0.0".to_string(),
-        ..Default::default()
-    };
-    crate::server::start(scheduler, server_config, vec![]).await?;
+    crate::server::start(scheduler, server_config, api_key.into_iter().collect()).await?;
 
     Ok(())
 }
 
 /// Worker: connect to leader, receive assignment and model path, load model, enter compute loop.
-async fn run_worker(_manager: &SwarmManager, leader_addr: Option<&str>) -> Result<()> {
+async fn run_worker(
+    _manager: &SwarmManager,
+    leader_addr: Option<&str>,
+    cuda_index: usize,
+) -> Result<()> {
     let leader_addr =
         leader_addr.ok_or_else(|| anyhow::anyhow!("Worker requires --leader address"))?;
 
@@ -308,9 +326,12 @@ async fn run_worker(_manager: &SwarmManager, leader_addr: Option<&str>) -> Resul
 
     // Load model on worker
     #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(0);
+    let device = boostr::CudaDevice::new(cuda_index);
     #[cfg(not(feature = "cuda"))]
-    let device = boostr::CpuDevice::new();
+    let device = {
+        let _ = cuda_index;
+        boostr::CpuDevice::new()
+    };
 
     let model_path_ref = std::path::Path::new(&model_path);
     let (loaded_model, _blazr_config) =

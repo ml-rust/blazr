@@ -18,13 +18,14 @@ use super::anthropic_types::{
 };
 use super::chat_vision::{decode_image_sources, image_route, ImageRoute};
 use super::generation::{
-    generate_via_scheduler, overloaded_response, record_generation_metrics,
-    stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
-    stream_with_stop_sequences, validate_generation_params, HasSamplingFields,
+    overloaded_response, record_generation_metrics, stream_images_with_stop_sequences,
+    stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
+    HasSamplingFields,
 };
 use super::handlers::AppState;
 use super::metrics;
 use super::reasoning::ReasoningParser;
+use super::scheduled::generate_text_routed;
 use super::streaming::StreamToken;
 use crate::model::chat_template::{
     encode_chat_prompt, encode_chat_prompt_with_markers, RenderOptions,
@@ -110,14 +111,21 @@ pub async fn messages(
             return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
         }
     }
-    let gen_config = request.sampling_params().into_gen_config();
-    let reasoning_format = state.reasoning_format;
+    let gen_config = request
+        .sampling_params()
+        .into_gen_config(&state.config().generation);
+    let reasoning_format = state.reasoning_format();
 
     // Token budget admission
     let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
     if !state.try_admit(estimated_tokens) {
         return overloaded_response();
     }
+
+    // The executor and scheduler this request runs on. With data
+    // parallelism, the router picks a replica here.
+    let placement = state.route(executor, &prompt_tokens);
+    let executor = Arc::clone(&placement.executor);
 
     if request.stream.unwrap_or(false) {
         let id = format!("msg_{}", uuid::Uuid::new_v4());
@@ -129,6 +137,7 @@ pub async fn messages(
 
         metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
+            let _placement = placement;
             match route {
                 ImageRoute::Tower => {
                     stream_images_with_stop_sequences(
@@ -178,20 +187,8 @@ pub async fn messages(
             executor
                 .generate_multimodal_text(&prompt_tokens, &media.images, &media.audio, &gen_config)
                 .await
-        } else if let Some(ref rs) = state.request_scheduler {
-            match generate_via_scheduler(rs.as_ref(), prompt_tokens.clone(), &gen_config).await {
-                Ok(r) => Ok(crate::engine::GenerationResult {
-                    text: r.text,
-                    prompt_tokens: r.prompt_tokens,
-                    completion_tokens: r.completion_tokens,
-                    finish_reason: r.finish_reason,
-                    prompt_eval_duration_ms: r.prompt_eval_duration_ms,
-                    token_logprobs: None,
-                }),
-                Err(e) => Err(anyhow::anyhow!(e)),
-            }
         } else {
-            executor.generate_text(&prompt_tokens, &gen_config).await
+            generate_text_routed(&placement, &prompt_tokens, &gen_config).await
         };
 
         match gen_result {

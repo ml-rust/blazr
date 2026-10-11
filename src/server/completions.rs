@@ -13,12 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use super::generation::{
     apply_keep_alive, convert_logprobs, decode_context_prefix, encode_with_allowed_special,
-    error_response, generate_via_scheduler, overloaded_response, policy_error_response,
-    record_generation_metrics, stream_with_stop_sequences, validate_generation_params,
-    HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage,
+    error_response, overloaded_response, policy_error_response, record_generation_metrics,
+    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, LogprobResult,
+    ResponseFormat, SamplingParams, Usage,
 };
 use super::handlers::AppState;
 use super::metrics;
+use super::scheduled::generate_text_routed;
 use super::streaming::{create_completion_stream, StreamToken};
 
 /// Text completion endpoint
@@ -57,7 +58,9 @@ pub async fn completions(
         }
     };
 
-    let gen_config = request.sampling_params().into_gen_config();
+    let gen_config = request
+        .sampling_params()
+        .into_gen_config(&state.config().generation);
 
     // The prompt is encoded here, once, and these are the ids that reach the
     // model. Nothing in the caller's text becomes a control token unless the
@@ -78,6 +81,11 @@ pub async fn completions(
         return overloaded_response();
     }
 
+    // The executor and scheduler this request runs on. With data
+    // parallelism, the router picks a replica here.
+    let placement = state.route(executor, &prompt_tokens);
+    let executor = Arc::clone(&placement.executor);
+
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model.clone();
@@ -87,6 +95,7 @@ pub async fn completions(
 
         metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
+            let _placement = placement;
             stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
             state_clone.release(budget);
             metrics::adjust_decode_slots(-1.0);
@@ -113,24 +122,8 @@ pub async fn completions(
                 iter_config.seed = Some(s.wrapping_add(i as u64));
             }
 
-            // Use the configured scheduler when the server has one, else
-            // generate this request on its own.
-            let gen_result = if let Some(ref rs) = state.request_scheduler {
-                match generate_via_scheduler(rs.as_ref(), prompt_tokens.clone(), &iter_config).await
-                {
-                    Ok(r) => Ok(crate::engine::GenerationResult {
-                        text: r.text,
-                        prompt_tokens: r.prompt_tokens,
-                        completion_tokens: r.completion_tokens,
-                        finish_reason: r.finish_reason,
-                        prompt_eval_duration_ms: r.prompt_eval_duration_ms,
-                        token_logprobs: None,
-                    }),
-                    Err(e) => Err(anyhow::anyhow!(e)),
-                }
-            } else {
-                executor.generate_text(&prompt_tokens, &iter_config).await
-            };
+            // The route's batching scheduler when it has one, else its executor.
+            let gen_result = generate_text_routed(&placement, &prompt_tokens, &iter_config).await;
 
             match gen_result {
                 Ok(result) => {
@@ -294,7 +287,7 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub user: Option<String>,
     /// LoRA adapter name to activate for this request.
-    /// The adapter must be loaded beforehand via `POST /v1/lora/load`.
+    /// The adapter must be loaded beforehand via `POST /v1/lora`.
     #[serde(default)]
     pub lora_adapter: Option<String>,
 }

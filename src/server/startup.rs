@@ -1,5 +1,6 @@
 //! Server startup, middleware, and TLS configuration.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,11 +15,12 @@ use tower_http::cors::{preflight_request_headers, AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::config::ServerConfig;
-use crate::engine::{GenerationScheduler, Scheduler};
+use crate::config::{FileConfig, LiveConfig, ReasoningFormat, ServerConfig};
+use crate::engine::Scheduler;
 
+use super::concurrency::{limit_concurrency, ConcurrencyLimit};
 use super::config_watch;
-use super::handlers::{self, AppState};
+use super::handlers::{self, AppState, Serving};
 use super::metrics;
 use super::routes::api_routes;
 use super::tls::build_tls_config;
@@ -146,17 +148,44 @@ async fn inject_request_logging(
     next.run(request).await
 }
 
+/// The user config a running server reads, and the file it reloads from.
+pub struct LiveSettings {
+    /// The config requests read their live defaults from.
+    pub config: Arc<LiveConfig>,
+    /// File the watcher reloads. `None` runs without hot reload.
+    pub path: Option<PathBuf>,
+    /// `--reasoning-format`. Wins over the live `server.reasoning_format`.
+    pub reasoning_format_flag: Option<ReasoningFormat>,
+}
+
+impl LiveSettings {
+    /// A fixed config built from `server`, with no hot reload.
+    pub fn fixed(server: &ServerConfig) -> Self {
+        let file = FileConfig {
+            server: server.clone(),
+            ..Default::default()
+        };
+        Self {
+            config: Arc::new(LiveConfig::new(file)),
+            path: None,
+            reasoning_format_flag: None,
+        }
+    }
+}
+
 /// Start the HTTP inference server with graceful shutdown
 pub async fn start(
     scheduler: Arc<Scheduler<ServerRuntime>>,
     config: ServerConfig,
     api_keys: Vec<String>,
 ) -> Result<()> {
+    let live = LiveSettings::fixed(&config);
     start_with_batch(
         scheduler,
         config,
+        live,
         api_keys,
-        None,
+        Serving::OnDemand,
         Vec::new(),
         #[cfg(feature = "audio")]
         Vec::new(),
@@ -167,17 +196,18 @@ pub async fn start(
     .await
 }
 
-/// Start the HTTP server with optional batched generation.
+/// Start the HTTP server over the executors in `serving`.
 ///
-/// When `request_scheduler` is Some, HTTP handlers submit requests through it
-/// instead of calling executor.generate() directly. The task that drives that
-/// scheduler is spawned separately by the caller (see cli/serve.rs).
+/// A request for the start model runs on its replica's batching scheduler
+/// when it has one. The caller spawns the task that drives each scheduler
+/// (see `cli/serve.rs`).
 #[allow(clippy::too_many_arguments)]
 pub async fn start_with_batch(
     scheduler: Arc<Scheduler<ServerRuntime>>,
     config: ServerConfig,
+    live: LiveSettings,
     api_keys: Vec<String>,
-    request_scheduler: Option<Arc<dyn GenerationScheduler>>,
+    serving: Serving,
     vision_embedders: Vec<(
         String,
         Arc<crate::server::handlers::VisionEmbedder>,
@@ -198,14 +228,17 @@ pub async fn start_with_batch(
     // Install Prometheus metrics recorder
     let metrics_handle = metrics::install_recorder()
         .map_err(|e| anyhow::anyhow!("Failed to install Prometheus metrics recorder: {}", e))?;
-    let mut app_state = AppState::new(scheduler, metrics_handle)
-        .with_max_inflight_tokens(config.max_inflight_tokens)
-        .with_reasoning_format(config.reasoning_format)
-        .with_voice_dir(voice_dir);
-    if let Some(rs) = request_scheduler {
-        app_state = app_state.with_scheduler(rs);
+    if let Some(slo) = &config.slo {
+        super::slo::install(slo.clone());
+        super::slo::publish();
     }
-    let state = Arc::new(app_state);
+    let state = Arc::new(
+        AppState::new(scheduler, metrics_handle)
+            .with_max_inflight_tokens(config.max_inflight_tokens)
+            .with_live_config(Arc::clone(&live.config), live.reasoning_format_flag)
+            .with_voice_dir(voice_dir)
+            .with_serving(serving),
+    );
 
     for (name, embedder, path) in vision_embedders {
         state.register_vision_embedder(name, embedder, path).await;
@@ -220,7 +253,9 @@ pub async fn start_with_batch(
     }
 
     // Start config file watcher for hot-reload
-    config_watch::spawn_config_watcher(state.user_config.clone());
+    if let Some(path) = live.path {
+        config_watch::spawn_config_watcher(live.config, path);
+    }
 
     // Start keep-alive reaper: evicts models that exceed their per-request keep_alive TTL
     {
@@ -278,8 +313,9 @@ pub async fn start_with_batch(
             Duration::from_secs(config.request_timeout_secs),
         ))
         .layer(RequestBodyLimitLayer::new(config.max_body_size))
-        .layer(tower::limit::ConcurrencyLimitLayer::new(
-            config.max_concurrent_requests,
+        .layer(middleware::from_fn_with_state(
+            ConcurrencyLimit::new(config.max_concurrent_requests),
+            limit_concurrency,
         ))
         .layer(middleware::from_fn_with_state(
             api_keys.clone(),

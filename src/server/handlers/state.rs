@@ -8,9 +8,12 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::config::{ReasoningFormat, UserConfig};
-use crate::engine::{GenerationScheduler, Scheduler, SlotManager};
+use crate::config::resolve::resolve_reasoning_format;
+use crate::config::{FileConfig, LiveConfig, ReasoningFormat};
+use crate::engine::{Executor, Scheduler, SlotManager};
 use crate::server::metrics;
+
+use super::route::{Route, Serving};
 
 #[cfg(feature = "cuda")]
 pub type ServerRuntime = boostr::CudaRuntime;
@@ -35,16 +38,19 @@ pub type TtsBundle = voxr::TtsBundle;
 pub struct AppState {
     pub scheduler: Arc<Scheduler<ServerRuntime>>,
     pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
-    pub user_config: Arc<RwLock<UserConfig>>,
+    /// The user config file, swapped whole on each hot reload. Requests
+    /// read their live defaults from it.
+    pub live_config: Arc<LiveConfig>,
+    /// `--reasoning-format`. Wins over `server.reasoning_format`.
+    reasoning_format_flag: Option<ReasoningFormat>,
     /// Current in-flight token count (prompt + estimated decode tokens)
     pub inflight_tokens: AtomicUsize,
     /// Maximum in-flight token budget (0 = unlimited)
     pub max_inflight_tokens: usize,
     /// Inference slot manager
     pub slot_manager: SlotManager,
-    /// Scheduler the handlers submit through, whichever kind the server was
-    /// started with (None = single-request mode).
-    pub request_scheduler: Option<Arc<dyn GenerationScheduler>>,
+    /// The executors loaded at start and their batching schedulers.
+    pub serving: Serving,
     /// Standalone vision embedders (SigLIP/CLIP) keyed by model name, used by
     /// `/v1/embeddings` for image inputs. Populated at server startup from CLI
     /// or config.
@@ -71,8 +77,6 @@ pub struct AppState {
     /// names a bare voice ID (e.g. `af_alloy`): `--voice-dir`, else
     /// `$BLAZR_VOICE_DIR`. The model directory's `voices/` comes after it.
     pub voice_dir: Option<PathBuf>,
-    /// `reasoning_format` for chat requests that do not set one.
-    pub reasoning_format: ReasoningFormat,
 }
 
 impl AppState {
@@ -83,11 +87,12 @@ impl AppState {
         Self {
             scheduler,
             metrics_handle,
-            user_config: Arc::new(RwLock::new(UserConfig::load())),
+            live_config: Arc::new(LiveConfig::default()),
+            reasoning_format_flag: None,
             inflight_tokens: AtomicUsize::new(0),
             max_inflight_tokens: 0,
             slot_manager: SlotManager::new(0), // unlimited by default
-            request_scheduler: None,
+            serving: Serving::OnDemand,
             vision_embedders: Arc::new(RwLock::new(HashMap::new())),
             vision_paths: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "audio")]
@@ -99,14 +104,29 @@ impl AppState {
             #[cfg(feature = "audio")]
             tts_paths: Arc::new(RwLock::new(HashMap::new())),
             voice_dir: None,
-            reasoning_format: ReasoningFormat::default(),
         }
     }
 
-    /// Set the default [`ReasoningFormat`] for chat requests.
-    pub fn with_reasoning_format(mut self, format: ReasoningFormat) -> Self {
-        self.reasoning_format = format;
+    /// Serve from `live` and keep `--reasoning-format` over it.
+    pub fn with_live_config(
+        mut self,
+        live: Arc<LiveConfig>,
+        reasoning_format_flag: Option<ReasoningFormat>,
+    ) -> Self {
+        self.live_config = live;
+        self.reasoning_format_flag = reasoning_format_flag;
         self
+    }
+
+    /// The current user config. One request holds one snapshot.
+    pub fn config(&self) -> Arc<FileConfig> {
+        self.live_config.snapshot()
+    }
+
+    /// The [`ReasoningFormat`] for a chat request that sets none:
+    /// `--reasoning-format`, then the live `server.reasoning_format`.
+    pub fn reasoning_format(&self) -> ReasoningFormat {
+        resolve_reasoning_format(self.reasoning_format_flag, &self.config().server)
     }
 
     /// Attach a voice directory (see [`AppState::voice_dir`]). Fluent builder
@@ -191,11 +211,15 @@ impl AppState {
         self
     }
 
-    /// Route generation through `scheduler` instead of the single-sequence
-    /// path.
-    pub fn with_scheduler(mut self, scheduler: Arc<dyn GenerationScheduler>) -> Self {
-        self.request_scheduler = Some(scheduler);
+    /// Serve the start model from `serving`.
+    pub fn with_serving(mut self, serving: Serving) -> Self {
+        self.serving = serving;
         self
+    }
+
+    /// The executor and scheduler for a request `executor` resolved to.
+    pub fn route(&self, executor: Arc<Executor<ServerRuntime>>, prompt_tokens: &[u32]) -> Route {
+        self.serving.route(executor, prompt_tokens)
     }
 
     /// Try to admit a request with the given token budget.

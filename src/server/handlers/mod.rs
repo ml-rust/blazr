@@ -7,6 +7,7 @@
 mod auxiliary;
 mod health;
 mod models;
+mod route;
 mod slots;
 mod state;
 mod template;
@@ -15,6 +16,7 @@ mod tokenize;
 pub use auxiliary::{AuxiliaryKind, AuxiliaryModel};
 pub use health::health;
 pub use models::{get_model, list_models, ModelInfo, ModelsResponse};
+pub use route::{Route, ServeReplica, Serving};
 pub use slots::{create_slot, delete_slot, list_slots};
 #[cfg(feature = "audio")]
 pub use state::AsrBundle;

@@ -38,8 +38,8 @@ pub struct Cli {
 pub enum Commands {
     /// Run interactive generation with a model
     Run {
-        /// Model name or path
-        model: String,
+        /// Model name or path [default: default_model]
+        model: Option<String>,
 
         /// Optional initial prompt
         #[arg(long, short)]
@@ -64,7 +64,7 @@ pub enum Commands {
 
     /// Start inference server
     Serve {
-        /// Model name or path (optional, can load on-demand)
+        /// Model to load at start. Others load on demand. [default: default_model]
         #[arg(long, short)]
         model: Option<String>,
 
@@ -75,28 +75,37 @@ pub enum Commands {
         #[arg(long, value_name = "NAME|FILE")]
         chat_template: Option<String>,
 
-        /// Port to listen on
-        #[arg(long, default_value = "8080")]
-        port: u16,
+        /// Port to listen on [default: server.port, else 8080]
+        #[arg(long)]
+        port: Option<u16>,
 
-        /// Host to bind to
-        #[arg(long, default_value = "0.0.0.0")]
-        host: String,
+        /// Host to bind to [default: server.host, else 0.0.0.0]
+        #[arg(long)]
+        host: Option<String>,
 
-        /// API key for authentication (also reads BLAZR_API_KEY env var)
-        #[arg(long, env = "BLAZR_API_KEY")]
+        /// Copies of the start model, one per device: CUDA devices from the
+        /// `device` index up, or CPU copies on a CPU build. Requests for it
+        /// go to the copy with a warm prefix cache, else the least loaded.
+        /// Above 1, needs a start model and tensor parallelism at 1.
+        /// [default: inference.data_parallel, else 1]
+        #[arg(long, value_name = "N")]
+        data_parallel: Option<usize>,
+
+        /// API key for authentication [default: $BLAZR_API_KEY]
+        #[arg(long)]
         api_key: Option<String>,
 
         /// File containing API keys (one per line)
         #[arg(long)]
         api_key_file: Option<std::path::PathBuf>,
 
-        /// TLS certificate file (PEM format) — enables HTTPS
-        #[arg(long, requires = "tls_key")]
+        /// TLS certificate file (PEM format). With a key, enables HTTPS.
+        /// [default: server.tls_cert]
+        #[arg(long)]
         tls_cert: Option<std::path::PathBuf>,
 
-        /// TLS private key file (PEM format)
-        #[arg(long, requires = "tls_cert")]
+        /// TLS private key file (PEM format) [default: server.tls_key]
+        #[arg(long)]
         tls_key: Option<std::path::PathBuf>,
 
         /// Register a standalone vision embedder (SigLIP/CLIP) for `/v1/embeddings`
@@ -172,8 +181,8 @@ pub enum Commands {
         tts_continuous_capacity: usize,
 
         /// Directory of Kokoro voice files (`.safetensors`, `.pt`, or
-        /// `.pth`), searched before the model directory's `voices/`. Falls
-        /// back to `$BLAZR_VOICE_DIR`. A bare `voice` id in
+        /// `.pth`), searched before the model directory's `voices/`.
+        /// [default: $BLAZR_VOICE_DIR]. A bare `voice` id in
         /// `/v1/audio/speech` (e.g. `af_alloy`) is looked up here; a path
         /// is read as given.
         #[arg(long = "voice-dir", value_name = "DIR")]
@@ -182,8 +191,9 @@ pub enum Commands {
         /// Default reasoning split for chat responses: `deepseek` returns the
         /// think block as `reasoning_content` and the answer as `content`,
         /// `none` returns raw output. A request's `reasoning_format` overrides.
-        #[arg(long, value_enum, default_value = "deepseek")]
-        reasoning_format: crate::config::ReasoningFormat,
+        /// [default: server.reasoning_format, else deepseek]
+        #[arg(long, value_enum)]
+        reasoning_format: Option<crate::config::ReasoningFormat>,
 
         #[command(flatten)]
         vision: VisionArgs,
@@ -211,16 +221,16 @@ pub enum Commands {
         #[arg(long)]
         file: Option<String>,
 
-        /// Output directory
+        /// Output directory [default: $BLAZR_MODEL_DIR, then model_dir, then ./models]
         #[arg(long, short)]
         output: Option<std::path::PathBuf>,
     },
 
     /// Generate text (non-interactive)
     Generate {
-        /// Model name or path
+        /// Model name or path [default: default_model]
         #[arg(long, short)]
-        model: String,
+        model: Option<String>,
 
         /// Prompt text
         #[arg(long, short)]
@@ -243,8 +253,8 @@ pub enum Commands {
 
     /// Interactive multi-turn chat with a model
     Chat {
-        /// Model name or path
-        model: String,
+        /// Model name or path [default: default_model]
+        model: Option<String>,
 
         /// System prompt
         #[arg(long, short)]
@@ -256,21 +266,21 @@ pub enum Commands {
         #[arg(long, value_name = "NAME|FILE")]
         chat_template: Option<String>,
 
-        /// Maximum tokens to generate per turn
-        #[arg(long, default_value = "2048")]
-        max_tokens: usize,
+        /// Maximum tokens per turn [default: generation.max_tokens, else 2048]
+        #[arg(long)]
+        max_tokens: Option<usize>,
 
-        /// Sampling temperature (0 = greedy)
-        #[arg(long, default_value = "0.7")]
-        temperature: f32,
+        /// Sampling temperature, 0 = greedy [default: generation.temperature, else 1.0]
+        #[arg(long)]
+        temperature: Option<f32>,
 
-        /// Top-p nucleus sampling
-        #[arg(long, default_value = "0.9")]
-        top_p: f32,
+        /// Top-p nucleus sampling [default: generation.top_p, else 1.0]
+        #[arg(long)]
+        top_p: Option<f32>,
 
-        /// Context window size
-        #[arg(long, default_value = "4096")]
-        num_ctx: usize,
+        /// Initial KV cache size [default: num_ctx, else 2048]
+        #[arg(long)]
+        num_ctx: Option<usize>,
 
         /// Show debug info (token IDs, timing breakdown)
         #[arg(long, short)]
@@ -282,12 +292,12 @@ pub enum Commands {
 
     /// Benchmark model performance (tok/s, TTFT, ITL)
     Bench {
-        /// Model name or path
-        model: String,
+        /// Model name or path [default: default_model]
+        model: Option<String>,
 
-        /// Context window size
-        #[arg(long, default_value = "2048")]
-        num_ctx: usize,
+        /// Initial KV cache size [default: num_ctx, else 2048]
+        #[arg(long)]
+        num_ctx: Option<usize>,
 
         /// Number of tokens to generate per run
         #[arg(long)]
@@ -346,7 +356,7 @@ pub enum Commands {
         #[arg(long, env = "BLAZR_SWARM_TOKEN")]
         token: String,
 
-        /// Model to serve (leader only)
+        /// Model to serve (leader only) [default: default_model]
         #[arg(long, short)]
         model: Option<String>,
 
@@ -358,9 +368,17 @@ pub enum Commands {
         #[arg(long, default_value = "9090")]
         swarm_port: u16,
 
-        /// Port for HTTP API (leader only)
-        #[arg(long, default_value = "8080")]
-        port: u16,
+        /// Port for HTTP API (leader only) [default: server.port, else 8080]
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Host for HTTP API (leader only) [default: server.host, else 0.0.0.0]
+        #[arg(long)]
+        host: Option<String>,
+
+        /// API key for the leader's HTTP API [default: $BLAZR_API_KEY]
+        #[arg(long)]
+        api_key: Option<String>,
 
         /// Enable mDNS auto-discovery on LAN
         #[arg(long)]
@@ -374,7 +392,7 @@ pub enum Commands {
         #[arg(long, default_value = "router")]
         role: String,
 
-        /// Model to load (required for prefill and decode roles)
+        /// Model to load (prefill and decode roles) [default: default_model]
         #[arg(long, short)]
         model: Option<String>,
 
@@ -394,9 +412,13 @@ pub enum Commands {
         #[arg(long, num_args = 1..)]
         decode: Option<Vec<String>>,
 
-        /// HTTP API port (router role only)
-        #[arg(long, default_value = "8080")]
-        port: u16,
+        /// HTTP API port (router role only) [default: server.port, else 8080]
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// HTTP API host (router role only) [default: server.host, else 0.0.0.0]
+        #[arg(long)]
+        host: Option<String>,
     },
 
     /// Narration from a script: the voiceover WAV, its script, its phrase
@@ -425,17 +447,6 @@ pub enum Commands {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: clap_complete::Shell,
-    },
-
-    /// Decode a file with a model (for testing)
-    #[command(hide = true)]
-    Decode {
-        /// Model name or path
-        #[arg(long, short)]
-        model: String,
-
-        /// Input file
-        input: std::path::PathBuf,
     },
 }
 

@@ -9,6 +9,7 @@ use anyhow::Result;
 use colored::Colorize;
 use futures::StreamExt;
 
+use super::LoadSettings;
 use crate::config::GenerationConfig;
 use crate::engine::Executor;
 use crate::loader::{self, detect_model_source, ModelFormat};
@@ -32,10 +33,12 @@ const WARMUP_RUNS: usize = 1;
 /// Number of measurement runs
 const MEASURE_RUNS: usize = 3;
 
-/// Run benchmarks on a model
+/// Run benchmarks on a model. `load` carries `num_ctx` and the user
+/// config file's inference keys. `cuda_index` comes from `device`.
 pub async fn bench(
     model: String,
-    num_ctx: usize,
+    load: LoadSettings,
+    cuda_index: usize,
     decode_tokens: Option<usize>,
     runs: Option<usize>,
     json_output: Option<PathBuf>,
@@ -55,13 +58,16 @@ pub async fn bench(
     let spinner = super::util::spinner(format!("Loading model '{}'...", model));
 
     #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(0);
+    let device = boostr::CudaDevice::new(cuda_index);
     #[cfg(not(feature = "cuda"))]
-    let device = boostr::CpuDevice::new();
+    let device = {
+        let _ = cuda_index;
+        boostr::CpuDevice::new()
+    };
 
     let source = detect_model_source(std::path::Path::new(&model))?;
 
-    let (loaded_model, config, tokenizer) = match source.format {
+    let (loaded_model, mut config, tokenizer) = match source.format {
         ModelFormat::Gguf => {
             let (m, c, tok) = loader::load_gguf_with_tokenizer::<BenchRuntime, _>(&model, &device)?;
             (m, c, tok)
@@ -81,6 +87,8 @@ pub async fn bench(
             .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
     }
 
+    load.apply(&mut config.inference)?;
+    let num_ctx = load.num_ctx;
     let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?;
     executor.warmup()?;
     spinner.finish_and_clear();

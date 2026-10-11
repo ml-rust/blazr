@@ -9,9 +9,10 @@
 //! the lane count and the per-request state, so the HTTP handlers reach it
 //! through [`GenerationScheduler`] exactly as they reach the paged scheduler.
 //!
+//! The queue length is published as `blazr_queue_depth`. With an SLO
+//! policy, a P95 latency breach stops the engine from filling more lanes.
+//!
 //! [`LaneEngine`]: super::lane_engine::LaneEngine
-
-#![cfg(feature = "cuda")]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -21,7 +22,9 @@ use tokio::sync::mpsc;
 
 use boostr::inference::scheduler::SequenceId;
 
+use super::queue_depth::QueueDepth;
 use super::request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
+use super::slo_policy::SloBatchPolicy;
 use crate::config::GenerationConfig;
 
 /// Wakeups the driver can miss without blocking a submitting handler.
@@ -40,6 +43,10 @@ pub struct LaneScheduler {
     notify_tx: mpsc::Sender<()>,
     /// Receiver end, taken once by the driver.
     notify_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    /// The waiting queue's length, published as `blazr_queue_depth`.
+    queue_depth: QueueDepth,
+    /// Holds lane filling while a P95 latency target is breached.
+    slo_policy: Option<Arc<SloBatchPolicy>>,
 }
 
 impl LaneScheduler {
@@ -49,6 +56,18 @@ impl LaneScheduler {
     ///
     /// An error when `lanes` is 0.
     pub fn new(lanes: usize) -> Result<Arc<Self>> {
+        Self::with_slo_policy(lanes, None)
+    }
+
+    /// A scheduler feeding `lanes` lanes, with an optional SLO policy.
+    ///
+    /// # Errors
+    ///
+    /// An error when `lanes` is 0.
+    pub fn with_slo_policy(
+        lanes: usize,
+        slo_policy: Option<Arc<SloBatchPolicy>>,
+    ) -> Result<Arc<Self>> {
         if lanes == 0 {
             return Err(anyhow!(
                 "a lane scheduler needs at least one lane, got lanes=0; set \
@@ -62,6 +81,8 @@ impl LaneScheduler {
             lanes,
             notify_tx,
             notify_rx: Mutex::new(Some(notify_rx)),
+            queue_depth: QueueDepth::new(),
+            slo_policy,
         }))
     }
 
@@ -77,7 +98,11 @@ impl LaneScheduler {
     ) -> Result<RequestHandle> {
         let seq_id = self.registry.next_id();
         let handle = self.registry.insert(seq_id, prompt_tokens, gen_config)?;
-        self.lock_waiting()?.push_back(seq_id);
+        {
+            let mut waiting = self.lock_waiting()?;
+            waiting.push_back(seq_id);
+            self.queue_depth.set(waiting.len());
+        }
         let _ = self.notify_tx.try_send(());
         Ok(handle)
     }
@@ -91,13 +116,31 @@ impl LaneScheduler {
     ///
     /// An error when the queue or the registry lock is poisoned.
     pub fn cancel(&self, seq_id: SequenceId) -> Result<()> {
-        self.lock_waiting()?.retain(|&id| id != seq_id);
+        {
+            let mut waiting = self.lock_waiting()?;
+            waiting.retain(|&id| id != seq_id);
+            self.queue_depth.set(waiting.len());
+        }
         self.registry.remove(seq_id)
     }
 
     /// The oldest waiting request, removed from the queue.
     pub fn next_waiting(&self) -> Option<SequenceId> {
-        self.waiting.lock().ok()?.pop_front()
+        let mut waiting = self.waiting.lock().ok()?;
+        let next = waiting.pop_front();
+        self.queue_depth.set(waiting.len());
+        next
+    }
+
+    /// The most lanes the driver fills when `live` lanes are occupied.
+    ///
+    /// Without an SLO breach this is every lane. Under a breach it is
+    /// `live`, with a floor of 1, so the occupied set does not grow.
+    pub fn admission_limit(&self, live: usize) -> usize {
+        match &self.slo_policy {
+            Some(policy) => policy.batch_limit(live, self.lanes),
+            None => self.lanes,
+        }
     }
 
     /// How many requests are waiting for a lane.
@@ -135,6 +178,10 @@ impl GenerationScheduler for LaneScheduler {
         gen_config: GenerationConfig,
     ) -> Result<RequestHandle> {
         LaneScheduler::submit(self, prompt_tokens, gen_config)
+    }
+
+    fn queue_depth(&self) -> usize {
+        self.waiting_len()
     }
 }
 
@@ -183,6 +230,45 @@ mod tests {
         assert_eq!(scheduler.waiting_len(), 1);
         assert!(!scheduler.registry().contains(first.seq_id));
         assert_eq!(scheduler.next_waiting(), Some(second.seq_id));
+    }
+
+    #[test]
+    fn queue_depth_follows_submit_admit_and_cancel() {
+        use crate::server::metrics::names::QUEUE_DEPTH;
+        use crate::server::test_recorder::TestRecorder;
+
+        let recorder = TestRecorder::install();
+        let scheduler = LaneScheduler::new(2).expect("new");
+        let first = scheduler.submit(vec![1], config()).expect("submit");
+        let _second = scheduler.submit(vec![2], config()).expect("submit");
+        let third = scheduler.submit(vec![3], config()).expect("submit");
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(3.0));
+        assert_eq!(scheduler.next_waiting(), Some(first.seq_id));
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(2.0));
+        scheduler.cancel(third.seq_id).expect("cancel");
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(1.0));
+        drop(scheduler);
+        assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(0.0));
+    }
+
+    #[test]
+    fn an_slo_breach_stops_filling_lanes() {
+        let slo = crate::config::LatencySlo {
+            ttft_p50_ms: None,
+            ttft_p95_ms: Some(100),
+            ttft_p99_ms: None,
+            itl_p50_ms: None,
+            itl_p95_ms: None,
+            itl_p99_ms: None,
+            e2e_p99_ms: None,
+        };
+        let policy = Arc::new(SloBatchPolicy::from_slo(&slo).expect("policy"));
+        let scheduler = LaneScheduler::with_slo_policy(4, Some(Arc::clone(&policy))).expect("new");
+        assert_eq!(scheduler.admission_limit(2), 4);
+        policy.observe_ttft_ms(300.0);
+        assert_eq!(scheduler.admission_limit(2), 2);
+        assert_eq!(scheduler.admission_limit(0), 1);
+        assert_eq!(LaneScheduler::new(4).expect("new").admission_limit(2), 4);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use super::generation::{
 };
 use super::handlers::AppState;
 use super::metrics;
+use super::scheduled::generate_text_routed;
 use super::streaming::{create_completion_stream, StreamToken};
 
 /// FIM token names used across different model families
@@ -108,7 +109,9 @@ pub async fn infill(
         }
     };
 
-    let gen_config = request.sampling_params().into_gen_config();
+    let gen_config = request
+        .sampling_params()
+        .into_gen_config(&state.config().generation);
 
     // Token budget admission control. The single encode of the assembled prompt
     // doubles as the gate: only the FIM markers this endpoint inserted are
@@ -125,6 +128,11 @@ pub async fn infill(
         return overloaded_response();
     }
 
+    // The executor and scheduler this request runs on. With data
+    // parallelism, the router picks a replica here.
+    let placement = state.route(executor, &prompt_tokens);
+    let executor = Arc::clone(&placement.executor);
+
     if request.stream.unwrap_or(false) {
         let id = format!("fim-{}", uuid::Uuid::new_v4());
         let model_name = request.model.clone();
@@ -134,6 +142,7 @@ pub async fn infill(
 
         metrics::adjust_decode_slots(1.0);
         tokio::spawn(async move {
+            let _placement = placement;
             stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
             state_clone.release(budget);
             metrics::adjust_decode_slots(-1.0);
@@ -146,7 +155,7 @@ pub async fn infill(
         let model_name = request.model.clone();
         let start = Instant::now();
 
-        match executor.generate_text(&prompt_tokens, &gen_config).await {
+        match generate_text_routed(&placement, &prompt_tokens, &gen_config).await {
             Ok(result) => {
                 let elapsed = start.elapsed();
                 record_generation_metrics(

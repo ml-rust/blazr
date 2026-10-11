@@ -9,13 +9,16 @@
 //!
 //! With `inference.max_batch_size` at 1 neither is built, and the handlers
 //! take the single-sequence path.
+//!
+//! With `server.slo` P95 targets, both schedulers stop growing the batch
+//! while a target is breached.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::engine::{BatchEngine, Executor, GenerationScheduler, RequestScheduler};
+use crate::engine::{BatchEngine, Executor, GenerationScheduler, RequestScheduler, SloBatchPolicy};
 
 #[cfg(feature = "cuda")]
 type ServerRuntime = boostr::CudaRuntime;
@@ -56,13 +59,16 @@ pub fn batching_choice(
 /// Build the scheduler `executor`'s model calls for, spawn the task that
 /// drives it, and return it for the server state.
 ///
-/// `Ok(None)` means the handlers generate one sequence at a time.
+/// `Ok(None)` means the handlers generate one sequence at a time. `device`
+/// names the executor's device in the startup line.
 ///
 /// # Errors
 ///
 /// An error when the chosen engine cannot be built for this model.
 pub async fn configure_batching(
     executor: Arc<Executor<ServerRuntime>>,
+    slo_policy: Option<Arc<SloBatchPolicy>>,
+    device: &str,
 ) -> Result<Option<Arc<dyn GenerationScheduler>>> {
     let max_batch = executor.config().inference.max_batch_size;
     let choice = batching_choice(
@@ -73,8 +79,8 @@ pub async fn configure_batching(
 
     match choice {
         BatchingChoice::Single => Ok(None),
-        BatchingChoice::Lanes => lane_batching(executor, max_batch).await,
-        BatchingChoice::Paged => paged_batching(executor, max_batch).map(Some),
+        BatchingChoice::Lanes => lane_batching(executor, max_batch, slo_policy, device).await,
+        BatchingChoice::Paged => paged_batching(executor, max_batch, slo_policy, device).map(Some),
     }
 }
 
@@ -83,19 +89,22 @@ pub async fn configure_batching(
 async fn lane_batching(
     executor: Arc<Executor<ServerRuntime>>,
     max_batch: usize,
+    slo_policy: Option<Arc<SloBatchPolicy>>,
+    device: &str,
 ) -> Result<Option<Arc<dyn GenerationScheduler>>> {
     use crate::engine::{LaneEngine, LaneScheduler};
 
-    let lane_scheduler = LaneScheduler::new(max_batch)?;
+    let lane_scheduler = LaneScheduler::with_slo_policy(max_batch, slo_policy)?;
     let engine = LaneEngine::open(executor, Arc::clone(&lane_scheduler)).await?;
     let mode = engine.mode();
     tokio::spawn(engine.run());
 
     eprintln!(
-        "  Batching: {} (lanes={}, decode={:?})",
+        "  Batching: {} (lanes={}, decode={:?}, device={})",
         "lanes".green(),
         max_batch,
         mode,
+        device,
     );
 
     let configured: Arc<dyn GenerationScheduler> = lane_scheduler;
@@ -108,6 +117,8 @@ async fn lane_batching(
 async fn lane_batching(
     executor: Arc<Executor<ServerRuntime>>,
     max_batch: usize,
+    _slo_policy: Option<Arc<SloBatchPolicy>>,
+    _device: &str,
 ) -> Result<Option<Arc<dyn GenerationScheduler>>> {
     tracing::warn!(
         "model {} decodes in lanes, which needs a CUDA build; inference.max_batch_size = {} is \
@@ -122,6 +133,8 @@ async fn lane_batching(
 fn paged_batching(
     executor: Arc<Executor<ServerRuntime>>,
     max_batch: usize,
+    slo_policy: Option<Arc<SloBatchPolicy>>,
+    device: &str,
 ) -> Result<Arc<dyn GenerationScheduler>> {
     let block_size = executor.config().inference.block_size;
     let kv_pool = executor.config().inference.kv_pool_blocks;
@@ -142,7 +155,7 @@ fn paged_batching(
     };
 
     // Create prefix cache if enabled
-    let request_scheduler = if executor.config().inference.prefix_cache {
+    let prefix_cache = executor.config().inference.prefix_cache.then(|| {
         let cache_config = boostr::inference::prefix_cache::PrefixCacheConfig {
             enabled: true,
             block_size,
@@ -153,12 +166,10 @@ fn paged_batching(
                 .max(total_blocks / 4),
             ..Default::default()
         };
-        let cache =
-            boostr::inference::prefix_cache::PrefixCache::new(allocator.clone(), cache_config);
-        RequestScheduler::with_prefix_cache(allocator, sched_config, cache)
-    } else {
-        RequestScheduler::new(allocator, sched_config)
-    };
+        boostr::inference::prefix_cache::PrefixCache::new(allocator.clone(), cache_config)
+    });
+    let request_scheduler =
+        RequestScheduler::build(allocator, sched_config, prefix_cache, slo_policy);
 
     let batch_engine = BatchEngine::new(executor, Arc::clone(&request_scheduler))?;
     tokio::spawn(async move {
@@ -166,10 +177,11 @@ fn paged_batching(
     });
 
     eprintln!(
-        "  Batching: {} (max_batch={}, blocks={})",
+        "  Batching: {} (max_batch={}, blocks={}, device={})",
         "continuous".green(),
         max_batch,
         total_blocks,
+        device,
     );
 
     let configured: Arc<dyn GenerationScheduler> = request_scheduler;

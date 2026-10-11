@@ -112,7 +112,7 @@ pub enum ContentPart {
 /// Image URL or base64-encoded image data.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageUrl {
-    /// URL (http/https), base64 data URI (`data:image/png;base64,...`), or local path.
+    /// `data:` URI (`data:image/png;base64,...`), `http(s)` URL, or raw base64. The server never reads local paths.
     pub url: String,
     /// Optional detail level: "auto", "low", "high"
     #[serde(default = "default_detail")]
@@ -182,9 +182,18 @@ pub async fn decode_image(url: &str) -> Result<DecodedImage, String> {
             mime_type,
         })
     } else {
-        // Assume plain base64
-        let bytes = base64_decode(url)?;
+        // Anything else is raw base64. The server never reads local files.
+        let bytes = base64_decode(url).map_err(|e| {
+            format!("Invalid image_url: expected a data: URI, an http(s) URL, or base64 ({e})")
+        })?;
         let mime_type = detect_image_mime(&bytes);
+        if mime_type == UNKNOWN_IMAGE_MIME {
+            return Err(
+                "Invalid image_url: expected a data: URI, an http(s) URL, or base64 \
+                 of a PNG, JPEG, WebP, or GIF image"
+                    .to_string(),
+            );
+        }
         Ok(DecodedImage {
             data: bytes,
             mime_type,
@@ -212,6 +221,9 @@ fn decode_base64_image(mime_type: &str, data: &str) -> Result<DecodedImage, Stri
     })
 }
 
+/// MIME type `detect_image_mime` returns when no image signature matches.
+const UNKNOWN_IMAGE_MIME: &str = "application/octet-stream";
+
 /// Detect MIME type from image magic bytes.
 fn detect_image_mime(data: &[u8]) -> String {
     if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
@@ -223,7 +235,7 @@ fn detect_image_mime(data: &[u8]) -> String {
     } else if data.starts_with(b"GIF8") {
         "image/gif".to_string()
     } else {
-        "application/octet-stream".to_string()
+        UNKNOWN_IMAGE_MIME.to_string()
     }
 }
 
@@ -318,6 +330,16 @@ mod tests {
         );
         assert_eq!(detect_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
         assert_eq!(detect_image_mime(&[0x00, 0x01]), "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn test_decode_image_rejects_local_path() {
+        let Err(err) = decode_image("/etc/passwd").await else {
+            panic!("a local path must not decode");
+        };
+        assert!(err.contains("data: URI"), "{err}");
+        assert!(err.contains("http(s) URL"), "{err}");
+        assert!(err.contains("base64"), "{err}");
     }
 
     #[test]

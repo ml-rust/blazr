@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use blazr::engine::{GenerationScheduler, LaneEngine, LaneScheduler, Scheduler};
+use blazr::server::handlers::{ServeReplica, Serving};
 use blazr::server::{api_routes, metrics, AppState};
 use boostr::{CudaDevice, CudaRuntime};
 
@@ -147,10 +148,14 @@ async fn concurrent_chat_requests_match_their_solo_answers() {
 
     let handle = metrics::install_recorder().unwrap_or_else(|e| panic!("metrics recorder: {e}"));
     let scheduler_for_state: Arc<dyn GenerationScheduler> = lane_scheduler.clone();
-    let state =
-        Arc::new(AppState::new(Arc::clone(&scheduler), handle).with_scheduler(scheduler_for_state));
+    let serving = Serving::Single(ServeReplica {
+        executor: Arc::clone(&executor),
+        scheduler: Some(scheduler_for_state),
+        device: "cuda:0".to_string(),
+    });
+    let state = Arc::new(AppState::new(Arc::clone(&scheduler), handle).with_serving(serving));
     assert!(
-        state.request_scheduler.is_some(),
+        state.route(Arc::clone(&executor), &[]).scheduler.is_some(),
         "the handlers must route through the lane scheduler, not the single-sequence path"
     );
 

@@ -6,26 +6,28 @@ use std::sync::Arc;
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::config::{ReasoningFormat, ServerConfig, VisionOverrides};
-use crate::engine::Scheduler;
-use crate::server;
+use crate::config::{FileConfig, LiveConfig, ServeSettings, VisionOverrides};
+use crate::server::handlers::Serving;
+use crate::server::{self, LiveSettings};
+
+use super::serve_replicas::{load_serving, SchedulerSettings};
 
 #[cfg(feature = "cuda")]
 type ServerRuntime = boostr::CudaRuntime;
 #[cfg(not(feature = "cuda"))]
 type ServerRuntime = boostr::CpuRuntime;
 
-/// Start the inference server
+/// Start the inference server.
+///
+/// `settings` holds every value resolved from flags, environment and
+/// `file`. `file_path` is the file the server hot-reloads.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
-    model: Option<String>,
+    settings: ServeSettings,
+    file: FileConfig,
+    file_path: Option<PathBuf>,
     chat_template: Option<String>,
-    port: u16,
-    host: String,
-    api_key: Option<String>,
     api_key_file: Option<PathBuf>,
-    tls_cert: Option<PathBuf>,
-    tls_key: Option<PathBuf>,
     vision_models: Vec<String>,
     #[cfg(feature = "audio")] asr_models: Vec<String>,
     #[cfg(feature = "audio")] tts_models: Vec<String>,
@@ -33,40 +35,56 @@ pub async fn serve(
     #[cfg(feature = "audio")] tts_batch_window_ms: u64,
     #[cfg(feature = "audio")] tts_continuous_batching: bool,
     #[cfg(feature = "audio")] tts_continuous_capacity: usize,
-    voice_dir: Option<PathBuf>,
-    reasoning_format: ReasoningFormat,
     vision: VisionOverrides,
 ) -> Result<()> {
-    // Get model directory
-    let model_dir = std::env::var("BLAZR_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./models"));
+    let ServeSettings {
+        model,
+        model_dir,
+        cuda_index,
+        num_ctx,
+        tensor_parallel_size,
+        data_parallel,
+        server: server_config,
+        reasoning_format_flag,
+        api_key,
+        voice_dir,
+    } = settings;
+
+    // Check the tensor parallel degree before any model loads.
+    if let Some(tp) = tensor_parallel_size {
+        crate::engine::tensor_parallel::validate_tp_config(tp, None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    if file.inference.graphs() == Some(true) {
+        tracing::warn!(
+            "inference.graphs applies to `blazr run` and `generate`. blazr serve decodes without \
+             graph capture"
+        );
+    }
 
     // Initialize device
     #[cfg(feature = "cuda")]
-    let device = boostr::CudaDevice::new(0);
+    let device = boostr::CudaDevice::new(cuda_index);
     #[cfg(not(feature = "cuda"))]
     let device = boostr::CpuDevice::new();
 
-    // Validate tensor parallelism requirements eagerly
-    if let Ok(tp) = std::env::var("BLAZR_TP_SIZE") {
-        if tp.parse::<usize>().unwrap_or(1) > 1 {
-            #[cfg(not(all(feature = "cuda", feature = "nccl")))]
-            {
-                anyhow::bail!(
-                    "Tensor parallelism requires rebuilding with: cargo build --release --features cuda,nccl (BLAZR_TP_SIZE={})",
-                    tp
-                );
-            }
-        }
-    }
-
-    // Create scheduler
-    let scheduler = Arc::new(
-        Scheduler::<ServerRuntime>::new(model_dir, device.clone())
-            .with_chat_template(chat_template)
-            .with_vision(vision),
-    );
+    // The model scheduler. Data-parallel replicas build theirs the same way.
+    let scheduler_settings = SchedulerSettings {
+        model_dir,
+        num_ctx,
+        chat_template,
+        inference: file.inference.clone(),
+        tensor_parallel_size,
+        vision,
+    };
+    let scheduler = Arc::new(scheduler_settings.build(device.clone()));
+    // The SLO checks and the batch policy start before any batching engine.
+    let slo_policy = server_config.slo.clone().and_then(server::slo::install);
+    let live = LiveSettings {
+        config: Arc::new(LiveConfig::new(file)),
+        path: file_path,
+        reasoning_format_flag,
+    };
 
     // Pre-load and warm up model if specified
     if let Some(ref model_name) = model {
@@ -124,16 +142,6 @@ pub async fn serve(
         }
     }
 
-    // Server config
-    let server_config = ServerConfig {
-        port,
-        host,
-        tls_cert,
-        tls_key,
-        reasoning_format,
-        ..Default::default()
-    };
-
     // Collect API keys from --api-key and --api-key-file
     let mut api_keys: Vec<String> = Vec::new();
     if let Some(key) = api_key {
@@ -179,14 +187,21 @@ pub async fn serve(
     }
     eprintln!();
 
-    // Whichever scheduler this model's decode path calls for, with its
-    // driver task already running.
-    let request_scheduler = match model {
+    // The start model's copies, each with the batching scheduler its decode
+    // path calls for and that scheduler's driver task running.
+    let serving = match model {
         Some(ref model_name) => {
-            let executor = scheduler.get_executor(model_name).await?;
-            super::serve_batching::configure_batching(executor).await?
+            load_serving(
+                &scheduler,
+                &scheduler_settings,
+                model_name,
+                cuda_index,
+                data_parallel,
+                slo_policy,
+            )
+            .await?
         }
-        None => None,
+        None => Serving::OnDemand,
     };
 
     // Load any standalone vision embedders before serving
@@ -285,9 +300,7 @@ pub async fn serve(
 
     // The voice directory: the CLI flag, else the env var. The model
     // directory's `voices/` is searched after it.
-    let effective_voice_dir =
-        voice_dir.or_else(|| std::env::var("BLAZR_VOICE_DIR").ok().map(PathBuf::from));
-    if let Some(dir) = &effective_voice_dir {
+    if let Some(dir) = &voice_dir {
         eprintln!(
             "  {} Voice directory: {}",
             "✓".green(),
@@ -299,14 +312,15 @@ pub async fn serve(
     server::start_with_batch(
         scheduler,
         server_config,
+        live,
         api_keys,
-        request_scheduler,
+        serving,
         loaded_vision,
         #[cfg(feature = "audio")]
         loaded_asr,
         #[cfg(feature = "audio")]
         loaded_tts,
-        effective_voice_dir,
+        voice_dir,
     )
     .await?;
 

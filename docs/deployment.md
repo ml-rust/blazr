@@ -64,15 +64,16 @@ The binary is `target/release/blazr`. Run `blazr --version` to list the built fe
 
 | Flag                                       | Default                  | Purpose                                                                            |
 | ------------------------------------------ | ------------------------ | ---------------------------------------------------------------------------------- |
-| `--model`, `-m`                            | none                     | Model to load at startup. A name or a path.                                        |
+| `--model`, `-m`                            | `default_model`          | Model to load at startup. A name or a path.                                        |
 | `--chat-template`                          | the model's own template | Built-in name or Jinja template file for every served model.                       |
-| `--host`                                   | `0.0.0.0`                | Address to bind.                                                                   |
-| `--port`                                   | `8080`                   | Port to bind.                                                                      |
-| `--api-key`                                | none                     | API key. Also read from `BLAZR_API_KEY`.                                           |
+| `--host`                                   | `server.host`, else `0.0.0.0` | Address to bind.                                                              |
+| `--port`                                   | `server.port`, else `8080` | Port to bind.                                                                    |
+| `--data-parallel`                          | `inference.data_parallel`, else `1` | Copies of the start model, one per device. See [Data-parallel replicas](#data-parallel-replicas). |
+| `--api-key`                                | `BLAZR_API_KEY`          | API key. Flag wins over the variable.                                              |
 | `--api-key-file`                           | none                     | File of API keys, one per line.                                                    |
-| `--tls-cert`                               | none                     | PEM certificate chain. Needs `--tls-key`.                                          |
-| `--tls-key`                                | none                     | PEM private key. Needs `--tls-cert`.                                               |
-| `--reasoning-format`                       | `deepseek`               | Default chat reasoning split: `deepseek` or `none`.                                |
+| `--tls-cert`                               | `server.tls_cert`        | PEM certificate chain. Needs a key from `--tls-key` or `server.tls_key`.           |
+| `--tls-key`                                | `server.tls_key`         | PEM private key. Needs a certificate from `--tls-cert` or `server.tls_cert`.       |
+| `--reasoning-format`                       | `server.reasoning_format`, else `deepseek` | Default chat reasoning split: `deepseek` or `none`.                  |
 | `--vision-model`                           | none                     | `NAME=PATH` vision embedder for image inputs to `/v1/embeddings`. Repeat for more. |
 | `--mmproj`                                 | none                     | Qwen3-VL mmproj GGUF for image inputs to `qwen35` models.                          |
 | `--image-min-tokens`, `--image-max-tokens` | the mmproj value         | Token range every image resizes into.                                              |
@@ -91,23 +92,23 @@ BLAZR_MODEL_DIR=/srv/blazr/models blazr list
 BLAZR_MODEL_DIR=/srv/blazr/models blazr serve --model <name> --host 127.0.0.1 --port 8080
 ```
 
-`blazr pull` writes to `BLAZR_MODEL_DIR` when `--output` is absent. Replace `<name>` with a name that `blazr list` shows.
+`blazr pull` writes to the model directory when `--output` is absent. Replace `<name>` with a name that `blazr list` shows.
 
-`--model` resolves in this order:
+`--model` resolves in this order. Steps 2 to 5 use the model directory:
 
 1. The value as a path.
-2. `$BLAZR_MODEL_DIR/<name>`.
-3. `$BLAZR_MODEL_DIR/<name>.safetensors`.
-4. `$BLAZR_MODEL_DIR/<name>.gguf`.
-5. `$BLAZR_MODEL_DIR/<name>/model.safetensors`.
+2. `<model-dir>/<name>`.
+3. `<model-dir>/<name>.safetensors`.
+4. `<model-dir>/<name>.gguf`.
+5. `<model-dir>/<name>/model.safetensors`.
 
-`BLAZR_MODEL_DIR` defaults to `./models`, relative to the working directory of the process.
+The model directory comes from `BLAZR_MODEL_DIR`, then `model_dir` in `config.yaml`, then `./models`. The default is relative to the working directory of the process.
 
 With `--model`, `blazr serve` loads and warms the model before it binds the port. A load error stops startup.
 
 ### Start on demand
 
-Without `--model`, `blazr serve` starts with no model loaded. Chat, embedding, tokenize, and template requests load the named model on first use.
+Without `--model`, `blazr serve` loads `default_model` when that key is set. Otherwise it starts with no model loaded. Chat, embedding, tokenize, and template requests load the named model on first use.
 
 `blazr serve` keeps one model loaded. A request for a second model evicts the least recently used model. No flag changes this limit.
 
@@ -135,12 +136,28 @@ Set `HF_HUB_OFFLINE=1` on hosts without outbound network access. Any non-empty v
 
 ### GPU and CPU
 
-The build selects the backend. No flag selects it at run time.
+The build selects the backend. The `device` key in `config.yaml` selects the CUDA index.
 
-- A `cuda` build runs on CUDA device 0. No flag selects another device.
+- A `cuda` build runs on the CUDA device from `device`, or device 0 when the key is unset.
 - A default build runs on the CPU. `blazr serve` has no `--cpu` flag.
+- A `cuda` build refuses `device: cpu` for `serve`. Remove the key or set a CUDA index.
 
 Check the startup output for `Backend: CUDA` or `Backend: CPU` after each start.
+
+### Data-parallel replicas
+
+Set `inference.data_parallel` in `config.yaml`, or pass `--data-parallel`, to load one copy of the start model per device.
+
+- A CUDA build places copy `i` on CUDA device `device + i`.
+- A CPU build loads one CPU copy for each replica.
+- Each copy runs its own batching engine.
+- The chat, completions, responses, Anthropic messages, and infill handlers route through the group.
+- The router records token prefixes every 16 tokens, up to 1024 tokens.
+- A request goes to the replica that holds its longest warm prefix. Otherwise it goes to the least loaded replica.
+- A warm replica more than 4 requests above the least loaded replica gives up the request.
+- Embeddings and rerank requests run on replica 0.
+- `/health` reports the replica count in `data_parallel_replicas`.
+- `blazr serve` refuses `0`, and a value above `1` with no start model. It also refuses a value above `1` with `tensor_parallel_size` above `1`. That error names both keys.
 
 ## Deployment examples
 
@@ -296,7 +313,7 @@ curl -H "Authorization: Bearer $BLAZR_API_KEY" http://127.0.0.1:8080/v1/models
 
 ### TLS
 
-Pass both `--tls-cert` and `--tls-key`. The `serve` command rejects either flag alone. Both files use PEM format.
+Set both the certificate and the key. Each comes from a flag, or from `server.tls_cert` and `server.tls_key` in `config.yaml`. Blazr rejects one without the other. Both files use PEM format.
 
 - The listener uses rustls with its safe default protocol versions, TLS 1.2 and 1.3.
 - The server does not request client certificates.
@@ -304,22 +321,20 @@ Pass both `--tls-cert` and `--tls-key`. The `serve` command rejects either flag 
 
 ### CORS
 
-CORS is enabled by default. The server allows any origin, method, and header. No flag restricts the origins. Restrict browser origins at the reverse proxy, or change `src/cli/serve.rs`.
+CORS is enabled by default. With `server.cors_origins` empty, the server allows any origin, method, and header. Set `server.cors_origins` to a list to restrict browser origins. Set `server.cors_enabled` to `false` to turn CORS off.
 
 ### Limits
 
-`blazr serve` builds its server config from defaults. No flag or file changes these values.
+`blazr serve` reads these limits from the `server` section of `~/.blazr/config.yaml`.
 
-| Limit                  | Default                  | Exceeded response                     |
-| ---------------------- | ------------------------ | ------------------------------------- |
-| Request body           | 10 MB (`10485760` bytes) | `413 Payload Too Large`               |
-| Concurrent requests    | 16                       | Extra requests wait. No error.        |
-| Request timeout        | 300 seconds              | `408 Request Timeout`                 |
-| In-flight token budget | `0`, unlimited           | `503` with `retry-after: 5`, when set |
+| Limit                  | Default                  | Key                           | Exceeded response                     |
+| ---------------------- | ------------------------ | ----------------------------- | ------------------------------------- |
+| Request body           | 10 MB (`10485760` bytes) | `server.max_body_size`        | `413 Payload Too Large`               |
+| Concurrent requests    | 16                       | `server.max_concurrent_requests` | Extra requests wait. No error.     |
+| Request timeout        | 300 seconds              | `server.request_timeout_secs` | `408 Request Timeout`                 |
+| In-flight token budget | `0`, unlimited           | `server.max_inflight_tokens`  | `503` with `retry-after: 5`, when set |
 
-The config keys are `max_body_size`, `max_concurrent_requests`, `request_timeout_secs`, and `max_inflight_tokens` in `ServerConfig`. The `serve` command does not read them from `~/.blazr/config.yaml`. Changing them needs a code change in `src/cli/serve.rs`.
-
-Request logging is on by default. Each request logs one line with the method, path, status, and latency.
+Request logging is on by default through `server.request_logging`. Each request logs one line with the method, path, status, and latency.
 
 ## Operations
 
@@ -332,6 +347,7 @@ Request logging is on by default. Each request logs one line with the method, pa
 | `status`        | string | Always `ok` while the process serves.                                               |
 | `version`       | string | blazr crate version.                                                                |
 | `loaded_models` | array  | Names of loaded models.                                                             |
+| `data_parallel_replicas` | integer | Copies of the start model that serve requests. `1` without data parallelism. |
 | `gpu_memory`    | object | CUDA builds only: `used_bytes`, `free_bytes`, `total_bytes`, `used_gb`, `total_gb`. |
 
 `/health` returns `200` when no model is loaded. Use `loaded_models` to check the model state.
@@ -360,14 +376,13 @@ Request logging is on by default. Each request logs one line with the method, pa
 | `blazr_vram_used_bytes`             | gauge     | GPU memory in use, CUDA builds only                      |
 | `blazr_scheduler_loads_total`       | counter   | Model loads                                              |
 | `blazr_scheduler_evictions_total`   | counter   | Model evictions                                          |
+| `blazr_queue_depth`                 | gauge     | Requests waiting: queued sequences in the batching schedulers, plus requests waiting for a `server.max_concurrent_requests` slot |
+| `blazr_slo_violations_total`        | counter   | Latency samples with a rolling percentile over its `server.slo` threshold. Labels: `metric` (`ttft`, `itl`, `e2e`) and `percentile` (`p50`, `p95`, `p99`) |
+| `blazr_slo_batch_growth_held`       | gauge     | `1` while a P95 TTFT or ITL breach holds batch growth, else `0` |
+| `blazr_data_parallel_replicas`      | gauge     | Data-parallel replicas of the start model                |
+| `blazr_replica_active_requests`     | gauge     | Requests in flight on each replica. Label: `replica`.    |
 
-These names exist in the code but no code path records them under `blazr serve`:
-
-- `blazr_queue_depth`
-- `blazr_slo_violations_total`
-- `blazr_token_budget_utilization_ratio`, which records only when `max_inflight_tokens` is above `0`
-
-Do not create alerts on these names.
+`blazr_token_budget_utilization_ratio` appears only when `server.max_inflight_tokens` is above `0`. `blazr_vram_used_bytes` updates on CUDA builds at each scrape while a model is loaded.
 
 The `path` label holds the raw request path. Each distinct path adds a time series.
 
@@ -382,9 +397,9 @@ Terminate TLS at a reverse proxy when restarts must drain requests. See the ngin
 
 ### Overload and retry
 
-`blazr serve` returns no `503` for load. The in-flight token budget check runs only when `max_inflight_tokens` is above `0`, and `serve` never sets it.
+`blazr serve` returns `503` for load only when `server.max_inflight_tokens` is above `0` and the budget is full.
 
-When the budget applies and is exceeded, the server returns:
+When the budget is exceeded, the server returns:
 
 - Status `503`.
 - Header `retry-after: 5`.
@@ -400,7 +415,7 @@ Clients must wait the `retry-after` seconds before they retry. Other errors that
 
 ### SLO thresholds
 
-The `slo` key in `ServerConfig` has no effect. No code path builds the SLO checker, so no SLO warnings appear.
+Set the thresholds under `server.slo` in `config.yaml`. A sample over its threshold logs a warning and adds 1 to `blazr_slo_violations_total`. While the P95 TTFT or P95 ITL is over its threshold, batching admits no sequences beyond the running count. An idle scheduler still admits one. See [SLO thresholds](configuration.md#slo-thresholds).
 
 ### Check running models
 
@@ -445,11 +460,13 @@ BLAZR_SWARM_TOKEN=<shared-secret> blazr swarm --role worker --mdns
 | --------------- | ------------------- | -------------------------------- | ------------------------------------------------ |
 | `--token`       | `BLAZR_SWARM_TOKEN` | Yes, all roles                   | Shared secret for swarm membership.              |
 | `--role`        | `worker`            | No                               | `leader` or `worker`.                            |
-| `--model`, `-m` | none                | Leader only                      | Model to serve.                                  |
+| `--model`, `-m` | `default_model`     | Leader only                      | Model to serve.                                  |
 | `--leader`      | none                | Worker, unless `--mdns` is set   | Leader address, for example `192.168.1.10:9090`. |
 | `--mdns`        | off                 | Worker, unless `--leader` is set | Enable mDNS discovery on the LAN.                |
 | `--swarm-port`  | `9090`              | No                               | Port for the swarm transport.                    |
-| `--port`        | `8080`              | No                               | HTTP API port. Leader only.                      |
+| `--port`        | `server.port`, else `8080` | No                        | HTTP API port. Leader only.                      |
+| `--host`        | `server.host`, else `0.0.0.0` | No                     | HTTP API address. Leader only.                   |
+| `--api-key`     | `BLAZR_API_KEY`     | No                               | API key for the leader's HTTP API.               |
 
 Pass the token through `BLAZR_SWARM_TOKEN`. A `--token` flag shows the token in the process list.
 
@@ -478,25 +495,28 @@ blazr disagg --role decode --model <name> --router-addr <router-host>:9190 --lis
 | Flag            | Role     | Default        | Required for        | Purpose                                              |
 | --------------- | -------- | -------------- | ------------------- | ---------------------------------------------------- |
 | `--role`        | all      | `router`       | No                  | `router`, `prefill`, or `decode`. Other values fail. |
-| `--model`, `-m` | all      | none           | `prefill`, `decode` | Model to load.                                       |
+| `--model`, `-m` | all      | `default_model` | `prefill`, `decode` | Model to load.                                       |
 | `--router-addr` | all      | none           | `prefill`, `decode` | Router address to connect to.                        |
 | `--listen-addr` | all      | `0.0.0.0:9190` | No                  | Address the node listens on.                         |
 | `--prefill`     | `router` | none           | No                  | One or more prefill worker addresses.                |
 | `--decode`      | `router` | none           | No                  | One or more decode worker addresses.                 |
-| `--port`        | `router` | `8080`         | No                  | HTTP API port.                                       |
+| `--port`        | `router` | `server.port`, else `8080` | No      | HTTP API port.                                       |
+| `--host`        | `router` | `server.host`, else `0.0.0.0` | No   | HTTP API address.                                    |
 
 All roles default to `0.0.0.0:9190`. Set a distinct `--listen-addr` on each node that shares a host. The router accepts empty `--prefill` and `--decode` lists. Pass at least one address of each kind.
 
 ### Tensor parallelism
 
-Set `BLAZR_TP_SIZE` above `1` to split one model across GPUs. Such a run needs a build with both `cuda` and `nccl`. `blazr serve` fails at startup in any other build. Set `BLAZR_TP_RANK` on each process to its rank. The rank defaults to `0`.
+Set `BLAZR_TP_SIZE`, or `inference.tensor_parallel_size` in `config.yaml`, above `1` to split one model across GPUs. The variable wins over the key, and the key wins over the model's `config.json`. The default is `1`. Such a run needs a build with both `cuda` and `nccl`. `blazr serve` fails at startup in any other build. The loader checks that the head counts divide by the size before it reads weights. Set `BLAZR_TP_RANK` on each process to its rank. The rank defaults to `0`.
 
 ## Environment variables
 
+Blazr reads no `.env` file. Export these variables before the command runs.
+
 | Variable                         | Read by                         | Purpose                                                |
 | -------------------------------- | ------------------------------- | ------------------------------------------------------ |
-| `BLAZR_MODEL_DIR`                | `serve`, `pull`, `list`, `info` | Model directory. Defaults to `./models`.               |
-| `BLAZR_API_KEY`                  | `serve`                         | API key, when `--api-key` is absent.                   |
+| `BLAZR_MODEL_DIR`                | `serve`, `pull`, `list`, `info` | Model directory. Then `model_dir`, then `./models`.    |
+| `BLAZR_API_KEY`                  | `serve`, `swarm`                | API key, when `--api-key` is absent.                   |
 | `BLAZR_VOICE_DIR`                | `serve`                         | Kokoro voice directory, when `--voice-dir` is absent.  |
 | `BLAZR_SWARM_TOKEN`              | `swarm`                         | Swarm membership token.                                |
 | `BLAZR_TP_SIZE`, `BLAZR_TP_RANK` | `serve`, model loader           | Tensor parallel size and rank.                         |

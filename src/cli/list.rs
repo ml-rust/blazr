@@ -7,12 +7,9 @@ use colored::Colorize;
 
 use crate::loader::{detect_model_source, get_gguf_info, ModelFormat};
 
-/// List available models
-pub async fn list(verbose: bool) -> Result<()> {
-    let model_dir = std::env::var("BLAZR_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./models"));
-
+/// List the models in `model_dir`: `BLAZR_MODEL_DIR`, then `model_dir`,
+/// then `./models`.
+pub async fn list(verbose: bool, model_dir: PathBuf) -> Result<()> {
     if !model_dir.exists() {
         eprintln!(
             "{} No models directory found at: {}",
@@ -20,7 +17,7 @@ pub async fn list(verbose: bool) -> Result<()> {
             model_dir.display()
         );
         eprintln!(
-            "\nSet {} or create a ./models directory.",
+            "\nSet {}, set model_dir in ~/.blazr/config.yaml, or create ./models.",
             "BLAZR_MODEL_DIR".bold()
         );
         return Ok(());

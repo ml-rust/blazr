@@ -75,7 +75,7 @@ pub struct ServerConfig {
 
 /// Latency SLO (Service Level Objective) thresholds in milliseconds.
 /// All values are optional — only configured thresholds are enforced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencySlo {
     /// P50 TTFT threshold (ms). Warn if median TTFT exceeds this.
     #[serde(default)]

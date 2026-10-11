@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
-use crate::config::VisionOverrides;
+use crate::config::{BlazrConfig, InferenceOverlay, VisionOverrides, DEFAULT_NUM_CTX};
 use crate::model::chat_template::ChatTemplate;
 use tokio::sync::RwLock;
 
@@ -23,45 +23,6 @@ use crate::engine::Executor;
 use crate::loader;
 use crate::tokenizer::from_vocab_size;
 
-/// Parse an Ollama-style keep_alive string into a Duration.
-///
-/// Supported formats:
-/// - `"0"` → `Some(Duration::ZERO)` (unload immediately)
-/// - `"-1"` → `None` (keep forever)
-/// - `"5m"` → 5 minutes
-/// - `"1h"` → 1 hour
-/// - `"30s"` → 30 seconds
-/// - `"300"` → 300 seconds (bare number = seconds)
-pub fn parse_keep_alive(s: &str) -> Option<Duration> {
-    let s = s.trim();
-    if s == "-1" {
-        return None; // forever
-    }
-    if s == "0" {
-        return Some(Duration::ZERO);
-    }
-    if let Some(mins) = s.strip_suffix('m') {
-        if let Ok(n) = mins.parse::<u64>() {
-            return Some(Duration::from_secs(n * 60));
-        }
-    }
-    if let Some(hours) = s.strip_suffix('h') {
-        if let Ok(n) = hours.parse::<u64>() {
-            return Some(Duration::from_secs(n * 3600));
-        }
-    }
-    if let Some(secs) = s.strip_suffix('s') {
-        if let Ok(n) = secs.parse::<u64>() {
-            return Some(Duration::from_secs(n));
-        }
-    }
-    // Bare number = seconds
-    if let Ok(n) = s.parse::<u64>() {
-        return Some(Duration::from_secs(n));
-    }
-    None // unparseable → default (forever)
-}
-
 /// Model entry in the scheduler
 struct ModelEntry<R: Runtime<DType = DType>> {
     /// The executor wrapping the model
@@ -73,9 +34,6 @@ struct ModelEntry<R: Runtime<DType = DType>> {
     /// Per-model keep-alive duration. None = forever (no auto-unload).
     keep_alive: Option<Duration>,
 }
-
-/// Default context size for scheduler-managed models
-const DEFAULT_NUM_CTX: usize = 2048;
 
 /// Model scheduler
 ///
@@ -100,6 +58,12 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     /// `--mmproj` and the image token limits, applied to every model this
     /// scheduler loads.
     vision: VisionOverrides,
+    /// The user config file's `inference` keys, written over every model's
+    /// own values before the command-line vision flags.
+    inference_overlay: InferenceOverlay,
+    /// Tensor parallel degree from `BLAZR_TP_SIZE` or the user config file.
+    /// `None` takes each model's `config.json` value, else 1.
+    tensor_parallel_size: Option<usize>,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -127,7 +91,27 @@ where
             num_ctx: DEFAULT_NUM_CTX,
             chat_template: None,
             vision: VisionOverrides::default(),
+            inference_overlay: InferenceOverlay::default(),
+            tensor_parallel_size: None,
         }
+    }
+
+    /// Write the user config file's `inference` keys over every model.
+    pub fn with_inference_overlay(mut self, overlay: InferenceOverlay) -> Self {
+        self.inference_overlay = overlay;
+        self
+    }
+
+    /// Set the tensor parallel degree for every model. `None` takes each
+    /// model's `config.json` value, else 1.
+    pub fn with_tensor_parallel_size(mut self, size: Option<usize>) -> Self {
+        self.tensor_parallel_size = size;
+        self
+    }
+
+    /// The directory models are searched and pulled into.
+    pub fn model_dir(&self) -> &std::path::Path {
+        &self.model_dir
     }
 
     /// The device this scheduler loads onto: the server's device.
@@ -184,23 +168,28 @@ where
         // Find model path
         let model_path = self.find_model_path(model_name)?;
 
-        // Load model — check for tensor parallelism from env or config
-        let tp_size = std::env::var("BLAZR_TP_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(1);
+        // Tensor parallel degree: BLAZR_TP_SIZE, then the user config file,
+        // then the model's own config.json, then 1.
+        let tp_size = self.tensor_parallel_size.unwrap_or_else(|| {
+            loader::model_config_inference(&model_path)
+                .map_or(1, |inference| inference.tensor_parallel_size)
+        });
+        super::tensor_parallel::validate_tp_config(tp_size, None).map_err(|e| anyhow!("{e}"))?;
 
         let executor = if tp_size > 1 {
             #[cfg(all(feature = "cuda", feature = "nccl"))]
             {
-                let rank = std::env::var("BLAZR_TP_RANK")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(0);
+                let rank = match std::env::var("BLAZR_TP_RANK") {
+                    Ok(text) => text.trim().parse::<usize>().map_err(|_| {
+                        anyhow!("BLAZR_TP_RANK='{text}' is not a rank. Set 0 or more, or unset it")
+                    })?,
+                    Err(_) => 0,
+                };
                 let (tp_state, comm) = super::tensor_parallel::init_tp(tp_size, rank)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                let (model, config) =
+                let (model, mut config) =
                     loader::load_model_tp::<R, _>(&model_path, &self.device, comm)?;
+                self.apply_settings(&mut config, tp_size)?;
                 let tokenizer = from_vocab_size(config.vocab_size())?;
                 let chat_template = ChatTemplate::detect(
                     &model_path,
@@ -223,8 +212,8 @@ where
             #[cfg(not(all(feature = "cuda", feature = "nccl")))]
             {
                 return Err(anyhow::anyhow!(
-                    "Tensor parallelism requires the 'cuda' and 'nccl' features (BLAZR_TP_SIZE={})",
-                    tp_size
+                    "tensor_parallel_size {tp_size} needs the cuda and nccl features. Rebuild \
+                     with --features cuda,nccl, or set the size to 1"
                 ));
             }
         } else {
@@ -241,7 +230,7 @@ where
                     (model, config, tokenizer)
                 }
             };
-            self.vision.apply(&mut config.inference);
+            self.apply_settings(&mut config, tp_size)?;
             let chat_template = ChatTemplate::detect(
                 &model_path,
                 config.model_type(),
@@ -272,6 +261,16 @@ where
         }
 
         Ok(executor)
+    }
+
+    /// Write the user config file's inference keys, then the command-line
+    /// vision flags, over a freshly loaded model's config. Records the
+    /// tensor parallel degree the model runs at.
+    fn apply_settings(&self, config: &mut BlazrConfig, tp_size: usize) -> Result<()> {
+        self.inference_overlay.apply(&mut config.inference)?;
+        self.vision.apply(&mut config.inference);
+        config.inference.tensor_parallel_size = tp_size;
+        Ok(())
     }
 
     /// Find model path by name

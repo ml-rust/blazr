@@ -1,6 +1,6 @@
 # Performance tuning
 
-blazr exposes tuning knobs as CLI flags and as keys in the `inference` block of a model's `config.json`. This guide maps each knob to its effect, then maps symptoms to knobs.
+blazr exposes tuning knobs as CLI flags and as `inference` keys. Model keys live in `config.json`. Global keys live in `~/.blazr/config.yaml`. This guide maps each knob to its effect, then maps symptoms to knobs.
 
 ## Measure first
 
@@ -36,24 +36,20 @@ The sweep runs its requests one after another through a single executor. The swe
 | `blazr_tokens_generated_total`      | counter   | Generated tokens. Use `rate()` for tokens/s.        |
 | `blazr_prefix_cache_hits_total`     | counter   | Prefix cache hits.                                  |
 | `blazr_prefix_cache_misses_total`   | counter   | Prefix cache misses.                                |
+| `blazr_queue_depth`                 | gauge     | Requests waiting for a batch slot or an HTTP slot. Rising values mean requests wait for capacity. |
+| `blazr_slo_violations_total`        | counter   | Samples over a `server.slo` threshold. Labels `metric` and `percentile`. |
 
-These metrics are registered but no code path updates them in this build:
-
-- `blazr_queue_depth`
-- `blazr_token_budget_utilization_ratio`
-- `blazr_kv_cache_utilization_ratio`
-- `blazr_vram_used_bytes`
-
-Use the device tools for GPU memory. Do not use these gauges for it.
+`blazr_token_budget_utilization_ratio` appears only when `server.max_inflight_tokens` is above `0`. `blazr_kv_cache_utilization_ratio` covers the batched scheduler only. `blazr_vram_used_bytes` updates on CUDA builds at each scrape while a model is loaded.
 
 ## How to read the knob tables
 
 - A flag is a CLI argument. Flags apply to the command named in the table.
 - A key is `inference.<name>` in the `config.json` of a model directory.
 - Keys apply to SafeTensors models only. GGUF models take the defaults for every key.
-- A SafeTensors `config.json` applies its `inference` block only when the file parses as a blazr config. Otherwise every key takes its default.
-- `blazr serve` has no flags for batching, cache, or context. It reads those keys from `config.json` only.
-- `blazr serve` builds its server config from defaults. It reads no `server` block.
+- A SafeTensors `config.json` applies its `inference` block only when the file parses as a blazr config. Otherwise the model's own values fall back to defaults.
+- The `inference` section of `config.yaml` overrides the matching key for every model.
+- `blazr serve` has no flags for batching, cache, or context. It reads those keys from `config.json` and `config.yaml`.
+- `blazr serve` reads the `server` section of `config.yaml`. Its `generation` values apply to requests that omit a value.
 
 ## Weights and quantization
 
@@ -73,9 +69,9 @@ Use the device tools for GPU memory. Do not use these gauges for it.
 | Decode lanes             | `inference.max_batch_size` for GDN models                                 | `max_batch_size`  | Sets the lane count for `qwen35` models. Lanes need a CUDA build. A CPU build serves these models one sequence at a time and logs a warning.                                                                                                                               |
 | Token budget             | `inference.max_context_len`                                               | `4096` when unset | Caps the prompt and decode tokens in one scheduled batch. blazr sets the cap from `max_context_len`. No separate key exists.                                                                                                                                               |
 | Chunked prefill          | `inference.prefill_chunk_size`                                            | `0` (off)         | Splits a long prompt into chunks of this many tokens. The chunks run between decode steps. The code comment says this reduces TTFT for concurrent requests. Chunking changes the prefill arithmetic in the last bits, so it does not match a one-shot prefill bit for bit. |
-| Concurrent HTTP requests | `server.max_concurrent_requests`                                          | `16`              | Not read by `blazr serve`. The server applies the default `16`.                                                                                                                                                                                                            |
-| In-flight token cap      | `server.max_inflight_tokens`                                              | `0` (unlimited)   | Not read by `blazr serve`. The server applies the default `0`.                                                                                                                                                                                                             |
-| Latency SLO              | `server.slo`                                                              | unset             | Logs warnings and increments `blazr_slo_violations_total` when a threshold breaks. Does not change scheduling. Not read by `blazr serve`.                                                                                                                                  |
+| Concurrent HTTP requests | `server.max_concurrent_requests`                                          | `16`              | Limits HTTP requests in flight. Extra requests wait for a slot. Set it in `config.yaml`.                                                                                                                                                                                                            |
+| In-flight token cap      | `server.max_inflight_tokens`                                              | `0` (unlimited)   | Caps prompt and decode tokens in flight. An exceeded request returns `503`.                                                                                                                                                                                                             |
+| Latency SLO              | `server.slo`                                                              | unset             | Logs warnings and increments `blazr_slo_violations_total` when a threshold breaks. While P95 TTFT or ITL is over target, batch growth stops at the running count, with a floor of one. See [SLO thresholds](configuration.md#slo-thresholds).                                                                                                                                  |
 
 ## Prefix cache
 
@@ -91,7 +87,7 @@ Use the device tools for GPU memory. Do not use these gauges for it.
 | Knob                   | Where set                                | Default    | Effect                                                                                                                                          |
 | ---------------------- | ---------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | Context length         | `inference.max_context_len`              | unset      | Caps the context. The batched paged path uses `4096` when unset. The executor's shared block pool uses `num_ctx` when unset.                    |
-| Initial context        | `--num-ctx` (`run`, `generate`, `bench`) | `2048`     | Sets the initial KV cache allocation. The code comment says the cache grows up to the model maximum. `blazr serve` uses `2048` and has no flag. |
+| Initial context        | `--num-ctx` (`run`, `generate`, `chat`, `bench`), `num_ctx` | `2048`     | Sets the initial KV cache allocation. The code comment says the cache grows up to the model maximum. `blazr serve` reads `num_ctx` from `config.yaml` and has no flag. |
 | Block size             | `inference.block_size`                   | `16`       | Sets the tokens per KV block in the paged path.                                                                                                 |
 | Pool blocks            | `inference.kv_pool_blocks`               | `0` (auto) | Sets the shared pool size for the batched paged path. Auto computes `max_context_len * max_batch_size / block_size`, with a minimum of `256`.   |
 | Single-sequence blocks | `inference.num_blocks`                   | `0` (auto) | Sets the block count for the single-sequence paged cache.                                                                                       |
@@ -103,7 +99,7 @@ Use the device tools for GPU memory. Do not use these gauges for it.
 | -------------- | ---------------------------------------------- | ------------------------------ | ----------------------------------------------------- |
 | Draft model    | `inference.speculative.draft_model`            | required when the block is set | Sets the path or name of the draft model.             |
 | Draft length   | `inference.speculative.num_speculative_tokens` | `5`                            | Sets the tokens drafted per iteration.                |
-| Adaptive depth | `inference.speculative.adaptive_depth`         | `false`                        | No effect. blazr parses the key and no code reads it. |
+| Adaptive depth | `inference.speculative.adaptive_depth`         | `false`                        | Adjusts speculation depth from the acceptance rate. Passed to boostr `SpeculativeConfig`. |
 
 Speculative decoding runs on the single-sequence path only. The batched paths do not read the block.
 
@@ -111,16 +107,17 @@ Speculative decoding runs on the single-sequence path only. The batched paths do
 
 | Knob          | Where set                           | Default | Effect                                                                                                                                                     |
 | ------------- | ----------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Graph capture | flag `--graphs` (`run`, `generate`) | off     | Captures the greedy decode pass and replays it. Requires `--temperature 0` and no repeat, frequency, or presence penalty. Otherwise blazr decodes eagerly. |
+| Graph capture | flag `--graphs` (`run`, `generate`), `inference.graphs` | off     | Captures the greedy decode pass and replays it. Requires `--temperature 0` and no repeat, frequency, or presence penalty. Otherwise blazr decodes eagerly. |
 
-The CUDA graph path needs a CUDA build. The key `inference.graphs` has no reader, so set the flag instead.
+The CUDA graph path needs a CUDA build. `inference.graphs` in `config.yaml` works like the flag for `run` and `generate`. `serve` does not use graph capture and logs a warning when the key is set.
 
 ## Parallelism
 
 | Knob                             | Where set                                                                                        | Default         | Effect                                                                                                           |
 | -------------------------------- | ------------------------------------------------------------------------------------------------ | --------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Tensor parallel size             | env `BLAZR_TP_SIZE` (`serve`)                                                                    | `1`             | Shards the model across GPUs with NCCL all-reduce. Values above `1` require a build with `--features cuda,nccl`. |
+| Tensor parallel size             | env `BLAZR_TP_SIZE` (`serve`), `inference.tensor_parallel_size`                                                                    | `1`             | Shards the model across GPUs with NCCL all-reduce. Values above `1` require a build with `--features cuda,nccl`. |
 | Tensor parallel rank             | env `BLAZR_TP_RANK`                                                                              | `0`             | Sets this process's rank within the tensor parallel group.                                                       |
+| Data parallel | `inference.data_parallel` or `--data-parallel` (`serve`) | `1` | Loads one copy of the start model per device, each with its own batching engine. Cannot combine with tensor parallel above `1`. See [Data-parallel replicas](deployment.md#data-parallel-replicas). |
 | Swarm (pipeline)                 | `blazr swarm --role`, `--leader`, `--swarm-port`, `--port`, `--token` or env `BLAZR_SWARM_TOKEN` | `--role worker` | Assigns model layers to nodes with a pipeline schedule. Requires the `distributed` feature.                      |
 | Disaggregated prefill and decode | `blazr disagg --role` (`router`, `prefill`, `decode`)                                            | `router`        | Runs prefill and decode on separate nodes. The router takes `--prefill` and `--decode` worker addresses.         |
 
@@ -149,7 +146,7 @@ blazr has no flag or key for the CPU thread count.
 | -------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | High TTFT                        | `blazr_time_to_first_token_seconds`                                                  | `inference.prefill_chunk_size` for long prompts. `inference.prefix_cache` with `inference.paged_attention` for repeated prefixes. `inference.gpu_prefix_cache` on a CUDA build. `inference.max_batch_size` above `1` with `inference.paged_attention` when requests queue. |
 | High ITL                         | `blazr_inter_token_latency_seconds`                                                  | `--graphs` on a CUDA build for greedy decode. `inference.speculative.num_speculative_tokens` on the single-sequence path. `inference.prefill_chunk_size` to interleave prompts with decode steps.                                                                          |
-| Out of GPU memory                | Device memory from the GPU tools. The VRAM gauge is not emitted.                     | `inference.max_context_len`. `--num-ctx` (`run`, `generate`). `inference.max_batch_size` and `inference.kv_pool_blocks`, which size the pool. `--gpu-layers` (`run`, `generate`). `inference.moe_offload`.                                                                 |
+| Out of GPU memory                | Device memory from the GPU tools. `blazr_vram_used_bytes` also reports it on CUDA builds.                     | `inference.max_context_len`. `--num-ctx` (`run`, `generate`). `inference.max_batch_size` and `inference.kv_pool_blocks`, which size the pool. `--gpu-layers` (`run`, `generate`).                                                                 |
 | Low throughput with many clients | `blazr_active_decode_slots`, `blazr_requests_active`, `blazr_tokens_generated_total` | `inference.max_batch_size` above `1` with `inference.paged_attention`. `inference.kv_pool_blocks` large enough for the batch. `inference.prefix_cache` for shared prefixes. GDN models need a CUDA build for lanes.                                                        |
 | Long prompts block short ones    | `blazr_time_to_first_token_seconds`                                                  | `inference.prefill_chunk_size`. `inference.max_batch_size` above `1` with `inference.paged_attention`, so the scheduler runs requests together.                                                                                                                            |
-| More than 16 concurrent requests | `blazr_requests_active`                                                              | No knob. `blazr serve` fixes the HTTP limit at `16`. Run more `blazr serve` processes.                                                                                                                                                                                     |
+| More than 16 concurrent requests | `blazr_requests_active`                                                              | `server.max_concurrent_requests` sets the limit, and its default is `16`. Run more `blazr serve` processes for more capacity.                                                                                                                                                                                     |

@@ -138,6 +138,28 @@ Speech endpoints and commands need the `audio` feature. A missing model download
 - The Whisper vocabulary follows the audio model variant. Blazr does not select it by size.
 - boostr contains a Silero VAD model. blazr does not load it.
 
+### Models fetched on first use
+
+A model the speech commands need, and do not find on disk, fetches once from the Hugging Face hub:
+
+| Model                                   | Used by                                      |
+| --------------------------------------- | -------------------------------------------- |
+| `openai/whisper-base`                   | `transcribe` and `speak` for English         |
+| `openai/whisper-small`                  | `transcribe` and `speak` for other languages |
+| `hexgrad/Kokoro-82M`, `fs90/kokoro-g2p` | `speak` with Kokoro                          |
+| `openbmb/VoxCPM2`                       | `speak` with VoxCPM2 (CUDA build with a GPU) |
+| `laion/larger_clap_general`             | `sound-review`                               |
+
+Fetched files land in hub layout in the model folder: `$MOTION_VIDEO_MODELS`, else the `models` entry of `~/.config/motion-video/config.json`, else `~/.cache/motion-video/models`. The search also reads `$BOOSTR_MODELS_DIR` and the Hugging Face cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`). `blazr serve` fetches only Kokoro's G2P models on first use, into the Hugging Face cache. Set `HF_HUB_OFFLINE=1` to forbid every fetch: a missing model then fails with its name and the `hf download` command that fetches it.
+
+### Devices
+
+On the CUDA build (`--features audio,cuda`) with an NVIDIA GPU, `speak` runs Kokoro, VITS, VoxCPM2 and Whisper on the first GPU. `transcribe` runs Whisper there, and `sound-review` runs CLAP there. `speak --device cpu` keeps every model of the run on the CPU. Every other build runs them all on the CPU. A Kokoro or VITS take follows `--seed`: one seed gives the same take on one device, and a different take on the CPU and the GPU.
+
+`blazr serve` loads every `--asr-model` and `--tts-model` on the server's device: the configured CUDA device on the CUDA build, else the CPU.
+
+`speak` picks VoxCPM2 by default only on the CUDA build with an NVIDIA GPU with 8 GB of memory. Elsewhere it picks Kokoro. `--engine voxcpm --device cpu` runs VoxCPM2 on the CPU, at a small fraction of GPU speed.
+
 ## Tokenizers
 
 ### Text checkpoints

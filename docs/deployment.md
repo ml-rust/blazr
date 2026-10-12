@@ -6,14 +6,18 @@ This guide covers installing blazr, running `blazr serve`, and operating it behi
 
 ### Prebuilt archives
 
-Each [GitHub release](https://github.com/ml-rust/blazr/releases) carries one archive per platform. Every archive includes the `audio` feature and runs on the CPU only.
+Each [GitHub release](https://github.com/ml-rust/blazr/releases) carries these archives. Desktop archives include the `audio` feature. The `-gpu` and macOS archives add the `wgpu` feature.
 
-| Archive                    | Platform               | Built on                                |
-| -------------------------- | ---------------------- | --------------------------------------- |
-| `blazr-linux-x64.tar.gz`   | Linux x86_64           | `ubuntu-22.04`, glibc 2.35 or newer     |
-| `blazr-linux-arm64.tar.gz` | Linux aarch64          | `ubuntu-24.04-arm`, glibc 2.39 or newer |
-| `blazr-macos-arm64.tar.gz` | macOS on Apple silicon | `macos-latest`                          |
-| `blazr-windows-x64.zip`    | Windows x86_64         | `windows-latest`                        |
+| Archive                      | Platform               | Build                               | Built on                                |
+| ---------------------------- | ---------------------- | ----------------------------------- | --------------------------------------- |
+| `blazr-linux-x64.tar.gz`     | Linux x86_64           | CPU, `audio`                        | `ubuntu-22.04`, glibc 2.35 or newer     |
+| `blazr-linux-x64-gpu.tar.gz` | Linux x86_64           | Vulkan (`wgpu`), `audio`            | `ubuntu-22.04`, glibc 2.35 or newer     |
+| `blazr-linux-arm64.tar.gz`   | Linux aarch64          | CPU, `audio`                        | `ubuntu-24.04-arm`, glibc 2.39 or newer |
+| `blazr-macos-arm64.tar.gz`   | macOS on Apple silicon | Metal (`wgpu`), `audio`             | `macos-latest`                          |
+| `blazr-windows-x64.zip`      | Windows x86_64         | CPU, `audio`                        | `windows-latest`                        |
+| `blazr-windows-x64-gpu.zip`  | Windows x86_64         | DX12 (`wgpu`), `audio`              | `windows-latest`                        |
+| `blazr-android-arm64.tar.gz` | Android arm64          | `libblazr.a` for the C ABI (`capi`) | Built with the `capi` feature           |
+| `blazr-ios-arm64.tar.gz`     | iOS arm64              | `libblazr.a` for the C ABI (`capi`) | Built with the `capi` feature           |
 
 Fetch the archive and `SHA256SUMS` from the latest release, then check the archive:
 

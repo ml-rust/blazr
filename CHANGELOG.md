@@ -12,6 +12,18 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### Added
+
+- **`tests/arch_reference.rs`** — greedy decode of real checkpoints against `transformers` on CPU in F32. It covers Llama, Qwen2, Gemma 2, GPT-NeoX, Falcon, Mixtral, Qwen2-MoE, DBRX and Cohere. Each test reads its own `BLAZR_TEST_*_MODEL` variable and skips when unset.
+
+### Fixed
+
+- **Checkpoint tokenizer** — a SafeTensors checkpoint now runs with its own `tokenizer.json`. Qwen2, Phi-3, Gemma and StarCoder2 failed to load before: their padded embedding size matched no bundled vocabulary. A `tokenizer.json` that does not load is an error. The bundled vocabulary serves only a checkpoint without one.
+- **Non-Llama tensor layouts** — the SafeTensors loaders call boostr's `restructure_hf_checkpoint`. GPT-NeoX, Falcon, DBRX, Phi-3, StarCoder2, Mixtral and Qwen2-MoE checkpoints failed with a missing tensor before.
+- **Architecture detection** — tensor-name detection runs only when `config.json` describes no model. A Falcon or DBRX checkpoint failed with `No layers detected in checkpoint` before.
+- **Paged attention** — `Executor::new` refuses paged attention for an ALiBi or softcapped model. The paged kernel applied neither, and the output was wrong.
+- **`SafeTensorsBytes`** — `tokenizer_json` is now the tokenizer, not only its BOS rule.
+
 ### Documentation
 
 - **Android** — `examples/capi/README.md` gives the x86_64 emulator build, link and run steps, including `-Wl,-z,max-page-size=16384` for 16 KB pages. The emulator run passes on CPU and on wgpu through the host GPU. No aarch64 hardware or physical device has run blazr.

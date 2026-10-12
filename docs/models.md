@@ -20,30 +20,40 @@ Tests that name a checkpoint through an environment variable skip when that vari
 
 ### By format
 
-| Architecture                                | `model_type` (GGUF `general.architecture`)             | SafeTensors         | AWQ                 | GPTQ                | GGUF                | Notes                                                                                                                                                      |
-| ------------------------------------------- | ------------------------------------------------------ | ------------------- | ------------------- | ------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Llama 2, 3, 3.1, 3.2                        | `llama` (`llama`, `llama2`, `llama3`)                  | `Tested`            | `Supported in code` | `Supported in code` | `Supported in code` | SafeTensors test: `tests/batch_decode_per_row.rs`, gated by `BLAZR_TEST_LLAMA_MODEL`.                                                                      |
-| Mistral 7B                                  | `mistral` (`mistral`)                                  | `Tested`            | `Tested`            | `Tested`            | `Tested`            | Named in the production checklist. No blazr test names Mistral.                                                                                            |
-| Yi, CodeLlama, Solar                        | `llama` (`llama`)                                      | `Supported in code` | `Supported in code` | `Supported in code` | `Supported in code` | Same path as Llama. No test names these models.                                                                                                            |
-| Mamba2                                      | `mamba2` (`mamba`, `mamba2`)                           | `Supported in code` | —                   | —                   | `Supported in code` | No attention layers, so no AWQ or GPTQ.                                                                                                                    |
-| Mamba3                                      | `mamba3` (`mamba3`)                                    | `Supported in code` | —                   | —                   | `Supported in code` | No attention layers, so no AWQ or GPTQ.                                                                                                                    |
-| DeepSeek-V2, DeepSeek-V3 (MLA + MoE)        | `deepseek_v2`, `deepseek_v3` (`deepseek`, `deepseek2`) | `Supported in code` | `Supported in code` | `Supported in code` | `Supported in code` | Needs a generate test. GGUF `deepseek` maps to model type `deepseek`.                                                                                      |
-| Hybrid Mamba + attention                    | `hybrid` (oxidizr layout)                              | `Supported in code` | —                   | —                   | —                   | No GGUF architecture name maps to `hybrid`. No AWQ or GPTQ path.                                                                                           |
-| Qwen3.5 hybrid (Gated DeltaNet + attention) | `qwen35` (`qwen35`)                                    | `Supported in code` | —                   | —                   | `Tested`            | SafeTensors needs `model_type` `qwen35` in `config.json`. GGUF test: `tests/qwen35_generate.rs`, gated by `BOOSTR_BONSAI2_DIR`. No AWQ or GPTQ path found. |
-| Qwen2, Qwen2.5                              | `qwen2` (`qwen2`)                                      | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   |                                                                                                                                                            |
-| Qwen2-MoE                                   | `qwen2_moe`                                            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   | GGUF architecture `qwen2moe` is not accepted.                                                                                                              |
-| Phi-2                                       | `phi`                                                  | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   | GGUF architecture `phi` is not accepted.                                                                                                                   |
-| Phi-3, Phi-3.5, Phi-4                       | `phi3` (`phi3`)                                        | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   |                                                                                                                                                            |
-| Gemma, Gemma 2                              | `gemma`, `gemma2` (`gemma`, `gemma2`)                  | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   |                                                                                                                                                            |
-| StarCoder2                                  | `starcoder2` (`starcoder2`)                            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   |                                                                                                                                                            |
-| InternLM2                                   | `internlm2`                                            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   |                                                                                                                                                            |
-| Mixtral                                     | `mixtral`                                              | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   | MoE layers run through the Llama path.                                                                                                                     |
-| Falcon                                      | `falcon` (`falcon`)                                    | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   |                                                                                                                                                            |
-| Command-R                                   | `command_r`                                            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   |                                                                                                                                                            |
-| GPT-NeoX, Pythia                            | `gpt_neox`                                             | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   |                                                                                                                                                            |
-| DBRX                                        | `dbrx`                                                 | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   |                                                                                                                                                            |
+| Architecture                                | `model_type` (GGUF `general.architecture`)             | SafeTensors         | AWQ                 | GPTQ                | GGUF                | Notes                                                                                                                                                                                     |
+| ------------------------------------------- | ------------------------------------------------------ | ------------------- | ------------------- | ------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Llama 2, 3, 3.1, 3.2                        | `llama` (`llama`, `llama2`, `llama3`)                  | `Tested`            | `Supported in code` | `Supported in code` | `Supported in code` | Llama 3.2 1B, 32 of 32 ids. Gated by `BLAZR_TEST_LLAMA_MODEL`.                                                                                                                            |
+| Mistral 7B                                  | `mistral` (`mistral`)                                  | `Tested`            | `Tested`            | `Tested`            | `Tested`            | Named in the production checklist. CPU runs of GGUF Q2_K, Q4_K_M and Q8_0, AWQ and GPTQ give coherent text. No local HF weights exist for a reference.                                    |
+| Yi, CodeLlama, Solar                        | `llama` (`llama`)                                      | `Supported in code` | `Supported in code` | `Supported in code` | `Supported in code` | Same path as Llama. No test names these models.                                                                                                                                           |
+| Mamba2                                      | `mamba2` (`mamba`, `mamba2`)                           | `Supported in code` | —                   | —                   | `Supported in code` | No attention layers, so no AWQ or GPTQ.                                                                                                                                                   |
+| Mamba3                                      | `mamba3` (`mamba3`)                                    | `Supported in code` | —                   | —                   | `Supported in code` | No attention layers, so no AWQ or GPTQ.                                                                                                                                                   |
+| DeepSeek-V2, DeepSeek-V3 (MLA + MoE)        | `deepseek_v2`, `deepseek_v3` (`deepseek`, `deepseek2`) | `Supported in code` | `Supported in code` | `Supported in code` | `Supported in code` | Needs a generate test. GGUF `deepseek` maps to model type `deepseek`.                                                                                                                     |
+| Hybrid Mamba + attention                    | `hybrid` (oxidizr layout)                              | `Supported in code` | —                   | —                   | —                   | No GGUF architecture name maps to `hybrid`. No AWQ or GPTQ path.                                                                                                                          |
+| Qwen3.5 hybrid (Gated DeltaNet + attention) | `qwen35` (`qwen35`)                                    | `Supported in code` | —                   | —                   | `Tested`            | SafeTensors needs `model_type` `qwen35` in `config.json`. GGUF test: `tests/qwen35_generate.rs`, gated by `BOOSTR_BONSAI2_DIR`. No AWQ or GPTQ path found.                                |
+| Qwen2, Qwen2.5                              | `qwen2` (`qwen2`)                                      | `Tested`            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | Qwen2.5-0.5B, 32 of 32 ids. `BLAZR_TEST_QWEN2_MODEL`.                                                                                                                                     |
+| Qwen2-MoE                                   | `qwen2_moe`                                            | `Tested`            | `Routes to llama`   | `Routes to llama`   | —                   | Random-weight `hf-tiny-v2/tiny-random-Qwen2MoeForCausalLM`: 32 of 32 ids and logits. `BLAZR_TEST_QWEN2_MOE_MODEL`. GGUF architecture `qwen2moe` is not accepted.                          |
+| Phi-2                                       | `phi`                                                  | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   | GGUF architecture `phi` is not accepted.                                                                                                                                                  |
+| Phi-3, Phi-3.5, Phi-4                       | `phi3` (`phi3`)                                        | `Tested`            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | Phi-3.5-mini-instruct, 32 of 32 ids. `BLAZR_TEST_PHI3_MODEL`. Phi-4 is untested.                                                                                                          |
+| Gemma, Gemma 2                              | `gemma`, `gemma2` (`gemma`, `gemma2`)                  | `Tested`            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | Gemma 2 2B (`unsloth/gemma-2-2b` mirror), 32 of 32 ids. `BLAZR_TEST_GEMMA2_MODEL`. Gemma 1 shares the path and is untested.                                                               |
+| StarCoder2                                  | `starcoder2` (`starcoder2`)                            | `Tested`            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | `TechxGenus/starcoder2-3b-instruct`, a StarCoder2-3B fine-tune, 32 of 32 ids. `BLAZR_TEST_STARCODER2_MODEL`.                                                                              |
+| InternLM2                                   | `internlm2`                                            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | —                   | No name map for `attention.wqkv` or `feed_forward.*`, so the load fails.                                                                                                                  |
+| Mixtral                                     | `mixtral`                                              | `Tested`            | `Routes to llama`   | `Routes to llama`   | —                   | `axolotl-ai-co/tiny-mixtral-30m`, a trained 30M Mixtral, 32 of 32 ids. `BLAZR_TEST_MIXTRAL_MODEL`. The transformers v5 fused `gate_up_proj` expert layout is not read.                    |
+| Falcon                                      | `falcon` (`falcon`)                                    | `Tested`            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | Falcon-RW-1B (`petals-team/falcon-rw-1b` SafeTensors copy): ALiBi, sequential block, 32 of 32 ids. `BLAZR_TEST_FALCON_MODEL`. The parallel Falcon-7B and Falcon-40B layouts are untested. |
+| Command-R                                   | `cohere`, `command_r`                                  | `Tested`            | `Routes to llama`   | `Routes to llama`   | —                   | Random-weight `trl-internal-testing/tiny-CohereForCausalLM`: 32 of 32 ids and logits. `BLAZR_TEST_COHERE_MODEL`. `use_qk_norm: true` (Command-R+) is refused.                             |
+| GPT-NeoX, Pythia                            | `gpt_neox`                                             | `Tested`            | `Routes to llama`   | `Routes to llama`   | —                   | Pythia-160M, 32 of 32 ids. `BLAZR_TEST_GPT_NEOX_MODEL`.                                                                                                                                   |
+| DBRX                                        | `dbrx`                                                 | `Tested`            | `Routes to llama`   | `Routes to llama`   | —                   | Random-weight `trl-internal-testing/tiny-DbrxForCausalLM`: 32 of 32 ids and logits. `BLAZR_TEST_DBRX_MODEL`.                                                                              |
 
 Any other model type that has an attention config loads through the Llama path. That route is untested.
+
+The `Tested` SafeTensors cells with a `BLAZR_TEST_*_MODEL` variable run `tests/arch_reference.rs`. They load SafeTensors on the CPU in F32. Each test decodes 32 greedy tokens and compares the first 8 ids with `transformers`. All 32 ids match on every listed checkpoint. Random-weight checkpoints also compare the last prompt position's logits. AWQ, GPTQ and GGUF files of these architectures are untested.
+
+Load paths:
+
+- `boostr::format::restructure_hf_checkpoint` renames the tensors, splits fused QKV and gate-up projections, and stacks MoE experts.
+- It also applies the Gemma norm offset, the query scale, and the partial or interleaved RoPE row order.
+- The block config that blazr builds from `config.json` carries the rest: LayerNorm, MLP activation, residual layout, softcaps, `logit_scale`, `clip_qkv`, the ALiBi scale and sliding layers.
+- Paged attention refuses ALiBi and softcapped models. It refuses a sliding window shorter than the sequence.
+- CUDA graph mode and tensor parallelism run the Llama block only. They refuse every other block.
 
 ### Quantized weight formats
 
@@ -132,7 +142,7 @@ Speech endpoints and commands need the `audio` feature. A missing model download
 
 ### Text checkpoints
 
-Blazr selects the vocabulary from the `vocab_size` value in the checkpoint.
+Blazr runs a checkpoint with its own `tokenizer.json`. Without one, it selects a bundled vocabulary from the checkpoint's `vocab_size`.
 
 | Vocabulary    | Base size | Models named in source         |
 | ------------- | --------- | ------------------------------ |
@@ -147,7 +157,8 @@ Blazr selects the vocabulary from the `vocab_size` value in the checkpoint.
 - A checkpoint matches a vocabulary by its base size or its extended size. splintr adds agent tokens to the extended size.
 - A size that matches no vocabulary fails. The error lists the known vocabularies. Blazr does not guess.
 - Custom vocabularies fail with an error. Blazr does not read a `.tiktoken` file.
-- The text path reads no `tokenizer.json` or `tokenizer.model` from the checkpoint directory.
+- A checkpoint with a `tokenizer.json` runs with it, and size matching does not run. A `tokenizer.json` that does not load is an error.
+- The text path reads no `tokenizer.model`.
 - The `tokenizer_vocab` field in `config` is not read by the load path.
 
 ### GGUF checkpoints
@@ -206,11 +217,11 @@ Build with `--features wgpu`. Select the adapter with `device: wgpu` or `device:
 
 ### Tested scope
 
-| Model        | Format       | Check                                              | Result        |
-| ------------ | ------------ | -------------------------------------------------- | ------------- |
-| Llama 3.2 1B | SafeTensors  | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
-| Llama 3.2 1B | GGUF Q8_0    | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
-| Llama 3.2 1B | GGUF Q4_K_M  | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
+| Model        | Format      | Check                                              | Result        |
+| ------------ | ----------- | -------------------------------------------------- | ------------- |
+| Llama 3.2 1B | SafeTensors | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
+| Llama 3.2 1B | GGUF Q8_0   | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
+| Llama 3.2 1B | GGUF Q4_K_M | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
 
 - The host was an NVIDIA RTX 3060 through Vulkan.
 - Per-layer hidden states stayed within 1e-5 relative of the CPU F32 reference. The test tolerance is 1e-3 relative.
@@ -225,6 +236,6 @@ Build with `--features wgpu`. Select the adapter with `device: wgpu` or `device:
 ## Sources
 
 - blazr: `src/loader/detect.rs`, `src/loader/safetensors/`, `src/loader/gguf_config.rs`, `src/loader/tts/`, `src/loader/whisper_loader.rs`, `src/model/chat_template/`, `src/tokenizer/`, `src/server/rerank.rs`, `src/server/embeddings.rs`.
-- boostr: `src/model/detection/`, `src/model/registry/load.rs`, `src/model/config/huggingface/model_type.rs`, `src/quant/format.rs`, `src/quant/cpu/dequant.rs`, `src/quant/cuda/dequant.rs`, `src/quant/cuda/kernels/dequant_generic.cu`.
+- boostr: `src/format/hf_restructure.rs`, `src/model/config/block.rs`, `src/model/detection/`, `src/model/registry/load.rs`, `src/model/config/huggingface/model_type.rs`, `src/quant/format.rs`, `src/quant/cpu/dequant.rs`, `src/quant/cuda/dequant.rs`, `src/quant/cuda/kernels/dequant_generic.cu`.
 - Tests: `tests/` in blazr. Gated tests name their checkpoints in the constants at the top of each file.
 - Production checklist: `blazr_production_checklist.md`, sections 1 and 2.

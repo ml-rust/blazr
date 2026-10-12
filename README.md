@@ -27,16 +27,16 @@ Every [GitHub release](https://github.com/ml-rust/blazr/releases) carries the
 archives below. Each archive includes `LICENSE`, `NOTICE`, `LICENSE-LLAMA` and
 `THIRD-PARTY-LICENSES.txt`. The release workflow has not run on GitHub yet.
 
-| Archive                      | Platform                     | Build                                  |
-| ---------------------------- | ---------------------------- | -------------------------------------- |
-| `blazr-linux-x64.tar.gz`     | Linux x86_64                 | CPU, `audio`                           |
-| `blazr-linux-x64-gpu.tar.gz` | Linux x86_64                 | Vulkan (`wgpu`), `audio`               |
-| `blazr-linux-arm64.tar.gz`   | Linux aarch64                | CPU, `audio`                           |
-| `blazr-macos-arm64.tar.gz`   | macOS on Apple silicon       | Metal (`wgpu`), `audio`                |
-| `blazr-windows-x64.zip`      | Windows x86_64               | CPU, `audio`                           |
-| `blazr-windows-x64-gpu.zip`  | Windows x86_64               | DX12 (`wgpu`), `audio`                 |
-| `blazr-android-arm64.tar.gz` | Android arm64                | `libblazr.a` for the C ABI (`capi`)    |
-| `blazr-ios-arm64.tar.gz`     | iOS arm64                    | `libblazr.a` for the C ABI (`capi`)    |
+| Archive                      | Platform               | Build                               |
+| ---------------------------- | ---------------------- | ----------------------------------- |
+| `blazr-linux-x64.tar.gz`     | Linux x86_64           | CPU, `audio`                        |
+| `blazr-linux-x64-gpu.tar.gz` | Linux x86_64           | Vulkan (`wgpu`), `audio`            |
+| `blazr-linux-arm64.tar.gz`   | Linux aarch64          | CPU, `audio`                        |
+| `blazr-macos-arm64.tar.gz`   | macOS on Apple silicon | Metal (`wgpu`), `audio`             |
+| `blazr-windows-x64.zip`      | Windows x86_64         | CPU, `audio`                        |
+| `blazr-windows-x64-gpu.zip`  | Windows x86_64         | DX12 (`wgpu`), `audio`              |
+| `blazr-android-arm64.tar.gz` | Android arm64          | `libblazr.a` for the C ABI (`capi`) |
+| `blazr-ios-arm64.tar.gz`     | iOS arm64              | `libblazr.a` for the C ABI (`capi`) |
 
 The desktop archives hold the `blazr` binary and `README.md`. The mobile
 archives hold `libblazr.a` and `include/blazr.h`. See [Embedding](#embedding).
@@ -84,15 +84,15 @@ cargo build --release --features audio
 
 ### Build variants
 
-| Build                                  | Cargo command                                                                | Runtime                                                 |
-| -------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------- |
-| CPU (default)                          | `cargo build --release`                                                      | CPU                                                     |
-| CUDA                                   | `cargo build --release --features cuda`                                      | CUDA device from `device`, CPU with `--cpu`             |
-| WebGPU                                 | `cargo build --release --features wgpu`                                      | wgpu adapter from `device`, CPU with `--cpu`            |
-| Engine only (library)                  | `cargo check --lib --no-default-features`                                    | Library with no CLI or HTTP stack                       |
-| C library (`capi`)                     | `cargo build --release --lib --no-default-features --features capi,f16`      | `libblazr.a` and `libblazr.so`                          |
-| Android (`aarch64-linux-android`)      | `cargo check --lib --no-default-features --features capi --target aarch64-linux-android` | Compile check passes on NDK 27. x86_64 emulator run passes. Not run on aarch64 hardware. |
-| WebAssembly (`wasm32-unknown-unknown`) | `cargo check --lib --no-default-features --features wgpu --target wasm32-unknown-unknown` | Compile check passes. Not run in a browser. |
+| Build                                  | Cargo command                                                                             | Runtime                                                                                  |
+| -------------------------------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| CPU (default)                          | `cargo build --release`                                                                   | CPU                                                                                      |
+| CUDA                                   | `cargo build --release --features cuda`                                                   | CUDA device from `device`, CPU with `--cpu`                                              |
+| WebGPU                                 | `cargo build --release --features wgpu`                                                   | wgpu adapter from `device`, CPU with `--cpu`                                             |
+| Engine only (library)                  | `cargo check --lib --no-default-features`                                                 | Library with no CLI or HTTP stack                                                        |
+| C library (`capi`)                     | `cargo build --release --lib --no-default-features --features capi,f16`                   | `libblazr.a` and `libblazr.so`                                                           |
+| Android (`aarch64-linux-android`)      | `cargo check --lib --no-default-features --features capi --target aarch64-linux-android`  | Compile check passes on NDK 27. x86_64 emulator run passes. Not run on aarch64 hardware. |
+| WebAssembly (`wasm32-unknown-unknown`) | `cargo check --lib --no-default-features --features wgpu --target wasm32-unknown-unknown` | Compile check passes. Not run in a browser.                                              |
 
 - `cuda` takes priority over `wgpu` when both features are on.
 - `cli` and `server` each enable `hub`, the Hugging Face client.
@@ -167,13 +167,16 @@ blazr pull Qwen/Qwen2.5-0.5B               # Download from HuggingFace
 
 [docs/models.md](docs/models.md) holds the full matrix with an evidence level per cell.
 
-| Family                                                                        | Evidence                                                   |
-| ----------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| Llama 3.x                                                                     | SafeTensors tested                                         |
-| Mistral 7B                                                                    | SafeTensors, AWQ, GPTQ, GGUF tested (production checklist) |
-| Qwen3.5 hybrid                                                                | GGUF tested                                                |
-| Mamba2, Mamba3, DeepSeek-V2/V3, Mamba+attention hybrids                       | Supported in code, no test names a checkpoint              |
-| Qwen2/2.5, Phi, Gemma, StarCoder2, Mixtral, Falcon, Command-R, GPT-NeoX, DBRX | Routed to the Llama path, untested                         |
+| Family                                                                       | Evidence                                                              |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Llama 3.x                                                                    | SafeTensors tested against `transformers`                             |
+| Mistral 7B                                                                   | SafeTensors, AWQ, GPTQ, GGUF tested (production checklist)            |
+| Qwen2/2.5, Phi-3.5, Gemma 2, StarCoder2, GPT-NeoX/Pythia, Falcon-RW, Mixtral | SafeTensors tested against `transformers`: 32 of 32 greedy ids match  |
+| Qwen2-MoE, DBRX, Command-R (Cohere)                                          | SafeTensors tested against `transformers` on tiny random-weight files |
+| Qwen3.5 hybrid                                                               | GGUF tested                                                           |
+| Mamba2, Mamba3, DeepSeek-V2/V3, Mamba+attention hybrids                      | Supported in code, no test names a checkpoint                         |
+| AWQ, GPTQ and GGUF files of those families, Phi-2                            | Routed to the Llama path, untested                                    |
+| InternLM2                                                                    | Routed to the Llama path. No tensor name map, so the load fails       |
 
 ## Model Formats
 
@@ -291,36 +294,36 @@ blazr sound-review  Review rendered sound effects (audio)
 
 ### Generation Flags
 
-| Flag            | Default  | Description                                                       |
-| --------------- | -------- | ----------------------------------------------------------------- |
-| `--model`       | `default_model` | Model name or path                                             |
-| `--prompt`      | none     | Input text. Required for `generate`.                              |
-| `--max-tokens`  | 2048     | Maximum tokens to generate                                        |
-| `--temperature` | 1.0      | Sampling temperature (0 = greedy)                                 |
-| `--top-p`       | 1.0      | Nucleus sampling threshold                                        |
-| `--top-k`       | 0        | Top-k sampling (0 = off)                                          |
-| `--cpu`         | off      | Run on the CPU. Without it, the `device` config key picks the GPU, else GPU 0 of the build |
-| `--mmproj`      | none     | Qwen3-VL mmproj GGUF for image inputs (`qwen35` models only)      |
-| `--image`       | none     | Image file placed before the prompt. Needs `--mmproj`. Repeatable. `generate` only. |
+| Flag            | Default         | Description                                                                                |
+| --------------- | --------------- | ------------------------------------------------------------------------------------------ |
+| `--model`       | `default_model` | Model name or path                                                                         |
+| `--prompt`      | none            | Input text. Required for `generate`.                                                       |
+| `--max-tokens`  | 2048            | Maximum tokens to generate                                                                 |
+| `--temperature` | 1.0             | Sampling temperature (0 = greedy)                                                          |
+| `--top-p`       | 1.0             | Nucleus sampling threshold                                                                 |
+| `--top-k`       | 0               | Top-k sampling (0 = off)                                                                   |
+| `--cpu`         | off             | Run on the CPU. Without it, the `device` config key picks the GPU, else GPU 0 of the build |
+| `--mmproj`      | none            | Qwen3-VL mmproj GGUF for image inputs (`qwen35` models only)                               |
+| `--image`       | none            | Image file placed before the prompt. Needs `--mmproj`. Repeatable. `generate` only.        |
 
 The `device` key accepts `cpu`, `cuda`, `cuda:N`, `wgpu`, and `wgpu:N`. Set it in `config.yaml`. See [docs/configuration.md](docs/configuration.md).
 
 ### Server Flags
 
-| Flag                                        | Default            | Description                                                                                                    |
-| ------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `--model`                                   | none               | Local path or name under `$BLAZR_MODEL_DIR` (default `./models`). Without it, models load on demand            |
-| `--port`                                    | 8080               | Port to listen on                                                                                              |
-| `--host`                                    | 0.0.0.0            | Host to bind to                                                                                                |
+| Flag                                        | Default            | Description                                                                                                      |
+| ------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `--model`                                   | none               | Local path or name under `$BLAZR_MODEL_DIR` (default `./models`). Without it, models load on demand              |
+| `--port`                                    | 8080               | Port to listen on                                                                                                |
+| `--host`                                    | 0.0.0.0            | Host to bind to                                                                                                  |
 | `--data-parallel`                           | 1                  | Copies of the start model, one per CUDA device or CPU copy. Above 1 needs `--model` and tensor parallelism at 1. |
-| `--chat-template`                           | model's own        | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file |
-| `--mmproj`                                  | none               | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model. Enables `image_url` parts in `/v1/chat/completions`       |
-| `--image-min-tokens` / `--image-max-tokens` | mmproj values      | Token range every image is resized into                                                                        |
-| `--tls-cert` / `--tls-key`                  | none               | PEM certificate chain and private key. Both together serve HTTPS                                               |
-| `--api-key` / `--api-key-file`              | none               | Require a bearer key. Also reads `BLAZR_API_KEY`                                                               |
-| `--asr-model`                               | none               | `NAME=DIR` Whisper model for `/v1/audio/transcriptions` (`audio`). Repeatable                                  |
-| `--tts-model`                               | none               | `NAME=DIR` Kokoro, VoxCPM2 or VITS model for `/v1/audio/speech` (`audio`). Repeatable                          |
-| `--voice-dir`                               | `$BLAZR_VOICE_DIR` | Kokoro voice files searched before the model's `voices/` (`audio`)                                             |
+| `--chat-template`                           | model's own        | Built-in name (`chatml`, `llama3`, `mistral`, `phi3`, `gemma`, `deepseek`, `generic`) or a Jinja template file   |
+| `--mmproj`                                  | none               | Qwen3-VL mmproj GGUF loaded beside a `qwen35` model. Enables `image_url` parts in `/v1/chat/completions`         |
+| `--image-min-tokens` / `--image-max-tokens` | mmproj values      | Token range every image is resized into                                                                          |
+| `--tls-cert` / `--tls-key`                  | none               | PEM certificate chain and private key. Both together serve HTTPS                                                 |
+| `--api-key` / `--api-key-file`              | none               | Require a bearer key. Also reads `BLAZR_API_KEY`                                                                 |
+| `--asr-model`                               | none               | `NAME=DIR` Whisper model for `/v1/audio/transcriptions` (`audio`). Repeatable                                    |
+| `--tts-model`                               | none               | `NAME=DIR` Kokoro, VoxCPM2 or VITS model for `/v1/audio/speech` (`audio`). Repeatable                            |
+| `--voice-dir`                               | `$BLAZR_VOICE_DIR` | Kokoro voice files searched before the model's `voices/` (`audio`)                                               |
 
 ### Tensor Parallelism
 
@@ -510,19 +513,19 @@ The `capi` feature builds a C library for app embedders. It writes
 cargo build --release --lib --no-default-features --features capi,f16
 ```
 
-| Function                                                                 | Purpose                                                       |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| `blazr_version`                                                          | Returns the library version. Do not free it.                  |
-| `blazr_load_options_default`                                             | Returns the default `BlazrLoadOptions`.                       |
-| `blazr_model_load`                                                       | Loads a GGUF file or a SafeTensors directory.                 |
-| `blazr_model_unload`                                                     | Unloads a model. A second unload returns `BLAZR_STATUS_INVALID_HANDLE`. |
-| `blazr_generate_params_default`                                          | Returns the default sampling parameters.                      |
-| `blazr_generate`                                                         | Generates text and calls the callback once per token.         |
-| `blazr_cancel`                                                           | Stops the running generation from any thread.                 |
-| `blazr_tokenize`                                                         | Encodes text to token ids.                                    |
-| `blazr_embed`                                                            | Returns one unit-length vector: the mean of the last hidden states. |
-| `blazr_last_error`                                                       | Returns the message of the last failed call on this thread.   |
-| `blazr_string_free`, `blazr_tokens_free`, `blazr_floats_free`            | Free the strings, token arrays and float arrays blazr returns. |
+| Function                                                      | Purpose                                                                 |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `blazr_version`                                               | Returns the library version. Do not free it.                            |
+| `blazr_load_options_default`                                  | Returns the default `BlazrLoadOptions`.                                 |
+| `blazr_model_load`                                            | Loads a GGUF file or a SafeTensors directory.                           |
+| `blazr_model_unload`                                          | Unloads a model. A second unload returns `BLAZR_STATUS_INVALID_HANDLE`. |
+| `blazr_generate_params_default`                               | Returns the default sampling parameters.                                |
+| `blazr_generate`                                              | Generates text and calls the callback once per token.                   |
+| `blazr_cancel`                                                | Stops the running generation from any thread.                           |
+| `blazr_tokenize`                                              | Encodes text to token ids.                                              |
+| `blazr_embed`                                                 | Returns one unit-length vector: the mean of the last hidden states.     |
+| `blazr_last_error`                                            | Returns the message of the last failed call on this thread.             |
+| `blazr_string_free`, `blazr_tokens_free`, `blazr_floats_free` | Free the strings, token arrays and float arrays blazr returns.          |
 
 Every call returns a `BlazrStatus`. Zero and above mean success.
 

@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "blazr"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -470,9 +470,9 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b3320039521b3884c5921eae6a2cf7e9042b9539c690cda44e460bb8aa8f9b8"
+checksum = "eafaff2bca75a347840d81daf0cbe763797bcc6c0826802850950092b70f1a26"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3979,9 +3979,9 @@ dependencies = [
 
 [[package]]
 name = "splintr"
-version = "0.21.1"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "024f6f87fc962c647f5ec494afa4a9c854f0e0b9c94121c7496f61f649c42c08"
+checksum = "21a0cca20510b5fad3a3fdd55557839da2b839b2ac38e776726379f7c2ad54ea"
 dependencies = [
  "aho-corasick",
  "base64 0.23.1",
@@ -4921,9 +4921,9 @@ dependencies = [
 
 [[package]]
 name = "voxr"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "970df08a2d8a414f733cec9d3b53ae794d6ae1b2880aa8c31dbc71e5b31ce3c0"
+checksum = "5b6dbc537fbf965939bff37412a23cf3f6cb2c19dce85fdde256a14b6b5c3c9e"
 dependencies = [
  "biquad",
  "boostr",
@@ -4946,9 +4946,9 @@ dependencies = [
 
 [[package]]
 name = "voxr-narrate"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c50c46e78e769afee48ecb9fcd6766d810ed64a7c009bce38625c9874545598f"
+checksum = "967ecb34834e640fc5a4237e1631d821ccc9f1405461aaa44e3f5343f106609e"
 dependencies = [
  "biquad",
  "boostr",

@@ -12,9 +12,17 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] - 2026-10-12
+
 ### Added
 
 - **`tests/arch_reference.rs`** — greedy decode of real checkpoints against `transformers` on CPU in F32. It covers Llama, Qwen2, Gemma 2, GPT-NeoX, Falcon, Mixtral, Qwen2-MoE, DBRX and Cohere. Each test reads its own `BLAZR_TEST_*_MODEL` variable and skips when unset.
+
+### Changed
+
+- **Dependencies** — boostr 0.8, splintr 0.22, and voxr and voxr-narrate 0.6. `blazr::boostr` re-exports boostr 0.8.
 
 ### Fixed
 

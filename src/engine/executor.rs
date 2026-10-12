@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
+use boostr::format::PeftAdapter;
 use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
 use boostr::inference::prefix_cache::{PrefixCache, PrefixCacheConfig};
 use boostr::model::LoadedModel;
@@ -22,7 +23,7 @@ use splintr::AnyTokenizer;
 use crate::config::BlazrConfig;
 use crate::model::chat_template::ChatTemplate;
 
-use super::lora::{load_lora_adapter, LoraAdapterRegistry};
+use super::lora::LoraAdapterRegistry;
 use super::vision_tower::{ImageTokenLimits, VisionTower};
 
 /// `config` with `inference.dtype` set to the dtype `R` computes.
@@ -453,14 +454,24 @@ where
 
     /// Load a LoRA adapter from disk and register it under `name`.
     ///
-    /// `path` should point to a directory containing `adapter_model.safetensors`
-    /// (and optionally `adapter_config.json`), or directly to the `.safetensors` file.
+    /// `path` is a PEFT adapter directory holding `adapter_config.json` and
+    /// `adapter_model.safetensors`, or the `.safetensors` file with
+    /// `adapter_config.json` beside it. boostr's `PeftAdapter::load` reads it
+    /// and refuses any adapter it cannot represent exactly.
     ///
     /// If an adapter with the same name was previously loaded it is replaced.
     pub fn load_lora(&self, path: &std::path::Path, name: &str) -> Result<()> {
-        let adapter = load_lora_adapter::<R>(path, name, &self.device)?;
-        self.lora_registry.insert(adapter);
-        tracing::info!(adapter = name, "LoRA adapter registered");
+        let adapter = PeftAdapter::<R>::load(path, &self.device)
+            .map_err(|e| anyhow!("LoRA adapter '{name}' at {}: {e}", path.display()))?;
+        tracing::info!(
+            adapter = name,
+            rank = adapter.config.r,
+            alpha = adapter.config.lora_alpha,
+            rslora = adapter.config.use_rslora,
+            layers = adapter.layers.len(),
+            "LoRA adapter registered"
+        );
+        self.lora_registry.insert(name, adapter);
         Ok(())
     }
 

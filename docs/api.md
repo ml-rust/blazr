@@ -846,6 +846,16 @@ Adapters use the Hugging Face PEFT format. The model loads on first use.
 | `name`  | string | Name for the adapter. Use it as `lora_adapter` in a request. |
 | `path`  | string | Adapter directory, or an `adapter_model.safetensors` file.   |
 
+The adapter needs `adapter_config.json` beside its weights, with `r` and `lora_alpha` set. `use_rslora`, `rank_pattern` and `alpha_pattern` apply per module. The load fails on any of these:
+
+- Weights only in `adapter_model.bin`.
+- `use_dora`, `fan_in_fan_out`, `lora_bias` or `use_qalora` set to `true`.
+- A non-empty `modules_to_save` or `target_parameters`.
+- `alora_invocation_tokens`, `trainable_token_indices` or `layer_replication` set.
+- A `lora_A` without its `lora_B`, or the reverse.
+- A factor rank that differs from `r` or its `rank_pattern` entry.
+- A tensor that is not a `lora_A` or `lora_B` weight under `model.layers.N` or `model.language_model.layers.N`.
+
 ```bash
 curl http://localhost:8080/v1/lora \
   -H "Content-Type: application/json" \

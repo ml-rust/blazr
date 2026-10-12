@@ -65,11 +65,14 @@ where
     );
 
     // Detect architecture
-    let detected = detect_architecture_from_loader(&loader)?;
 
     // Load config — AWQ models always run in F16 (scales are F16, reference uses F16)
     let dtype = fixed_format_dtype("AWQ", DType::F16, request);
-    let config = load_or_create_config(model_dir, &detected, dtype)?;
+    let config = load_or_create_config(
+        model_dir,
+        || detect_architecture_from_loader(&loader),
+        dtype,
+    )?;
 
     // Separate tensor names into quantized triplets and regular tensors
     let tensor_names = loader.tensor_names();

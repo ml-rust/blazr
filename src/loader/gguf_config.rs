@@ -234,6 +234,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &mut Gguf) -> Result<BlazrConfig> 
                 intermediate_size: None,
                 load_balance_alpha: 0.01,
                 z_loss_alpha: 1e-3,
+                norm_topk_prob: None,
             }
         });
 
@@ -258,6 +259,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &mut Gguf) -> Result<BlazrConfig> 
         gdn: None,
         qwen35_attention: None,
         hadamard: None,
+        block: Default::default(),
         quant_formats: Vec::new(),
     };
 

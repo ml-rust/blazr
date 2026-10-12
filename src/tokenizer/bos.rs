@@ -1,6 +1,7 @@
 //! The BOS rule a SafeTensors checkpoint states in its own files.
 //!
-//! A SafeTensors checkpoint gets a bundled vocabulary matched by size. That
+//! A SafeTensors checkpoint runs with its own `tokenizer.json`. Without one,
+//! it gets a bundled vocabulary matched by size. That
 //! vocabulary knows nothing of the model's BOS rule. HF `transformers` and
 //! llama.cpp prepend BOS for the Llama and Mistral families, and so the GGUF
 //! path does from `tokenizer.ggml.add_bos_token`. This module reads the same
@@ -241,14 +242,39 @@ pub fn apply_bos_files(
     })
 }
 
-/// The tokenizer for a SafeTensors checkpoint: the bundled vocabulary its
-/// `vocab_size` matches, with the BOS rule of its own files.
+/// The tokenizer for a SafeTensors checkpoint, with the BOS rule of its own
+/// files.
+///
+/// - A `tokenizer.json` beside the weights is the model's own tokenizer, and
+///   it wins.
+/// - Without one, the bundled vocabulary that `vocab_size` matches serves.
+///
+/// Embedding row counts are often padded past the tokenizer's size, so
+/// Qwen2, Phi-3, Gemma and StarCoder2 match no bundled vocabulary by size.
 ///
 /// # Errors
 ///
-/// As [`from_vocab_size`] and [`apply_checkpoint_bos`].
+/// - A `tokenizer.json` that does not load. Blazr never falls back to a
+///   guessed vocabulary then.
+/// - As [`from_vocab_size`] and [`apply_checkpoint_bos`].
 pub fn checkpoint_tokenizer(model: &Path, vocab_size: usize) -> Result<AnyTokenizer> {
-    apply_checkpoint_bos(from_vocab_size(vocab_size)?, model)
+    let dir = if model.is_dir() {
+        model
+    } else {
+        model.parent().unwrap_or(Path::new("."))
+    };
+    let json = dir.join("tokenizer.json");
+    let base = if json.is_file() {
+        splintr::from_json_path(&json).map_err(|e| {
+            anyhow!(
+                "{} does not load as a tokenizer: {e}. Fix or remove the file",
+                json.display()
+            )
+        })?
+    } else {
+        from_vocab_size(vocab_size)?
+    };
+    apply_checkpoint_bos(base, model)
 }
 
 #[cfg(test)]
@@ -367,12 +393,63 @@ mod tests {
             );
         }
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("tokenizer.json"), llama3_json().to_string()).unwrap();
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            json!({"add_bos_token": true, "bos_token": "<|begin_of_text|>"}).to_string(),
+        )
+        .unwrap();
         let tok = checkpoint_tokenizer(dir.path(), 128256).unwrap();
         assert_eq!(tok.encode("Hi")[0], 128000);
         assert_eq!(
             tok.encode("Hi").iter().filter(|&&id| id == 128000).count(),
             1
         );
+    }
+
+    /// A byte-level BPE `tokenizer.json` with two tokens and a BOS template.
+    fn own_tokenizer_json() -> Value {
+        json!({
+            "added_tokens": [{"id": 2, "content": "<s>", "special": true}],
+            "normalizer": null,
+            "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false},
+            "post_processor": {"type": "TemplateProcessing",
+                "single": [{"SpecialToken": {"id": "<s>", "type_id": 0}},
+                           {"Sequence": {"id": "A", "type_id": 0}}],
+                "special_tokens": {"<s>": {"ids": [2]}}},
+            "model": {"type": "BPE", "vocab": {"a": 0, "Ġa": 1}, "merges": []}
+        })
+    }
+
+    /// The checkpoint's own `tokenizer.json` serves, whatever the padded
+    /// embedding size, and its template BOS is kept once.
+    #[test]
+    fn own_tokenizer_json_wins_over_the_size_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tokenizer.json"),
+            own_tokenizer_json().to_string(),
+        )
+        .unwrap();
+        // 151936 matches no bundled vocabulary.
+        let tok = checkpoint_tokenizer(dir.path(), 151936).unwrap();
+        assert_eq!(tok.encode("a a"), vec![2, 0, 1]);
+    }
+
+    /// A `tokenizer.json` that does not load is an error, never a guess.
+    #[test]
+    fn broken_tokenizer_json_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), "{\"model\": 3}").unwrap();
+        let Err(err) = checkpoint_tokenizer(dir.path(), 128256) else {
+            panic!("a broken tokenizer.json must not load");
+        };
+        assert!(err.to_string().contains("tokenizer.json"), "{err}");
+    }
+
+    #[test]
+    fn bundled_vocabulary_without_files_keeps_its_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let tok = checkpoint_tokenizer(dir.path(), 128256).unwrap();
+        assert!(!tok.encode("Hi").contains(&128000));
     }
 }

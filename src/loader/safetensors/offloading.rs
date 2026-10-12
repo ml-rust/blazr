@@ -143,7 +143,7 @@ where
     // Resolve the compute dtype before any weight loads.
     let compute = checkpoint_compute_dtype::<R>(config_dir, request);
     let config = if let Some(dir) = config_dir {
-        load_or_create_config(dir, &detected, compute)?
+        load_or_create_config(dir, || Ok(detected.clone()), compute)?
     } else {
         config_from_detected(&detected, compute)?
     };

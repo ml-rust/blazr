@@ -118,6 +118,11 @@ where
         num_ctx: usize,
     ) -> Result<Self> {
         let config = with_runtime_dtype::<R>(config)?;
+        if config.inference.paged_attention {
+            if let Some(reason) = model.paged_attention_refusal() {
+                return Err(anyhow!(reason));
+            }
+        }
         let chat_template = ChatTemplate::from_model_type(config.model_type());
 
         // Shared block allocator for paged attention (shared across all concurrent requests)

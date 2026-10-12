@@ -65,19 +65,21 @@ where
         );
     }
 
-    // Detect architecture from tensor names and shapes
-    let detected = detect_architecture_from_loader(&loader)?;
-
-    // Resolve the compute dtype before any weight loads.
+    // Resolve the compute dtype before any weight loads. Tensor names are
+    // read only when no config.json describes the model.
     let dtype = checkpoint_compute_dtype::<R>(config_dir, request);
-    let config = if let Some(dir) = config_dir {
-        load_or_create_config(dir, &detected, dtype)?
-    } else {
-        config_from_detected(&detected, dtype)?
+    let config = match config_dir {
+        Some(dir) => {
+            load_or_create_config(dir, || detect_architecture_from_loader(&loader), dtype)?
+        }
+        None => config_from_detected(&detect_architecture_from_loader(&loader)?, dtype)?,
     };
 
-    // Load all tensors into a VarMap, every float weight at `dtype`.
+    // Load all tensors into a VarMap, every float weight at `dtype`, then
+    // put a non-Llama checkpoint into the Llama tensor layout.
     let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
+    boostr::format::restructure_hf_checkpoint(&mut var_map, &config.model, device)
+        .map_err(|e| anyhow!("{e}"))?;
 
     // VarMap only needs to live through model loading — LoadedModel::load takes
     // tensors out via take_tensor, so VarMap is empty after load and can be dropped.
@@ -149,12 +151,12 @@ where
     let mut loader =
         SafeTensorsLoader::open(path).map_err(|e| anyhow!("Failed to open SafeTensors: {}", e))?;
 
-    let detected = detect_architecture_from_loader(&loader)?;
     let dtype = checkpoint_compute_dtype::<R>(config_dir, request);
-    let config = if let Some(dir) = config_dir {
-        load_or_create_config(dir, &detected, dtype)?
-    } else {
-        config_from_detected(&detected, dtype)?
+    let config = match config_dir {
+        Some(dir) => {
+            load_or_create_config(dir, || detect_architecture_from_loader(&loader), dtype)?
+        }
+        None => config_from_detected(&detect_architecture_from_loader(&loader)?, dtype)?,
     };
 
     // Check the head split before any weight loads.
@@ -174,6 +176,8 @@ where
     );
 
     let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
+    boostr::format::restructure_hf_checkpoint(&mut var_map, &config.model, device)
+        .map_err(|e| anyhow!("{e}"))?;
     let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model = LoadedModel::load_tp(&config.model, &mut vb, comm)
@@ -211,6 +215,8 @@ where
     };
     let dtype = checkpoint_compute_dtype::<R>(config_dir, None);
     let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
+    boostr::format::restructure_hf_checkpoint(&mut var_map, config, device)
+        .map_err(|e| anyhow!("{e}"))?;
     let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model =

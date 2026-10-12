@@ -24,7 +24,8 @@ pub struct SafeTensorsBytes {
     /// The text of `config.json`. Without it the shape comes from the
     /// tensor names and shapes alone.
     pub config_json: Option<String>,
-    /// The text of `tokenizer.json`. It sets only the BOS rule.
+    /// The text of `tokenizer.json`. When set, it is the tokenizer, and it
+    /// sets the BOS rule.
     pub tokenizer_json: Option<String>,
     /// The text of `tokenizer_config.json`. It sets only the BOS rule.
     pub tokenizer_config_json: Option<String>,
@@ -39,8 +40,8 @@ fn parse_json(text: Option<&str>, name: &str) -> Result<Option<serde_json::Value
 
 /// Load a regular SafeTensors checkpoint from memory.
 ///
-/// The tokenizer is the bundled vocabulary the config's `vocab_size`
-/// matches. The JSON files set its BOS rule. GPTQ and AWQ checkpoints are
+/// The tokenizer is `tokenizer_json` when set, else the bundled vocabulary
+/// the config's `vocab_size` matches. The JSON files set its BOS rule. GPTQ and AWQ checkpoints are
 /// refused.
 ///
 /// # Errors
@@ -75,15 +76,25 @@ where
              checkpoint or a GGUF file"
         ));
     }
-    let detected = detect_architecture_from_loader(&loader)?;
     let dtype = compute_dtype::<R>(request, config_json.as_deref().and_then(torch_dtype_of));
-    let config = config_from_text(config_json.as_deref(), &detected, dtype)?;
+    let config = config_from_text(
+        config_json.as_deref(),
+        || detect_architecture_from_loader(&loader),
+        dtype,
+    )?;
 
     let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
+    boostr::format::restructure_hf_checkpoint(&mut var_map, &config.model, device)
+        .map_err(|e| anyhow!("{e}"))?;
     let mut vb = VarBuilder::new(&mut var_map, device);
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {e}"))?;
 
-    let tokenizer = apply_bos_files(from_vocab_size(config.vocab_size())?, &files)?;
+    let base = match tokenizer_json.as_deref() {
+        Some(text) => splintr::from_json_bytes(text.as_bytes())
+            .map_err(|e| anyhow!("tokenizer.json does not load as a tokenizer: {e}"))?,
+        None => from_vocab_size(config.vocab_size())?,
+    };
+    let tokenizer = apply_bos_files(base, &files)?;
     Ok((model, config, tokenizer))
 }

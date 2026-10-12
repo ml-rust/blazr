@@ -153,6 +153,7 @@ impl Default for BlazrConfig {
                 gdn: None,
                 qwen35_attention: None,
                 hadamard: None,
+                block: Default::default(),
                 quant_formats: Vec::new(),
             },
             inference: InferenceConfig::default(),
@@ -363,6 +364,7 @@ inference:
             gdn: None,
             qwen35_attention: None,
             hadamard: None,
+            block: Default::default(),
             quant_formats: Vec::new(),
         };
         let config = BlazrConfig::from_universal(universal);
@@ -390,6 +392,7 @@ inference:
                 gdn: None,
                 qwen35_attention: None,
                 hadamard: None,
+                block: Default::default(),
                 quant_formats: Vec::new(),
             },
             "f16",

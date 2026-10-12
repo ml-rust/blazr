@@ -52,21 +52,30 @@ pub fn model_config_inference(path: &Path) -> Option<InferenceConfig> {
 
 /// Load config or create from detected architecture, with `dtype` as the
 /// compute dtype the caller resolved.
+///
+/// `detect` runs only when `config.json` is absent or parses as no known
+/// config. Tensor-name detection knows the Llama layout only, so a Falcon
+/// or DBRX checkpoint relies on its `config.json`.
 pub fn load_or_create_config(
     dir: &Path,
-    detected: &DetectedConfig,
+    detect: impl FnOnce() -> Result<DetectedConfig>,
     dtype: DType,
 ) -> Result<BlazrConfig> {
     let content = std::fs::read_to_string(dir.join("config.json")).ok();
-    config_from_text(content.as_deref(), detected, dtype)
+    config_from_text(content.as_deref(), detect, dtype)
 }
 
 /// [`load_or_create_config`] over the text of a `config.json`. The text is
 /// a blazr config, a boostr `UniversalConfig`, or a Hugging Face config.
-/// `None`, or text that is none of them, falls back to `detected`.
+/// `None`, or text that is none of them, falls back to `detect`.
+///
+/// # Errors
+///
+/// A Hugging Face config that names an option boostr does not run, or a
+/// failed `detect`.
 pub fn config_from_text(
     config_json: Option<&str>,
-    detected: &DetectedConfig,
+    detect: impl FnOnce() -> Result<DetectedConfig>,
     dtype: DType,
 ) -> Result<BlazrConfig> {
     let dtype = dtype_name(dtype)?;
@@ -79,13 +88,13 @@ pub fn config_from_text(
             return Ok(BlazrConfig::from_universal_with_dtype(model_config, dtype));
         }
         if let Ok(hf_config) = HuggingFaceConfig::from_json(content) {
-            return Ok(BlazrConfig::from_universal_with_dtype(
-                hf_config.to_universal(),
-                dtype,
-            ));
+            let model = hf_config
+                .to_universal()
+                .map_err(|e| anyhow::anyhow!("config.json: {e}"))?;
+            return Ok(BlazrConfig::from_universal_with_dtype(model, dtype));
         }
     }
-    Ok(config_from_detected_with_dtype(detected, dtype))
+    Ok(config_from_detected_with_dtype(&detect()?, dtype))
 }
 
 /// Create BlazrConfig from detected architecture, with `dtype` as the
@@ -179,6 +188,7 @@ fn detected_to_universal(
             intermediate_size: detected.intermediate_size,
             load_balance_alpha: 0.01,
             z_loss_alpha: 1e-3,
+            norm_topk_prob: None,
         })
     } else {
         None
@@ -228,6 +238,7 @@ fn detected_to_universal(
         gdn: None,
         qwen35_attention: None,
         hadamard: None,
+        block: Default::default(),
         quant_formats: Vec::new(),
     }
 }
@@ -344,11 +355,12 @@ mod config_tests {
     fn config_records_the_compute_dtype_for_the_kv_cache() {
         let dir = model_dir(Some("bfloat16"));
         let detected = DetectedConfig::default();
-        let config = load_or_create_config(dir.path(), &detected, DType::F32).unwrap();
+        let config =
+            load_or_create_config(dir.path(), || Ok(detected.clone()), DType::F32).unwrap();
         assert_eq!(config.dtype(), "f32");
         assert_eq!(config.compute_dtype().unwrap(), DType::F32);
         assert_eq!(config.kv_cache_dtype().unwrap(), DType::F32);
-        assert!(load_or_create_config(dir.path(), &detected, DType::I32).is_err());
+        assert!(load_or_create_config(dir.path(), || Ok(detected.clone()), DType::I32).is_err());
     }
 
     #[test]
@@ -372,7 +384,7 @@ mod config_tests {
         }"#;
 
         let hf_config = HuggingFaceConfig::from_json(json).expect("Failed to parse config");
-        let universal = hf_config.to_universal();
+        let universal = hf_config.to_universal().expect("convert config");
         let attn = universal.attention.expect("No attention config");
 
         assert!(attn.rope_scaling.is_some(), "rope_scaling should be Some");

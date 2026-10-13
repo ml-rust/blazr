@@ -25,6 +25,8 @@ pub enum TemplateOrigin {
     Gguf,
     /// `tokenizer_config.json` field `chat_template`.
     TokenizerConfig,
+    /// `chat_template.jinja` in the checkpoint directory.
+    ChatTemplateFile,
     /// A template file named on the command line.
     File,
     /// A string handed in by code.
@@ -37,6 +39,7 @@ impl TemplateOrigin {
         match self {
             TemplateOrigin::Gguf => "gguf jinja",
             TemplateOrigin::TokenizerConfig => "tokenizer_config jinja",
+            TemplateOrigin::ChatTemplateFile => "chat_template.jinja",
             TemplateOrigin::File => "file jinja",
             TemplateOrigin::Inline => "inline jinja",
         }
@@ -273,19 +276,44 @@ fn strftime_now(format: String) -> Result<Value, Error> {
 
 /// `tojson`: Python `json.dumps` output, the way transformers overrides it.
 ///
-/// Keyword arguments `indent`, `ensure_ascii` and `sort_keys` are honoured.
-/// `separators` is accepted and ignored.
+/// Keyword arguments `indent`, `separators`, `ensure_ascii` and `sort_keys`
+/// are honoured.
 fn tojson(value: &Value, kwargs: Kwargs) -> Result<Value, Error> {
     let indent: Option<usize> = kwargs.get("indent")?;
     let ensure_ascii: Option<bool> = kwargs.get("ensure_ascii")?;
     let sort_keys: Option<bool> = kwargs.get("sort_keys")?;
-    let _separators: Option<Value> = kwargs.get("separators")?;
+    let separators: Option<Value> = kwargs.get("separators")?;
+    let separators = match separators.filter(|s| !s.is_none()) {
+        Some(pair) => Some(separator_pair(&pair)?),
+        None => None,
+    };
     let json = serde_json::to_value(value)
         .map_err(|e| Error::new(ErrorKind::BadSerialization, e.to_string()))?;
     Ok(Value::from(python_json(
         &json,
         indent,
+        separators
+            .as_ref()
+            .map(|(item, key)| (item.as_str(), key.as_str())),
         ensure_ascii.unwrap_or(false),
         sort_keys.unwrap_or(false),
     )))
+}
+
+/// The `(item_separator, key_separator)` pair of a `separators` argument.
+fn separator_pair(pair: &Value) -> Result<(String, String), Error> {
+    let bad = || {
+        Error::new(
+            ErrorKind::InvalidOperation,
+            "tojson: separators must be a pair of strings",
+        )
+    };
+    let parts: Vec<String> = pair
+        .try_iter()?
+        .map(|v| v.as_str().map(str::to_string).ok_or_else(bad))
+        .collect::<Result<_, _>>()?;
+    match <[String; 2]>::try_from(parts) {
+        Ok([item, key]) => Ok((item, key)),
+        Err(_) => Err(bad()),
+    }
 }

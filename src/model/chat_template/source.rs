@@ -44,7 +44,7 @@ impl ChatTemplate {
     /// The model's own template, when it ships one.
     ///
     /// A GGUF file carries it in `tokenizer.chat_template`; a checkpoint
-    /// directory in `tokenizer_config.json`.
+    /// directory in `chat_template.jinja` or `tokenizer_config.json`.
     pub fn from_model(path: &Path) -> Result<Option<ModelTemplate>> {
         if path.is_file() {
             let is_gguf = path
@@ -83,16 +83,51 @@ impl ChatTemplate {
     }
 }
 
-/// `chat_template` from `tokenizer_config.json`, when the directory has one.
+/// The template a checkpoint directory ships.
+///
+/// `chat_template.jinja` wins over the `chat_template` field of
+/// `tokenizer_config.json`, as in Hugging Face `transformers`. The
+/// `bos_token` and `eos_token` come from `tokenizer_config.json` either way.
 fn from_tokenizer_config(dir: &Path) -> Result<Option<ModelTemplate>> {
     let path = dir.join("tokenizer_config.json");
-    if !path.is_file() {
-        return Ok(None);
+    let config = if path.is_file() {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        Some(text)
+    } else {
+        None
+    };
+    let file = dir.join(CHAT_TEMPLATE_FILE);
+    if file.is_file() {
+        let source =
+            std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
+        let (bos_token, eos_token) = match &config {
+            Some(text) => {
+                let json: serde_json::Value = serde_json::from_str(text)
+                    .with_context(|| format!("parse {}", path.display()))?;
+                (
+                    token_string(json.get("bos_token")),
+                    token_string(json.get("eos_token")),
+                )
+            }
+            None => (String::new(), String::new()),
+        };
+        return Ok(Some(ModelTemplate {
+            source,
+            origin: TemplateOrigin::ChatTemplateFile,
+            bos_token,
+            eos_token,
+        }));
     }
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    template_from_tokenizer_config(&text).with_context(|| format!("parse {}", path.display()))
+    match config {
+        Some(text) => template_from_tokenizer_config(&text)
+            .with_context(|| format!("parse {}", path.display())),
+        None => Ok(None),
+    }
 }
+
+/// The template file `transformers` saves beside `tokenizer_config.json`.
+pub const CHAT_TEMPLATE_FILE: &str = "chat_template.jinja";
 
 /// `chat_template` from the text of a `tokenizer_config.json`, when it
 /// has one.
@@ -179,6 +214,43 @@ mod tests {
             .expect("renders");
         assert_eq!(prompt, "<s>Hi");
         assert_eq!(template.describe(), "tokenizer_config jinja");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `chat_template.jinja` wins over the config's `chat_template`, and the
+    /// token strings still come from the config.
+    #[test]
+    fn chat_template_file_wins_over_tokenizer_config() {
+        let dir = temp_dir("jinja-file");
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            r#"{"bos_token": "<s>", "eos_token": {"content": "</s>"},
+                "chat_template": "CONFIG"}"#,
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join(CHAT_TEMPLATE_FILE),
+            "{{ bos_token }}{% for m in messages %}{{ m.content }}{% endfor %}",
+        )
+        .expect("write");
+        let shipped = ChatTemplate::from_model(&dir)
+            .expect("reads")
+            .expect("ships a template");
+        assert_eq!(shipped.origin, TemplateOrigin::ChatTemplateFile);
+        assert_eq!(shipped.bos_token, "<s>");
+        assert_eq!(shipped.eos_token, "</s>");
+        let prompt = shipped
+            .compile()
+            .expect("compiles")
+            .apply(&[super::super::ChatMessage::new("user", "Hi")])
+            .expect("renders");
+        assert_eq!(prompt, "<s>Hi");
+
+        std::fs::remove_file(dir.join("tokenizer_config.json")).expect("remove");
+        let shipped = ChatTemplate::from_model(&dir)
+            .expect("reads")
+            .expect("the file alone is a template");
+        assert_eq!(shipped.bos_token, "");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

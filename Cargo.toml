@@ -136,7 +136,10 @@ tower-http = { version = "0.7", optional = true, features = [
 serde = { version = "1", features = ["derive"] }
 # `preserve_order`: a tool schema rendered into a chat prompt keeps the key
 # order the client sent, the order the model saw in training.
-serde_json = { version = "1", features = ["preserve_order"] }
+# `float_roundtrip`: a float parses to the nearest double, as Python's
+# `json.loads` does, so a decision state re-serialized into a prompt spells
+# every number the way the reference renderer does.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 serde-saphyr = "1.3"
 
 # Chat templates: the model's own Jinja template, rendered with the Python

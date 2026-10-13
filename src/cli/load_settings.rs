@@ -65,6 +65,9 @@ pub struct RunSettings {
     /// `--graphs`. Absent leaves `inference.graphs`.
     pub graphs: bool,
     pub load: LoadSettings,
+    /// `--lora`: at most one adapter to decode with. `inference.lora` is
+    /// for `serve` and does not apply.
+    pub lora: Vec<String>,
 }
 
 impl RuntimeArgs {
@@ -81,6 +84,7 @@ impl RuntimeArgs {
                 self.dtype.dtype,
                 file,
             ),
+            lora: self.lora.lora,
         }
     }
 }

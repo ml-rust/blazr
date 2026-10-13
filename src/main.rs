@@ -123,6 +123,7 @@ async fn main() -> Result<()> {
             vision,
             dtype,
             decision,
+            lora,
         } => {
             let file_path = FileConfig::path();
             let file = FileConfig::load()?;
@@ -161,6 +162,7 @@ async fn main() -> Result<()> {
                 #[cfg(feature = "audio")]
                 tts_continuous_capacity,
                 vision.into_overrides(),
+                lora.lora,
             )
             .await?;
         }

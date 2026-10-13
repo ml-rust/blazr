@@ -74,6 +74,15 @@ impl Serving {
         }
     }
 
+    /// The model the data-parallel replicas serve, with their count.
+    /// `None` without data parallelism.
+    pub fn replicated_model(&self) -> Option<(&str, usize)> {
+        match self {
+            Self::DataParallel(group) => Some((group.model_name(), group.num_replicas())),
+            Self::Single(_) | Self::OnDemand => None,
+        }
+    }
+
     /// The number of data-parallel replicas. 1 without data parallelism.
     pub fn replica_count(&self) -> usize {
         match self {

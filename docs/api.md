@@ -74,8 +74,8 @@ Streaming responses do not return `logprobs`. Tool calls are parsed only in non-
 | POST      | `/apply-template`            | Render a chat template             | none          |
 | GET, POST | `/api/slots`                 | List or create inference slots     | none          |
 | DELETE    | `/api/slots/{slot_id}`       | Free an inference slot             | none          |
-| GET, POST | `/v1/lora`                   | List or load LoRA adapters         | none          |
-| DELETE    | `/v1/lora/{name}`            | Unload a LoRA adapter              | none          |
+| GET, POST | `/v1/lora`                   | List or register LoRA variants     | none          |
+| DELETE    | `/v1/lora/{name}`            | Unregister a LoRA variant          | none          |
 | GET       | `/api/tags`                  | List local models                  | none          |
 | POST      | `/api/show`                  | Show model details                 | none          |
 | GET       | `/api/ps`                    | List loaded models                 | none          |
@@ -123,7 +123,7 @@ Completions and chat accept these fields. Infill accepts a subset.
 | `grammar`               | string           | none    | GBNF grammar that constrains output.                                          |
 | `response_format`       | object           | none    | Structured output. See [Structured output](#structured-output).               |
 | `keep_alive`            | string           | none    | Time the model stays loaded after the request. See [keep_alive](#keep_alive). |
-| `lora_adapter`          | string           | none    | Name of a loaded LoRA adapter to apply. See [LoRA adapters](#lora-adapters).  |
+| `lora_adapter`          | string           | none    | Registered adapter of `model`: runs on the variant `<model>:<name>`. See [LoRA adapters](#lora-adapters). |
 | `user`                  | string           | none    | Caller identifier, passed to generation metrics.                              |
 
 Each field the request omits takes its value from the `generation` section of `~/.blazr/config.yaml`. The table shows the built-in values. Changes to `generation` apply to the next request without a restart.
@@ -261,7 +261,7 @@ Generates an assistant reply from a message list.
 | `stream`                                                            | boolean           | `false`        | Stream the response as SSE.                                                                  |
 | `n`                                                                 | integer           | `1`            | Number of choices. Non-streaming only.                                                       |
 | `context`                                                           | array of integers | none           | Token IDs decoded and prepended to the prompt.                                               |
-| `lora_adapter`                                                      | string            | none           | Loaded LoRA adapter to apply.                                                                |
+| `lora_adapter`                                                      | string            | none           | Registered adapter of `model`. See [LoRA adapters](#lora-adapters).                          |
 | `grammar`, `response_format`, `keep_alive`, `user`, sampling fields |                   |                | See [Shared request fields](#shared-request-fields).                                         |
 
 ### Messages
@@ -485,6 +485,7 @@ An OpenAI Responses API request. This route does not stream.
 | `reasoning`         | object           | none     | Parsed and not applied.                 |
 | `text`              | object           | none     | Parsed and not applied.                 |
 | `metadata`          | object           | none     | Parsed and not applied.                 |
+| `lora_adapter`      | string           | none     | Registered adapter of `model`. See [LoRA adapters](#lora-adapters). |
 
 An input item has `role` and `content`. The role `developer` maps to `system`. Content takes a string or parts of these types: `input_text`, `input_image` (with `image_url`), and `input_audio`.
 
@@ -798,7 +799,8 @@ Answers typed questions about one state with a System One decision model: Jebadi
 }
 ```
 
-- `model`: unset takes the start model (`--model`).
+- `model`: unset takes the start model (`--model`). A LoRA variant `<model>:<name>` answers on the variant's model.
+- `lora_adapter`: a registered adapter of `model`. The request runs on that variant, as in [LoRA adapters](#lora-adapters). An unknown adapter is a `404`. A variant detects its family on its base's files, with a sidecar in the adapter directory taking precedence over the base's own.
 - `questions`: answered in request order. Unknown fields are ignored. Each family's own fields apply: decider `independent`, `isolated`, `neutralize_none`, `max_state_tokens`, `layout`; Jebadiah `max_tokens`, `order`.
 - `calibration: "raw"`: temperature 1 instead of the model's fitted temperatures.
 
@@ -814,10 +816,10 @@ An isolated decider Score answer adds `level_fit` and `fit_mass`. The response a
 
 | Status | `code`                 | When                                                             |
 | ------ | ---------------------- | ---------------------------------------------------------------- |
-| `400`  | `not_a_decision_model` | The model is not a decision model                                |
-| `404`  | `model_not_found`      | No model has that name                                           |
+| `400`  | `not_a_decision_model` | The model is not a decision model, or takes no LoRA adapter      |
+| `404`  | `model_not_found`      | No model or LoRA adapter has that name                           |
 | `413`  | `request_too_large`    | Over `inference.decision.max_rows`, `max_row_tokens` or `max_request_tokens` |
-| `422`  | `invalid_request`      | Bad JSON, a question the family refuses, a state over the family's cap |
+| `422`  | `invalid_request`      | Bad JSON, a question the family refuses, a state over the family's cap, `model` and `lora_adapter` naming different adapters, a LoRA adapter that does not load |
 | `503`  | `queue_full`           | Over `inference.decision.max_queue_rows`. Retry after `retry-after` |
 | `503`  | `model_unavailable`    | The model unloaded or its worker stopped. Send the request again |
 | `500`  | `internal_error`       | The model did not load, its sidecars did not read, or the run failed |
@@ -828,7 +830,7 @@ The family comes from `--decision-family`, then a sidecar (`decider_config.json`
 
 ### GET /v1/models
 
-Lists text models and resident vision, ASR, and TTS models. A text model wins a name collision. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family`, `readout`, `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider) or `max_prompt_tokens` (Jebadiah), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`.
+Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family`, `readout`, `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider) or `max_prompt_tokens` (Jebadiah), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
 
 ```bash
 curl http://localhost:8080/v1/models
@@ -884,15 +886,28 @@ Frees the slot. Returns `204` with no body. Returns `404` with type `slot_not_fo
 
 ## LoRA adapters
 
-Adapters use the Hugging Face PEFT format. The model loads on first use.
+Adapters use the Hugging Face PEFT format. An adapter applies at load time as a variant of a loaded base model, named `<model>:<name>`:
+
+- The variant shares the base weights. The adapter attaches unmerged, and the base stays unchanged and keeps serving as `<model>`.
+- Each variant has its own executor, so its own KV cache. Every variant costs KV memory.
+- Per-request switching means choosing the variant: `model: "<model>:<name>"`, or `lora_adapter: "<name>"` with `model: "<model>"`. When both name an adapter, they must name the same one (`400` otherwise). An unknown adapter is a `404` with type `lora_not_found`, never the base model. A request without `lora_adapter` takes `generation.lora_adapter`, unless `model` names a variant.
+- Adapters do not stack: a variant takes no second adapter.
+- Only `qwen35` models take an adapter. Another base model is a `400` with the reason.
+- `serve --lora <dir>[=<name>]` (repeatable) or `inference.lora` builds variants of the start model at start. With `inference.data_parallel` above `1`, the start model takes no adapter.
+- A variant runs one sequence at a time, with no batching engine, as any model other than the start model does.
+- Eviction and `keep_alive` drop a variant like any model, and its registration stays: its next request builds it again from the base. Dropping a base drops its variants first. `DELETE /api/delete` of a base model also unregisters its variants.
+- `/v1/chat/completions`, `/v1/completions`, `/v1/responses` and `/v1/systemone` take `lora_adapter`. Every route that takes `model` takes a variant id.
+- A VoxCPM2 TTS bundle's `adapters/<one>.safetensors` is a separate path, folded into that bundle at load. These routes do not apply to it.
 
 ### POST /v1/lora
 
-| Field   | Type   | Meaning                                                      |
-| ------- | ------ | ------------------------------------------------------------ |
-| `model` | string | Base model name.                                             |
-| `name`  | string | Name for the adapter. Use it as `lora_adapter` in a request. |
-| `path`  | string | Adapter directory, or an `adapter_model.safetensors` file.   |
+Registers the adapter as the variant `<model>:<name>` and builds it. `model` loads first when it is not loaded. A variant of the same name is replaced.
+
+| Field   | Type   | Meaning                                                                          |
+| ------- | ------ | -------------------------------------------------------------------------------- |
+| `model` | string | Base model name.                                                                 |
+| `name`  | string | Adapter name: 1 to 64 letters, digits, `-`, `_` or `.`. Use it as `lora_adapter`. |
+| `path`  | string | Adapter directory, or an `adapter_model.safetensors` file.                       |
 
 The adapter needs `adapter_config.json` beside its weights, with `r` and `lora_alpha` set. `use_rslora`, `rank_pattern` and `alpha_pattern` apply per module. The load fails on any of these:
 
@@ -903,37 +918,49 @@ The adapter needs `adapter_config.json` beside its weights, with `r` and `lora_a
 - A `lora_A` without its `lora_B`, or the reverse.
 - A factor rank that differs from `r` or its `rank_pattern` entry.
 - A tensor that is not a `lora_A` or `lora_B` weight under `model.layers.N` or `model.language_model.layers.N`.
+- A module that matches no projection of the base, or a factor shape that does not fit its projection.
 
 ```bash
 curl http://localhost:8080/v1/lora \
   -H "Content-Type: application/json" \
-  -d '{"model": "llama-3.2-1b", "name": "sql", "path": "/adapters/sql"}'
+  -d '{"model": "qwen3.5-4b", "name": "sql", "path": "/adapters/sql"}'
 ```
 
 ```json
-{ "status": "ok", "model": "llama-3.2-1b", "adapter": "sql" }
+{ "status": "ok", "model": "qwen3.5-4b", "adapter": "sql", "id": "qwen3.5-4b:sql", "rank": 16, "adapted_modules": 248 }
 ```
 
-Returns `422` when the adapter fails to load. Returns `404` when the model is not found.
+| Status | Type                    | When                                                                                   |
+| ------ | ----------------------- | -------------------------------------------------------------------------------------- |
+| `400`  | `invalid_request_error` | Bad adapter name, a base that is not `qwen35`, a base that is a variant, data-parallel |
+| `404`  | `invalid_request_error` | No model has that name                                                                 |
+| `422`  | `lora_load_error`       | The adapter does not load or does not fit the base. The message names the cause.      |
+| `500`  | `server_error`          | The base model does not load                                                           |
 
 ### GET /v1/lora
 
-Requires the query parameter `model`.
+Lists the registered variants. The query parameter `model` filters to one base model. Loads nothing. `loaded` is false for a variant evicted since: its next request builds it again.
 
 ```bash
-curl "http://localhost:8080/v1/lora?model=llama-3.2-1b"
+curl "http://localhost:8080/v1/lora?model=qwen3.5-4b"
 ```
 
 ```json
-{ "model": "llama-3.2-1b", "adapters": [{ "name": "sql" }] }
+{
+  "model": "qwen3.5-4b",
+  "adapters": [
+    { "id": "qwen3.5-4b:sql", "name": "sql", "base": "qwen3.5-4b", "path": "/adapters/sql",
+      "rank": 16, "adapted_modules": 248, "loaded": true }
+  ]
+}
 ```
 
 ### DELETE /v1/lora/{name}
 
-Requires the query parameter `model`. Returns `204` on success. Returns `404` with type `lora_not_found` when the adapter is not loaded for the model.
+Requires the query parameter `model`. Unregisters the variant `<model>:<name>` and drops its executor. Returns `204` on success. Returns `404` with type `lora_not_found` when no such variant is registered.
 
 ```bash
-curl -X DELETE "http://localhost:8080/v1/lora/sql?model=llama-3.2-1b"
+curl -X DELETE "http://localhost:8080/v1/lora/sql?model=qwen3.5-4b"
 ```
 
 ## Model management
@@ -1038,7 +1065,7 @@ curl http://localhost:8080/api/ps
 | ------ | ------ | ----------- |
 | `name` | string | Model name. |
 
-Unloads the model, then removes its file or directory. Returns `200` with no body. Returns `404` with `{"error": "model '<name>' not found"}` when the model is not found.
+Unloads the model and its LoRA variants, then removes its file or directory and unregisters the variants. Returns `200` with no body. Returns `404` with `{"error": "model '<name>' not found"}` when the model is not found.
 
 ```bash
 curl -X DELETE http://localhost:8080/api/delete \
@@ -1237,14 +1264,14 @@ Completions, chat, and infill return this `usage` object. Responses and Anthropi
 | `200`  |                                                                                | Success.                                                                                                                       |
 | `201`  |                                                                                | Slot created.                                                                                                                  |
 | `204`  |                                                                                | Slot freed, LoRA adapter unloaded.                                                                                             |
-| `400`  | `invalid_request_error`                                                        | Invalid field value, empty input, unknown template, unknown voice, control token in text, image input the model cannot handle. |
+| `400`  | `invalid_request_error`                                                        | Invalid field value, empty input, unknown template, unknown voice, control token in text, image input the model cannot handle, `model` and `lora_adapter` naming different adapters, a LoRA base that takes no adapter. |
 | `401`  | `invalid_api_key`                                                              | Missing or unknown bearer key.                                                                                                 |
 | `404`  | `invalid_request_error`, `not_found_error`, `slot_not_found`, `lora_not_found` | Model, slot, adapter, or source not found.                                                                                     |
 | `408`  |                                                                                | Request exceeded `request_timeout_secs`.                                                                                       |
 | `409`  |                                                                                | `POST /api/copy` destination exists.                                                                                           |
 | `413`  |                                                                                | Body exceeds `max_body_size`, or an audio file exceeds 25 MB.                                                                  |
-| `422`  |                                                                                | LoRA adapter failed to load.                                                                                                   |
-| `500`  | `server_error`                                                                 | Generation, embedding, detokenization, or synthesis failed.                                                                    |
+| `422`  | `lora_load_error`                                                              | LoRA adapter failed to load or does not fit the base model.                                                                    |
+| `500`  | `server_error`                                                                 | Generation, embedding, detokenization, or synthesis failed. The base model of a LoRA variant did not load.                     |
 | `501`  | `not_implemented`                                                              | Speech `response_format` is not native.                                                                                        |
 | `503`  | `server_overloaded`                                                            | In-flight token budget exceeded. Includes `Retry-After: 5`.                                                                    |
 | `503`  | `slot_allocation_failed`                                                       | Slot allocation failed.                                                                                                        |

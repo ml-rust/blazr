@@ -68,7 +68,7 @@ fn single_adapter_file(dir: &Path) -> Result<PathBuf> {
 ///
 /// One adapted model per bundle: serving several adapters means repeating
 /// `--tts-model NAME=DIR` with several bundles, each carrying its own
-/// `adapters/` directory. Per-request adapter switching is not offered —
+/// `adapters/` directory. A bundle has no per-request adapter variants —
 /// LoRA is folded into the weights, not applied per call.
 fn discover_adapter(dir: &Path) -> Result<Option<PathBuf>> {
     let adapters_dir = dir.join("adapters");

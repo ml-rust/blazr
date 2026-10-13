@@ -71,7 +71,7 @@ pub use lane_engine::LaneEngine;
 pub use lane_scheduler::LaneScheduler;
 #[cfg(feature = "cuda")]
 pub use lane_session::{LaneAdmitted, LaneToken, Qwen35LaneSession};
-pub use lora::LoraAdapterRegistry;
+pub use lora::{AdapterSpec, LoraError, VariantInfo};
 pub use queue_depth::{QueueDepth, Waiting};
 pub use request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
 pub use request_scheduler::RequestScheduler;

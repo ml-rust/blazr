@@ -257,6 +257,7 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `decision.max_queue_rows`            | integer  | `4096`              | Most rows queued or running per model. More answers `503`.                                                                   |
 | `decision.batch_wait_ms`             | integer  | `0`                 | Milliseconds the decision worker waits after a request for more to merge.                                                    |
 | `decision.allow_contract_mismatch`   | boolean  | `false`             | Serve a Jebadiah model whose prompt contract does not match the bundled renderer.                                            |
+| `lora`                               | string array | `[]`            | `serve` only, from `config.yaml`: PEFT LoRA adapters of the start model, each `<dir>[=<name>]`. Each one is served as the variant `<model>:<name>`. `--lora` replaces the list. See [LoRA adapters](api.md#lora-adapters). |
 
 Blazr applies no range check to these values in the config code.
 
@@ -309,7 +310,7 @@ Basic sampling:
 | `stop_sequences` | string array | `[]`    | Stop sequences                                     |
 | `verbose_prompt` | boolean      | `false` | Prints prompt tokens before generation             |
 | `grammar`        | string       | unset   | GBNF grammar for constrained generation            |
-| `lora_adapter`   | string       | unset   | Name of a loaded LoRA adapter                      |
+| `lora_adapter`   | string       | unset   | `serve`: registered LoRA adapter a request without `lora_adapter` runs on. Unregistered for the model: `404`. See [LoRA adapters](api.md#lora-adapters). |
 
 Penalties:
 
@@ -396,6 +397,7 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 | `--decision-max-queue-rows <N>`       | `inference.decision.max_queue_rows`, else `4096` | Most rows queued or running per model                                                             |
 | `--decision-batch-wait-ms <MS>`       | `inference.decision.batch_wait_ms`, else `0` | Wait after a request for more to merge                                                                 |
 | `--allow-contract-mismatch`           | `inference.decision.allow_contract_mismatch` | Serve a Jebadiah model whose prompt contract does not match                                            |
+| `--lora <DIR[=NAME]>`                 | `inference.lora`      | PEFT LoRA adapter of the start model, served as the variant `<model>:<name>`. The name defaults to the directory name. Repeatable. Given flags replace `inference.lora`. Needs `--model` or `default_model`. Refused with `--data-parallel` above `1`. qwen35 models only. See [LoRA adapters](api.md#lora-adapters). |
 
 ### run and generate
 
@@ -424,6 +426,7 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 | `--image-max-tokens <N>`       | mmproj value                                     | Most output tokens per image                                                                    |
 | `--verbose-prompt`             | off                                              | Prints prompt tokens before generation. `generate` only.                                        |
 | `--image <PATH>`               | none                                             | Image placed before the prompt. Needs `--mmproj`. Repeatable. `generate` only.                  |
+| `--lora <DIR[=NAME]>`          | none                                             | PEFT LoRA adapter, applied unmerged to the loaded qwen35 model. The command decodes with that variant. Once only. `inference.lora` does not apply. |
 
 Rules that apply to `run` and `generate`:
 

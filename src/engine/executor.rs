@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use boostr::format::PeftAdapter;
 use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
 use boostr::inference::prefix_cache::{PrefixCache, PrefixCacheConfig};
 use boostr::model::LoadedModel;
@@ -23,7 +22,6 @@ use splintr::AnyTokenizer;
 use crate::config::BlazrConfig;
 use crate::model::chat_template::ChatTemplate;
 
-use super::lora::LoraAdapterRegistry;
 use super::vision_tower::{ImageTokenLimits, VisionTower};
 
 /// `config` with `inference.dtype` set to the dtype `R` computes.
@@ -49,8 +47,9 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) model: Arc<LoadedModel<R>>,
     /// Model configuration
     pub(crate) config: BlazrConfig,
-    /// Tokenizer — splintr's universal loaded-tokenizer handle, whatever its source
-    pub(crate) tokenizer: AnyTokenizer,
+    /// Tokenizer — splintr's universal loaded-tokenizer handle, whatever its
+    /// source. Shared with the LoRA variants of this model.
+    pub(crate) tokenizer: Arc<AnyTokenizer>,
     /// Device
     pub(crate) device: R::Device,
     /// Initial context size for KV cache (like Ollama's num_ctx)
@@ -65,8 +64,6 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) model_dir: Option<PathBuf>,
     /// Lazily-loaded draft model for speculative decoding
     pub(crate) draft_model: std::sync::Mutex<Option<Arc<LoadedModel<R>>>>,
-    /// LoRA adapter registry — holds all named adapters loaded for this model instance
-    pub(crate) lora_registry: Arc<LoraAdapterRegistry<R>>,
     /// Vision tower for image inputs, loaded from `inference.mmproj`.
     pub(crate) vision_tower: Option<Arc<VisionTower<R>>>,
     /// Tensor parallelism state (CUDA only; present when tp_size > 1)
@@ -115,6 +112,18 @@ where
         model: LoadedModel<R>,
         config: BlazrConfig,
         tokenizer: AnyTokenizer,
+        device: R::Device,
+        num_ctx: usize,
+    ) -> Result<Self> {
+        Self::build(model, config, Arc::new(tokenizer), device, num_ctx)
+    }
+
+    /// [`Self::new`] over a tokenizer another executor shares, such as the
+    /// base executor of a LoRA variant.
+    pub(crate) fn build(
+        model: LoadedModel<R>,
+        config: BlazrConfig,
+        tokenizer: Arc<AnyTokenizer>,
         device: R::Device,
         num_ctx: usize,
     ) -> Result<Self> {
@@ -229,7 +238,6 @@ where
             prefix_cache,
             model_dir: None,
             draft_model: std::sync::Mutex::new(None),
-            lora_registry: Arc::new(LoraAdapterRegistry::new()),
             vision_tower: None,
             #[cfg(feature = "cuda")]
             tp_state: None,
@@ -434,8 +442,9 @@ where
         &self.model
     }
 
-    /// Get the loaded model
-    pub(crate) fn model(&self) -> &LoadedModel<R> {
+    /// The loaded model: the base model, or for a LoRA variant the model
+    /// with its adapter attached.
+    pub fn model(&self) -> &LoadedModel<R> {
         &self.model
     }
 
@@ -448,49 +457,5 @@ where
     #[cfg(feature = "cuda")]
     pub(crate) fn num_ctx(&self) -> usize {
         self.num_ctx
-    }
-
-    // ── LoRA adapter management ──────────────────────────────────────────────
-
-    /// Load a LoRA adapter from disk and register it under `name`.
-    ///
-    /// `path` is a PEFT adapter directory holding `adapter_config.json` and
-    /// `adapter_model.safetensors`, or the `.safetensors` file with
-    /// `adapter_config.json` beside it. boostr's `PeftAdapter::load` reads it
-    /// and refuses any adapter it cannot represent exactly.
-    ///
-    /// If an adapter with the same name was previously loaded it is replaced.
-    pub fn load_lora(&self, path: &std::path::Path, name: &str) -> Result<()> {
-        let adapter = PeftAdapter::<R>::load(path, &self.device)
-            .map_err(|e| anyhow!("LoRA adapter '{name}' at {}: {e}", path.display()))?;
-        tracing::info!(
-            adapter = name,
-            rank = adapter.config.r,
-            alpha = adapter.config.lora_alpha,
-            rslora = adapter.config.use_rslora,
-            layers = adapter.layers.len(),
-            "LoRA adapter registered"
-        );
-        self.lora_registry.insert(name, adapter);
-        Ok(())
-    }
-
-    /// Unload a named LoRA adapter.  Returns `true` if the adapter existed.
-    pub fn unload_lora(&self, name: &str) -> bool {
-        let removed = self.lora_registry.remove(name);
-        if removed {
-            tracing::info!(adapter = name, "LoRA adapter unloaded");
-        }
-        removed
-    }
-
-    /// List names of all currently loaded LoRA adapters.
-    pub fn list_loras(&self) -> Vec<String> {
-        self.lora_registry.list()
-    }
-
-    /// Access the LoRA adapter registry (for use in generation paths).
-    pub fn lora_registry(&self) -> &Arc<LoraAdapterRegistry<R>> {
-        &self.lora_registry
     }
 }

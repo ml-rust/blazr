@@ -10,6 +10,7 @@ use boostr::CudaRuntime;
 use super::run_repl::{interactive_repl, print_generation_stream};
 use super::RunSettings;
 use crate::config::{DeviceChoice, GenerationConfig};
+use crate::engine::lora::{derive_run_model, run_adapter};
 use crate::engine::vision_tower::{VisionTower, IMAGE_MARKER_TEXT};
 use crate::engine::Executor;
 #[cfg(feature = "cuda")]
@@ -30,6 +31,8 @@ pub async fn run(
     images: Vec<PathBuf>,
 ) -> Result<()> {
     let images = read_images(&images)?;
+    // Check `--lora` before the model loads.
+    run_adapter(&runtime.lora)?;
     match runtime.device {
         DeviceChoice::Cpu => {
             let device = boostr::CpuDevice::new();
@@ -152,6 +155,8 @@ async fn run_cuda(
         }
     };
 
+    let loaded_model =
+        derive_run_model(loaded_model, run_adapter(&runtime.lora)?.as_ref(), &device)?;
     // The user file's inference keys, then the flags.
     runtime.apply(&mut config.inference)?;
     let paged_attention = config.inference.paged_attention;
@@ -304,6 +309,8 @@ where
             (loaded_model, config, tokenizer)
         }
     };
+    let loaded_model =
+        derive_run_model(loaded_model, run_adapter(&runtime.lora)?.as_ref(), &device)?;
     // This path has no paged or graph decode, so only the load keys apply.
     runtime.load.apply(&mut config.inference)?;
     let template = ChatTemplate::detect(

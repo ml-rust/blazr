@@ -32,7 +32,10 @@ pub async fn serve(
     #[cfg(feature = "audio")] tts_continuous_batching: bool,
     #[cfg(feature = "audio")] tts_continuous_capacity: usize,
     vision: VisionOverrides,
+    lora: Vec<String>,
 ) -> Result<()> {
+    // `--lora`, else `inference.lora`: variants of the start model.
+    let adapters = crate::engine::lora::configured_adapters(&lora, file.inference.value("lora"))?;
     let ServeSettings {
         model,
         model_dir,
@@ -47,6 +50,19 @@ pub async fn serve(
         dtype,
         decision,
     } = settings;
+
+    // Adapter variants need a start model, and are not replicated.
+    if !adapters.is_empty() {
+        let Some(start) = model.as_deref() else {
+            anyhow::bail!(
+                "--lora and inference.lora make variants of the start model. Pass --model or \
+                 set default_model"
+            );
+        };
+        if data_parallel > 1 {
+            return Err(crate::engine::LoraError::data_parallel(start, data_parallel).into());
+        }
+    }
 
     // Check the tensor parallel degree before any model loads.
     if let Some(tp) = tensor_parallel_size {
@@ -135,6 +151,19 @@ pub async fn serve(
                 "Loaded".green(),
                 tower.config().image_min_tokens,
                 tower.config().image_max_tokens,
+            );
+        }
+        // Each adapter becomes the variant `<model>:<name>` over the loaded
+        // weights, with its own executor and KV cache.
+        for spec in adapters {
+            let info = scheduler.register_variant(model_name, spec).await?;
+            eprintln!(
+                "  {} LoRA variant {} (rank {}, {} modules, {})",
+                "Loaded".green(),
+                info.id.bold(),
+                info.rank,
+                info.adapted_modules,
+                info.path.display(),
             );
         }
         // A decision model starts its worker now, so a contract mismatch

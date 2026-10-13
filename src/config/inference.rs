@@ -91,7 +91,7 @@ pub struct InferenceConfig {
     /// Tensor parallelism degree. 1 runs on one GPU.
     /// Above 1, `blazr serve` shards a SafeTensors model across GPUs with
     /// NCCL all-reduce. `BLAZR_TP_SIZE` overrides it. Needs CUDA and NCCL.
-    #[serde(default = "default_tensor_parallel")]
+    #[serde(default = "default_one")]
     pub tensor_parallel_size: usize,
 
     /// Data-parallel replicas of the start model for `blazr serve`.
@@ -100,7 +100,7 @@ pub struct InferenceConfig {
     /// the `device` index up on a CUDA build, CPU copies on a CPU build.
     /// `--data-parallel` overrides it. Only the user config file sets it. A
     /// model's `config.json` value is ignored.
-    #[serde(default = "default_data_parallel")]
+    #[serde(default = "default_one")]
     pub data_parallel: usize,
 
     /// CUDA graph capture for greedy decode in `blazr run` and `generate`.
@@ -125,6 +125,9 @@ pub struct InferenceConfig {
     /// System One decision models: detection, batching and limits.
     #[serde(default)]
     pub decision: super::decision::DecisionConfig,
+    /// `blazr serve`: the start model's LoRA adapters, `<dir>[=<name>]`. `--lora` replaces it.
+    #[serde(default)]
+    pub lora: Vec<String>,
 }
 
 fn default_dtype() -> String {
@@ -160,11 +163,7 @@ fn default_ram_tier_capacity() -> usize {
     5000
 }
 
-fn default_tensor_parallel() -> usize {
-    1
-}
-
-fn default_data_parallel() -> usize {
+fn default_one() -> usize {
     1
 }
 
@@ -188,13 +187,14 @@ impl Default for InferenceConfig {
             prefill_chunk_size: 0,
             kv_pool_blocks: 0,
             speculative: None,
-            tensor_parallel_size: default_tensor_parallel(),
-            data_parallel: default_data_parallel(),
+            tensor_parallel_size: default_one(),
+            data_parallel: default_one(),
             graphs: false,
             mmproj: None,
             image_min_tokens: None,
             image_max_tokens: None,
             decision: Default::default(),
+            lora: Vec::new(),
         }
     }
 }

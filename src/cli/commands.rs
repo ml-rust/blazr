@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use super::args::{DtypeArgs, RuntimeArgs, SamplingArgs, VisionArgs};
+use super::args::{DtypeArgs, LoraArgs, RuntimeArgs, SamplingArgs, VisionArgs};
 
 /// The optional features this binary is built with, as `--version` lists
 /// them after the version: `0.1.1 (audio, cuda)`.
@@ -125,17 +125,14 @@ pub enum Commands {
         asr_models: Vec<String>,
 
         /// Register a TTS model for `/v1/audio/speech`. Format:
-        /// `name=/path/to/tts_dir`. The directory's `config.json` picks the
-        /// engine: a VoxCPM2 config (with `dit_config`) loads the voice-cloning
-        /// engine, whose voices are the recordings under `voices/` — that
-        /// directory is optional, and a bundle without it still renders
-        /// zero-shot; a Kokoro config loads Kokoro. A VoxCPM2 directory's
-        /// optional `adapters/<one>.safetensors` folds a LoRA adapter into that
-        /// bundle's weights at load time — one adapted model per bundle, no
-        /// per-request switching. Serving several adapters means repeating
-        /// this flag with several `NAME=DIR` bundles, each with its own
-        /// `adapters/` directory. `voice` on a synthesis request omitted means
-        /// zero-shot. May be repeated.
+        /// `name=/path/to/tts_dir`. Its `config.json` picks the engine: a
+        /// VoxCPM2 config (with `dit_config`) loads the voice-cloning engine,
+        /// whose voices are the optional recordings under `voices/` (without
+        /// them it renders zero-shot); a Kokoro config loads Kokoro. A VoxCPM2
+        /// directory's optional `adapters/<one>.safetensors` folds that LoRA
+        /// adapter into the bundle at load, apart from --lora: no per-request
+        /// switching, so several adapters take several `NAME=DIR` bundles. An
+        /// omitted `voice` means zero-shot. May be repeated.
         #[cfg(feature = "audio")]
         #[arg(long = "tts-model", value_name = "NAME=PATH")]
         tts_models: Vec<String>,
@@ -205,6 +202,9 @@ pub enum Commands {
 
         #[command(flatten)]
         decision: Box<super::DecisionArgs>,
+
+        #[command(flatten)]
+        lora: LoraArgs,
     },
 
     /// List available models

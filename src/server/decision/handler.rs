@@ -1,9 +1,10 @@
 //! `POST /v1/systemone`: typed questions about one state, answered by a
 //! System One decision model.
 //!
-//! The body is the Jev wire shape, `{model?, state, questions: {id: {type,
-//! instructions, criteria}}, calibration?: "raw", ...}`, each family's own
-//! fields included; question order is kept and unknown fields are ignored.
+//! The body is the Jev wire shape, `{model?, lora_adapter?, state,
+//! questions: {id: {type, instructions, criteria}}, calibration?: "raw",
+//! ...}`, each family's own fields included; question order is kept and
+//! unknown fields are ignored.
 //! The prompt renders on a blocking thread and the model runs on the
 //! model's decision worker, never on an async worker.
 
@@ -67,6 +68,18 @@ fn model_name(body: &Value, start: Option<&str>) -> Result<String, DecisionFailu
     }
 }
 
+/// The request's `lora_adapter`: the registered adapter of the model to
+/// answer with. Absent, null or blank selects none.
+fn lora_adapter(body: &Value) -> Result<Option<&str>, DecisionFailure> {
+    match body.get("lora_adapter") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.trim()).filter(|s| !s.is_empty())),
+        Some(_) => Err(DecisionFailure::InvalidRequest(
+            "'lora_adapter' must be a string when given".into(),
+        )),
+    }
+}
+
 /// A renderer error as a request failure: the family's own message for a
 /// request it refuses, a server error for a model that cannot render.
 fn render_failure(e: DecisionError) -> DecisionFailure {
@@ -78,7 +91,13 @@ fn render_failure(e: DecisionError) -> DecisionFailure {
 
 async fn decide(state: &AppState, body: &[u8], started: Instant) -> Result<Value, DecisionFailure> {
     let body = parse_body(body)?;
-    let name = model_name(&body, state.scheduler.decision_start_model())?;
+    let model = model_name(&body, state.scheduler.decision_start_model())?;
+    // A variant `<model>:<adapter>`, named in `model` or by `lora_adapter`,
+    // answers on its own model; an unknown adapter is a 404.
+    let name = state
+        .scheduler
+        .select_model(&model, lora_adapter(&body)?, None)
+        .map_err(DecisionFailure::from)?;
     let service = state.scheduler.decision_service(&name).await?;
     let request = JevRequest::parse(&body, service.family()).map_err(render_failure)?;
     let raw = request.calibration == Calibration::Raw;
@@ -123,6 +142,27 @@ mod tests {
         assert!(matches!(
             parse_body(b"[1]"),
             Err(DecisionFailure::InvalidRequest(m)) if m == "body must be a JSON object"
+        ));
+    }
+
+    #[test]
+    fn lora_adapter_is_an_optional_string() {
+        assert_eq!(lora_adapter(&json!({})).expect("absent"), None);
+        assert_eq!(
+            lora_adapter(&json!({"lora_adapter": null})).expect("null"),
+            None
+        );
+        assert_eq!(
+            lora_adapter(&json!({"lora_adapter": " "})).expect("blank"),
+            None
+        );
+        assert_eq!(
+            lora_adapter(&json!({"lora_adapter": " kev "})).expect("named"),
+            Some("kev")
+        );
+        assert!(matches!(
+            lora_adapter(&json!({"lora_adapter": 3})),
+            Err(DecisionFailure::InvalidRequest(_))
         ));
     }
 

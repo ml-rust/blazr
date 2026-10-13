@@ -39,7 +39,7 @@ mod swarm;
 mod swarm_forward;
 mod util;
 
-pub use args::{DtypeArgs, RuntimeArgs, SamplingArgs, VisionArgs};
+pub use args::{DtypeArgs, LoraArgs, RuntimeArgs, SamplingArgs, VisionArgs};
 pub use bench::bench;
 pub use chat::chat;
 pub use commands::{Cli, Commands};

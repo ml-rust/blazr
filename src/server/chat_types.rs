@@ -98,8 +98,10 @@ pub struct ChatRequest {
     pub grammar: Option<String>,
     #[serde(default)]
     pub user: Option<String>,
-    /// LoRA adapter name to activate for this request.
-    /// The adapter must be loaded beforehand via `POST /v1/lora`.
+    /// The registered LoRA adapter of `model` to run on: the request runs
+    /// on the variant `<model>:<lora_adapter>`, registered by `--lora` or
+    /// `POST /v1/lora`. An unknown name is a 404. With `model` naming a
+    /// variant, both must name the same adapter.
     #[serde(default)]
     pub lora_adapter: Option<String>,
 }

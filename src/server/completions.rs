@@ -17,7 +17,7 @@ use super::generation::{
     stream_with_stop_sequences, validate_generation_params, HasSamplingFields, LogprobResult,
     ResponseFormat, SamplingParams, Usage,
 };
-use super::handlers::AppState;
+use super::handlers::{select_executor, AppState};
 use super::metrics;
 use super::scheduled::generate_text_routed;
 use super::streaming::{create_completion_stream, StreamToken};
@@ -34,16 +34,11 @@ pub async fn completions(
     }
 
     let load_start = Instant::now();
-    let executor = match state.scheduler.get_executor(&request.model).await {
-        Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
-    };
+    let executor =
+        match select_executor(&state, &request.model, request.lora_adapter.as_deref()).await {
+            Ok(e) => e,
+            Err(response) => return *response,
+        };
     let load_duration_ms = load_start.elapsed().as_millis() as u64;
 
     let prompt = match decode_context_prefix(&executor, &request.context) {
@@ -286,8 +281,7 @@ pub struct CompletionRequest {
     pub grammar: Option<String>,
     #[serde(default)]
     pub user: Option<String>,
-    /// LoRA adapter name to activate for this request.
-    /// The adapter must be loaded beforehand via `POST /v1/lora`.
+    /// The registered LoRA adapter of `model` to run on. See `ChatRequest`.
     #[serde(default)]
     pub lora_adapter: Option<String>,
 }

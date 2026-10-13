@@ -136,11 +136,11 @@ pub struct GenerationConfig {
     #[serde(default)]
     pub grammar: Option<String>,
 
-    /// Name of a LoRA adapter to apply for this generation request.
-    ///
-    /// The adapter must have been loaded into the executor's `LoraAdapterRegistry`
-    /// beforehand via `POST /v1/lora` (or `Executor::load_lora`).
-    /// If `None`, the base model weights are used unchanged.
+    /// `blazr serve`: the registered LoRA adapter a request without its own
+    /// `lora_adapter` runs on, as the variant `<model>:<name>` (shared base
+    /// weights, own KV cache). Not applied to a `model` naming a variant.
+    /// An unknown name is a 404, never the base. The executor ignores this
+    /// field: the server picks the variant's executor before generation.
     #[serde(default)]
     pub lora_adapter: Option<String>,
 }

@@ -32,6 +32,10 @@ pub async fn delete_model(
                 };
                 match result {
                     Ok(()) => {
+                        // Its LoRA variants have no weights left to build on.
+                        for variant in state.scheduler.variants(Some(&request.name)) {
+                            state.scheduler.remove_variant(&variant.id).await;
+                        }
                         tracing::info!("Deleted model: {}", request.name);
                         StatusCode::OK.into_response()
                     }

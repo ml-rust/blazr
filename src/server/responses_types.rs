@@ -39,6 +39,10 @@ pub struct ResponsesRequest {
     #[serde(default)]
     #[allow(dead_code)]
     pub metadata: Option<serde_json::Value>,
+    /// The registered LoRA adapter of `model` to run on: the request runs
+    /// on the variant `<model>:<lora_adapter>`. See `ChatRequest`.
+    #[serde(default)]
+    pub lora_adapter: Option<String>,
 }
 
 /// Input can be a string or array of input items

@@ -37,8 +37,7 @@ use super::executor_generate_qwen35::{DecodeSetup, SamplerState};
 ///
 /// A poisoned lock propagates rather than recovering: a panic mid-allocation
 /// can leave block accounting inconsistent, and handing out a double-allocated
-/// block would corrupt inference. That is unlike the adapter registry in
-/// `lora.rs`, whose guarded `HashMap` is always safe to read.
+/// block would corrupt inference.
 fn clone_shared_allocator(shared: &Mutex<CpuBlockAllocator>) -> Result<CpuBlockAllocator> {
     let guard = shared
         .lock()
@@ -162,18 +161,6 @@ where
         gen_config: &'a GenerationConfig,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
-            // Log active LoRA adapter if one is requested
-            if let Some(ref adapter_name) = gen_config.lora_adapter {
-                if self.lora_registry.get(adapter_name).is_some() {
-                    tracing::debug!(adapter = %adapter_name, "LoRA adapter active for generation");
-                } else {
-                    tracing::warn!(
-                        adapter = %adapter_name,
-                        "Requested LoRA adapter not found in registry — generating without it"
-                    );
-                }
-            }
-
             if gen_config.verbose_prompt {
                 let prompt = self.tokenizer.decode(prompt_tokens).unwrap_or_default();
                 eprintln!("\nprompt: '{}'", prompt);

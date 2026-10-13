@@ -18,6 +18,8 @@ preview on crates.io that shares no code with it.
 - **`tests/decision_loader_real_file.rs`** — a Qwen3.5 decision model (Jebadiah, the Mapika decider) through blazr's loader, then `LabelTokenHead` against reference fixtures, from SafeTensors or GGUF, on CPU or CUDA. It skips unless `BLAZR_DECISION_MODEL_DIR` or `BLAZR_DECISION_GGUF`, and `BLAZR_DECISION_FIXTURE_DIR`, are set.
 - **`POST /v1/systemone`** — typed decisions from a System One model (Jebadiah, the Mapika decider), each answer in the family's own wire shape. The family comes from `--decision-family`, a sidecar beside the weights, or the GGUF header. Each model gets one decision worker thread: requests with a short shared prefix merge into one run, longer ones run once over their prefix. Limits answer `413` and a full queue `503`. Keys: `inference.decision.*` and the `--decision-*` flags. `GET /v1/models` adds a `decision` object read without loading weights.
 - **`blazr_decision_*` metrics** — requests, rows, prefill tokens, latency and queued rows, by model.
+- **LoRA variants** — a PEFT adapter applies to a loaded `qwen35` model as the variant `<model>:<name>`, built with boostr's `LoadedModel::derive_with_adapter`: shared base weights, the adapter unmerged, its own executor and KV cache. `serve --lora <dir>[=<name>]` (repeatable) and `inference.lora` register variants of the start model; `POST /v1/lora` registers one at run time. A request selects a variant by `model: "<model>:<name>"` or `lora_adapter`; an unknown adapter is a `404`. `run` and `generate` take one `--lora`. `/v1/models` and `GET /v1/lora` list each variant's base, path, rank and adapted module count. Eviction drops a variant before its base; a registered variant builds again on its next request. `/v1/systemone` serves variants. Data-parallel start models refuse adapters.
+- **`tests/lora_variant_real_file.rs`** — a Qwen3.5 base and a PEFT adapter through the scheduler's variant path, checked against `transformers` + `peft` logits. It skips unless `BLAZR_LORA_BASE_DIR`, `BLAZR_LORA_ADAPTER_DIR`, `BLAZR_LORA_REF` and `BLAZR_LORA_BASE_REF` are set.
 
 ### Changed
 
@@ -26,10 +28,11 @@ preview on crates.io that shares no code with it.
 
 ### Removed
 
-- `engine::load_lora_adapter` and `engine::LoraAdapter`. `LoraAdapterRegistry` holds `boostr::format::PeftAdapter`, and `insert` takes the adapter name.
+- `engine::load_lora_adapter`, `engine::LoraAdapter`, `engine::LoraAdapterRegistry`, and `Executor::{load_lora, unload_lora, list_loras, lora_registry}`. `Scheduler::{register_variant, remove_variant, variants, select_model}` replace them.
 
 ### Fixed
 
+- **`lora_adapter` on generation requests** — it now runs the request on the adapter's variant. It was logged and ignored before: the request generated with the base weights, and an unknown name fell back to the base.
 - **Qwen3.5 SafeTensors configs** — a `qwen3_5` (nested `text_config`) or `qwen3_5_text` `config.json` goes to boostr's `qwen35_config_from_hf` before any other parse. It fell through to tensor-name detection or a partial parse before.
 - **Config dtype** — the compute dtype reads `torch_dtype`, then `dtype`, then both under `text_config`. Only the top-level `torch_dtype` was read before, so transformers v5 and `Qwen3_5ForConditionalGeneration` configs fell back to the backend default.
 - **Qwen3.5 MTP and vision tensors** — they stay on disk in every SafeTensors path. They were uploaded to the device and then dropped before.

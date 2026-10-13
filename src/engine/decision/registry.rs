@@ -2,6 +2,7 @@
 //! scheduler's decision entry points: the service of a model, and the
 //! `/v1/models` report of a model without loading it.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,10 +17,39 @@ use boostr::{
 use super::error::DecisionFailure;
 use super::service::DecisionService;
 use super::stats::DecisionCounts;
+use crate::config::DecisionConfig;
 use crate::engine::Scheduler;
+use crate::loader::decision::sidecar::{DECIDER_CONFIG, JEBADIAH_CARD, PROMPT_CONTRACT};
 use crate::loader::decision::{
     decision_info, detect_decision_with, load_renderer, read_gguf_facts, DecisionInfo, GgufFacts,
 };
+
+/// The decision settings of a LoRA variant of `base` with its adapter at
+/// `adapter`. `--decision-family` and `--decision-config` apply to the
+/// variant when they apply to its base. A sidecar in the adapter directory
+/// (`decider_config.json`, `prompt_contract.json` or `jebadiah.json`)
+/// applies when no configured sidecar does, so the prompt contract can ship
+/// with the adapter. The base's own sidecars apply otherwise.
+pub fn variant_decision_config(cfg: &DecisionConfig, base: &str, adapter: &Path) -> DecisionConfig {
+    let applies = cfg.overrides_apply_to(base);
+    let adapter_dir = if adapter.is_dir() {
+        Some(adapter)
+    } else {
+        adapter.parent()
+    };
+    let adapter_sidecar = adapter_dir.and_then(|dir| {
+        [DECIDER_CONFIG, PROMPT_CONTRACT, JEBADIAH_CARD]
+            .iter()
+            .map(|file| dir.join(file))
+            .find(|file| file.is_file())
+    });
+    DecisionConfig {
+        start_model: None,
+        family: cfg.family.filter(|_| applies),
+        config: cfg.config.clone().filter(|_| applies).or(adapter_sidecar),
+        ..cfg.clone()
+    }
+}
 
 /// The decision services of one scheduler, and the GGUF headers it read.
 pub struct DecisionRegistry<R: Runtime<DType = DType>> {
@@ -135,10 +165,42 @@ where
         if let Some(service) = self.decisions.running(name) {
             return Ok(Some(Arc::new(service.info().clone())));
         }
-        let source = detect_decision_with(path, name, &self.decision_config, |file| {
+        let settings = self.decision_settings(name);
+        let source = detect_decision_with(path, name, &settings, |file| {
             self.decisions.gguf_facts(file)
         })?;
         source.map(|s| decision_info(&s).map(Arc::new)).transpose()
+    }
+
+    /// The decision settings detection runs with for `name`: the server's,
+    /// or for a LoRA variant, [`variant_decision_config`] over them.
+    fn decision_settings(&self, name: &str) -> Cow<'_, DecisionConfig> {
+        match self.variant(name) {
+            Some(v) => Cow::Owned(variant_decision_config(
+                &self.decision_config,
+                &v.base,
+                &v.path,
+            )),
+            None => Cow::Borrowed(&self.decision_config),
+        }
+    }
+
+    /// The weights path of `name`: its own, or for a LoRA variant its
+    /// base's.
+    async fn decision_weights(&self, name: &str) -> Result<PathBuf, DecisionFailure> {
+        let weights = self
+            .variant(name)
+            .map_or_else(|| name.to_string(), |v| v.base);
+        if let Some(path) = self.model_path(&weights) {
+            return Ok(path);
+        }
+        if let Some(error) = self.unknown_variant(name).await {
+            return Err(error.into());
+        }
+        Err(DecisionFailure::ModelNotFound(format!(
+            "model '{weights}' not found: it is neither a path nor an entry of {}",
+            self.model_dir().display()
+        )))
     }
 
     /// What the decision worker of `name` did so far. `None` when the model
@@ -149,25 +211,24 @@ where
 
     /// The decision service of the model `name`, loading the model and
     /// starting its worker when needed. The weights are the ones every
-    /// other route of the model runs on.
+    /// other route of the model runs on. A LoRA variant id serves on the
+    /// variant's model, detected on its base's weights.
     ///
     /// # Errors
     ///
-    /// [`DecisionFailure::ModelNotFound`] when no model has that name,
-    /// [`DecisionFailure::NotDecisionModel`] when it is not a qwen35
+    /// [`DecisionFailure::ModelNotFound`] when no model or adapter has that
+    /// name, [`DecisionFailure::NotDecisionModel`] when it is not a qwen35
     /// decision model, [`DecisionFailure::Internal`] when it does not load
-    /// or its renderer, sidecars or worker do not start.
+    /// or its renderer, sidecars or worker do not start, and the
+    /// [`LoraError`](crate::engine::LoraError) kinds of a variant that does
+    /// not build.
     pub async fn decision_service(
         &self,
         name: &str,
     ) -> Result<Arc<DecisionService<R>>, DecisionFailure> {
-        let path = self.model_path(name).ok_or_else(|| {
-            DecisionFailure::ModelNotFound(format!(
-                "model '{name}' not found: it is neither a path nor an entry of {}",
-                self.model_dir().display()
-            ))
-        })?;
-        let source = detect_decision_with(&path, name, &self.decision_config, |file| {
+        let path = self.decision_weights(name).await?;
+        let settings = self.decision_settings(name);
+        let source = detect_decision_with(&path, name, &settings, |file| {
             self.decisions.gguf_facts(file)
         })
         .map_err(DecisionFailure::Internal)?
@@ -178,8 +239,11 @@ where
                  names no decision model, and no --decision-family applies to it"
             ))
         })?;
-        let executor = self.get_executor(name).await.map_err(|e| {
-            DecisionFailure::Internal(format!("model '{name}' did not load: {e:#}"))
+        let executor = self.get_executor(name).await.map_err(|e| match e
+            .downcast::<crate::engine::LoraError>()
+        {
+            Ok(lora) => DecisionFailure::from(lora),
+            Err(e) => DecisionFailure::Internal(format!("model '{name}' did not load: {e:#}")),
         })?;
         let model = executor.model_arc();
         if let Some(service) = self.decisions.current(name, model) {
@@ -202,5 +266,44 @@ where
             &self.decision_config,
         )?;
         Ok(self.decisions.keep(name, service, model))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DecisionFamily;
+
+    #[test]
+    fn a_variant_takes_its_base_overrides_then_its_adapter_sidecar() {
+        let adapter = tempfile::tempdir().expect("temp dir");
+        let start = DecisionConfig {
+            family: Some(DecisionFamily::Jebadiah),
+            config: Some(PathBuf::from("/cfg/jebadiah.json")),
+            start_model: Some("base".into()),
+            max_rows: 7,
+            ..DecisionConfig::default()
+        };
+
+        let applies = variant_decision_config(&start, "base", adapter.path());
+        assert_eq!(applies.family, Some(DecisionFamily::Jebadiah));
+        assert_eq!(applies.config, start.config);
+        assert_eq!(applies.start_model, None);
+        assert_eq!(applies.max_rows, 7);
+        assert!(applies.overrides_apply_to("base:kev"));
+
+        let other = variant_decision_config(&start, "other", adapter.path());
+        assert_eq!(other.family, None);
+        assert_eq!(other.config, None);
+
+        let sidecar = adapter.path().join(DECIDER_CONFIG);
+        std::fs::write(&sidecar, "{}").expect("write");
+        let shipped = variant_decision_config(&start, "other", adapter.path());
+        assert_eq!(shipped.config, Some(sidecar.clone()));
+        let file = adapter.path().join("adapter_model.safetensors");
+        let shipped = variant_decision_config(&start, "other", &file);
+        assert_eq!(shipped.config, Some(sidecar));
+        let configured = variant_decision_config(&start, "base", adapter.path());
+        assert_eq!(configured.config, start.config);
     }
 }

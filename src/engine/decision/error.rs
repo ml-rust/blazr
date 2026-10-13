@@ -44,3 +44,42 @@ impl fmt::Display for DecisionFailure {
 }
 
 impl std::error::Error for DecisionFailure {}
+
+/// A LoRA variant failure on `/v1/systemone`: an unknown model or adapter
+/// is a 404, a base that takes no adapter is not a decision model, a
+/// malformed selection or an adapter that does not load or fit is a 422,
+/// and a base that does not load is a 500.
+impl From<crate::engine::LoraError> for DecisionFailure {
+    fn from(error: crate::engine::LoraError) -> Self {
+        use crate::engine::LoraError;
+        match error {
+            LoraError::ModelNotFound(m) | LoraError::AdapterNotFound(m) => Self::ModelNotFound(m),
+            LoraError::Unsupported(m) => Self::NotDecisionModel(m),
+            LoraError::Invalid(m) | LoraError::Adapter(m) => Self::InvalidRequest(m),
+            LoraError::BaseLoad(m) => Self::Internal(m),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::LoraError;
+
+    #[test]
+    fn lora_failures_take_the_route_statuses() {
+        let cases = [
+            (LoraError::ModelNotFound("m".into()), "ModelNotFound"),
+            (LoraError::AdapterNotFound("m".into()), "ModelNotFound"),
+            (LoraError::Unsupported("m".into()), "NotDecisionModel"),
+            (LoraError::Invalid("m".into()), "InvalidRequest"),
+            (LoraError::Adapter("m".into()), "InvalidRequest"),
+            (LoraError::BaseLoad("m".into()), "Internal"),
+        ];
+        for (error, kind) in cases {
+            let failure = DecisionFailure::from(error);
+            assert!(format!("{failure:?}").starts_with(kind), "{failure:?}");
+            assert_eq!(failure.message(), "m");
+        }
+    }
+}

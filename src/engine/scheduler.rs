@@ -21,6 +21,8 @@ use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, ScalarOps, UnaryOps,
 };
 
+use super::lora::eviction::{self, Resident};
+use super::lora::LoraRegistry;
 pub use super::model_dir::AvailableModelInfo;
 use crate::config::DecisionConfig;
 use crate::engine::decision::DecisionRegistry;
@@ -29,15 +31,45 @@ use crate::loader;
 use crate::tokenizer::checkpoint_tokenizer;
 
 /// Model entry in the scheduler
-struct ModelEntry<R: Runtime<DType = DType>> {
+pub(crate) struct ModelEntry<R: Runtime<DType = DType>> {
     /// The executor wrapping the model
-    executor: Arc<Executor<R>>,
-    /// When the model was last accessed
-    last_accessed: Instant,
-    /// Model path for reloading
-    path: PathBuf,
+    pub(crate) executor: Arc<Executor<R>>,
+    /// When the model, or one of its LoRA variants, was last accessed
+    pub(crate) last_accessed: Instant,
+    /// Model path for reloading. A variant holds its base's path.
+    pub(crate) path: PathBuf,
     /// Per-model keep-alive duration. None = forever (no auto-unload).
-    keep_alive: Option<Duration>,
+    pub(crate) keep_alive: Option<Duration>,
+    /// The base model of a LoRA variant. `None` for a base model.
+    pub(crate) variant_of: Option<String>,
+}
+
+/// Every loaded model, as eviction sees it.
+fn residents<R: Runtime<DType = DType>>(
+    models: &HashMap<String, ModelEntry<R>>,
+) -> Vec<Resident<'_>> {
+    models
+        .iter()
+        .map(|(name, entry)| Resident {
+            name: name.as_str(),
+            variant_of: entry.variant_of.as_deref(),
+            last_accessed: entry.last_accessed,
+            keep_alive: entry.keep_alive,
+        })
+        .collect()
+}
+
+/// Drop `name` and, for a base model, each of its variants first.
+/// Returns whether `name` was loaded.
+fn remove_with_variants<R: Runtime<DType = DType>>(
+    models: &mut HashMap<String, ModelEntry<R>>,
+    name: &str,
+) -> bool {
+    let order = eviction::unload_order(&residents(models), name);
+    for victim in &order {
+        models.remove(victim);
+    }
+    !order.is_empty()
 }
 
 /// Model scheduler
@@ -47,8 +79,8 @@ struct ModelEntry<R: Runtime<DType = DType>> {
 /// - Caching loaded models
 /// - Evicting least-recently-used models when memory is tight
 pub struct Scheduler<R: Runtime<DType = DType>> {
-    /// Loaded models by name
-    models: RwLock<HashMap<String, ModelEntry<R>>>,
+    /// Loaded models by name: base models and LoRA variants
+    pub(crate) models: RwLock<HashMap<String, ModelEntry<R>>>,
     /// Maximum number of loaded models
     max_loaded: usize,
     /// Model directory for discovery
@@ -76,6 +108,8 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     pub(crate) decision_config: DecisionConfig,
     /// The decision worker of each model that served `/v1/systemone`.
     pub(crate) decisions: DecisionRegistry<R>,
+    /// The registered LoRA adapter variants.
+    pub(crate) lora: LoraRegistry,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -108,6 +142,7 @@ where
             dtype: None,
             decision_config: DecisionConfig::default(),
             decisions: DecisionRegistry::default(),
+            lora: LoraRegistry::new(),
         }
     }
 
@@ -173,23 +208,48 @@ where
         self
     }
 
-    /// Get an executor for a model, loading it if necessary
+    /// Get an executor for a model, loading it if necessary.
+    ///
+    /// A registered LoRA variant id, `<model>:<adapter>`, builds the variant
+    /// from its base, loading the base first when needed.
+    ///
+    /// # Errors
+    ///
+    /// A [`LoraError`](super::LoraError) when a variant does not build, or
+    /// when `model_name` has the shape `<model>:<adapter>` for a known
+    /// model and no such adapter is registered. Otherwise the load error.
     pub async fn get_executor(&self, model_name: &str) -> Result<Arc<Executor<R>>> {
-        // Check if already loaded
-        {
-            let mut models = self.models.write().await;
-            if let Some(entry) = models.get_mut(model_name) {
-                entry.last_accessed = Instant::now();
-                return Ok(Arc::clone(&entry.executor));
-            }
+        if let Some(executor) = self.touch(model_name).await {
+            return Ok(executor);
         }
-
-        // Need to load the model
+        if let Some(info) = self.lora.get(model_name) {
+            return Ok(self.load_variant(&info).await?);
+        }
+        if let Some(error) = self.unknown_variant(model_name).await {
+            return Err(error.into());
+        }
         self.load_model(model_name).await
     }
 
+    /// The executor of the loaded `name`, with its last access set to now.
+    /// A variant's access counts as one for its base too, so the base is
+    /// never the least recently used model while its variant serves.
+    pub(crate) async fn touch(&self, name: &str) -> Option<Arc<Executor<R>>> {
+        let mut models = self.models.write().await;
+        let now = Instant::now();
+        let entry = models.get_mut(name)?;
+        entry.last_accessed = now;
+        let executor = Arc::clone(&entry.executor);
+        if let Some(base) = entry.variant_of.clone() {
+            if let Some(base) = models.get_mut(&base) {
+                base.last_accessed = now;
+            }
+        }
+        Some(executor)
+    }
+
     /// Load a model by name
-    async fn load_model(&self, model_name: &str) -> Result<Arc<Executor<R>>> {
+    pub(crate) async fn load_model(&self, model_name: &str) -> Result<Arc<Executor<R>>> {
         // Evict if necessary
         self.ensure_capacity().await?;
 
@@ -300,6 +360,7 @@ where
                     last_accessed: Instant::now(),
                     path: model_path,
                     keep_alive: None,
+                    variant_of: None,
                 },
             );
         }
@@ -329,65 +390,61 @@ where
         super::model_dir::find_model_path(&self.model_dir, model_name)
     }
 
-    /// Ensure capacity for a new model
+    /// Ensure capacity for a new model. Only base models count against
+    /// the limit. Evicting a base evicts its LoRA variants first.
     async fn ensure_capacity(&self) -> Result<()> {
         let mut models = self.models.write().await;
-
-        while models.len() >= self.max_loaded {
-            // Find LRU model
-            let lru_name = models
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_accessed)
-                .map(|(name, _)| name.clone());
-
-            if let Some(name) = lru_name {
+        loop {
+            let order = {
+                let residents = residents(&models);
+                if eviction::base_count(&residents) < self.max_loaded {
+                    break;
+                }
+                let Some(lru) = eviction::lru_base(&residents) else {
+                    break;
+                };
+                eviction::unload_order(&residents, &lru)
+            };
+            for name in order {
                 tracing::info!("Evicting model: {}", name);
                 models.remove(&name);
-                metrics::counter!("blazr_scheduler_evictions_total").increment(1);
-            } else {
-                break;
             }
+            metrics::counter!("blazr_scheduler_evictions_total").increment(1);
         }
-
         Ok(())
     }
 
     /// Set the keep-alive duration for a model.
-    /// `None` means forever. `Some(Duration::ZERO)` means unload immediately.
+    /// `None` means forever. `Some(Duration::ZERO)` means unload immediately,
+    /// a base model's LoRA variants first.
     pub async fn set_keep_alive(&self, model_name: &str, keep_alive: Option<Duration>) {
         let mut models = self.models.write().await;
         if let Some(entry) = models.get_mut(model_name) {
             entry.keep_alive = keep_alive;
         }
-        // Immediate unload if Duration::ZERO
-        if keep_alive == Some(Duration::ZERO) {
-            models.remove(model_name);
+        if keep_alive == Some(Duration::ZERO) && remove_with_variants(&mut models, model_name) {
             tracing::info!("Unloaded model '{}' (keep_alive=0)", model_name);
         }
     }
 
-    /// Evict models that have exceeded their keep-alive duration.
-    /// Called periodically by the reaper task.
+    /// Evict models that have exceeded their keep-alive duration, with the
+    /// LoRA variants of each evicted base. Called periodically by the
+    /// reaper task.
     pub async fn evict_expired(&self) {
         let mut models = self.models.write().await;
-        let mut to_remove = Vec::new();
-        for (name, entry) in models.iter() {
-            if let Some(ttl) = entry.keep_alive {
-                if entry.last_accessed.elapsed() > ttl {
-                    to_remove.push(name.clone());
-                }
-            }
-        }
-        for name in to_remove {
+        let order = eviction::expired(&residents(&models), Instant::now());
+        for name in order {
             models.remove(&name);
             tracing::info!("Auto-unloaded model '{}' (keep_alive expired)", name);
         }
     }
 
-    /// Unload a specific model
+    /// Unload a specific model: a base model's LoRA variants first, then
+    /// the model. A variant unloads alone and stays registered, so the next
+    /// request for it builds it again.
     pub async fn unload(&self, model_name: &str) -> bool {
         let mut models = self.models.write().await;
-        models.remove(model_name).is_some()
+        remove_with_variants(&mut models, model_name)
     }
 
     /// List loaded models

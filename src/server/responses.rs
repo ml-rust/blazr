@@ -18,7 +18,7 @@ use super::generation::{
     chat_prompt_error_response, error_response, overloaded_response, record_generation_metrics,
     validate_generation_params,
 };
-use super::handlers::AppState;
+use super::handlers::{select_executor, AppState};
 use super::metrics;
 use super::responses_types::{
     output_items, ResponsesInput, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -39,16 +39,11 @@ pub async fn responses(
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 
-    let executor = match state.scheduler.get_executor(&request.model).await {
-        Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
-    };
+    let executor =
+        match select_executor(&state, &request.model, request.lora_adapter.as_deref()).await {
+            Ok(e) => e,
+            Err(response) => return *response,
+        };
 
     // Decode the `input_image` parts, then pick the path that serves them:
     // the vision tower, the model's own encoders, or a 400.

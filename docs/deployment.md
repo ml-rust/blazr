@@ -169,6 +169,7 @@ Set `inference.data_parallel` in `config.yaml`, or pass `--data-parallel`, to lo
 - Embeddings and rerank requests run on replica 0.
 - `/health` reports the replica count in `data_parallel_replicas`.
 - `blazr serve` refuses `0`, and a value above `1` with no start model. It also refuses a value above `1` with `tensor_parallel_size` above `1`. That error names both keys.
+- LoRA variants are not replicated. Above `1`, `blazr serve` refuses `--lora` and `inference.lora`, and `POST /v1/lora` for the start model returns `400`.
 
 ## Deployment examples
 
@@ -379,14 +380,15 @@ Request logging is on by default through `server.request_logging`. Each request 
 | `blazr_inter_token_latency_seconds` | histogram | Time between consecutive tokens                          |
 | `blazr_active_decode_slots`         | gauge     | Requests generating tokens                               |
 | `blazr_inflight_tokens`             | gauge     | Estimated prompt and decode tokens in flight             |
-| `blazr_models_loaded`               | gauge     | Loaded models                                            |
+| `blazr_models_loaded`               | gauge     | Loaded models, LoRA variants included                    |
 | `blazr_scheduler_models_available`  | gauge     | Models in `BLAZR_MODEL_DIR`                              |
 | `blazr_kv_cache_utilization_ratio`  | gauge     | KV cache blocks in use, batched scheduler only           |
 | `blazr_prefix_cache_hits_total`     | counter   | Prefix cache hits                                        |
 | `blazr_prefix_cache_misses_total`   | counter   | Prefix cache misses                                      |
 | `blazr_vram_used_bytes`             | gauge     | GPU memory in use, CUDA builds only                      |
 | `blazr_scheduler_loads_total`       | counter   | Model loads                                              |
-| `blazr_scheduler_evictions_total`   | counter   | Model evictions                                          |
+| `blazr_scheduler_evictions_total`   | counter   | Model evictions. A base evicted with its LoRA variants counts once. |
+| `blazr_lora_variant_builds_total`   | counter   | LoRA variants built over a loaded base: at registration, and again after an eviction or unload |
 | `blazr_queue_depth`                 | gauge     | Requests waiting: queued sequences in the batching schedulers, plus requests waiting for a `server.max_concurrent_requests` slot |
 | `blazr_slo_violations_total`        | counter   | Latency samples with a rolling percentile over its `server.slo` threshold. Labels: `metric` (`ttft`, `itl`, `e2e`) and `percentile` (`p50`, `p95`, `p99`) |
 | `blazr_slo_batch_growth_held`       | gauge     | `1` while a P95 TTFT or ITL breach holds batch growth, else `0` |

@@ -64,6 +64,19 @@ impl VisionArgs {
     }
 }
 
+/// The PEFT LoRA adapter flag of `run`, `generate` and `serve`.
+#[derive(Parser, Debug, Clone, Default)]
+pub struct LoraArgs {
+    /// PEFT LoRA adapter, as `<dir>[=<name>]`, applied unmerged to the
+    /// loaded qwen35 model as the variant `<model>:<name>`. The name
+    /// defaults to the directory name. serve: repeatable, each variant
+    /// shares the base weights, has its own KV cache, and the base keeps
+    /// serving. run and generate: once, decoding with the variant.
+    /// [default for serve: inference.lora]
+    #[arg(long = "lora", value_name = "DIR[=NAME]")]
+    pub lora: Vec<String>,
+}
+
 /// Shared runtime/device parameters
 #[derive(Parser, Debug, Clone)]
 pub struct RuntimeArgs {
@@ -96,6 +109,9 @@ pub struct RuntimeArgs {
 
     #[command(flatten)]
     pub dtype: DtypeArgs,
+
+    #[command(flatten)]
+    pub lora: LoraArgs,
 }
 
 /// The compute dtype flag of `run`, `generate`, `chat`, `bench` and `serve`.

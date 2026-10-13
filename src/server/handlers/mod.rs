@@ -12,6 +12,7 @@ mod slots;
 mod state;
 mod template;
 mod tokenize;
+mod variant;
 
 pub use auxiliary::{AuxiliaryKind, AuxiliaryModel};
 pub use health::health;
@@ -25,3 +26,4 @@ pub use state::TtsBundle;
 pub use state::{AppState, ServerDevice, ServerRuntime, VisionEmbedder};
 pub use template::apply_template;
 pub use tokenize::{detokenize, tokenize};
+pub use variant::{lookup_error_response, lora_error_response, select_executor};

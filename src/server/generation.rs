@@ -49,7 +49,8 @@ pub struct SamplingParams {
     pub dry_sequence_breakers: Option<Vec<String>>,
     pub typical_p: Option<f32>,
     pub grammar: Option<String>,
-    /// LoRA adapter name to activate for this request (must already be loaded).
+    /// The request's `lora_adapter`. The handler already chose the variant
+    /// executor from it; the generation config only carries it.
     pub lora_adapter: Option<String>,
 }
 

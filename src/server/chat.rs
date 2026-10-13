@@ -17,7 +17,7 @@ use super::generation::{
     stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
     stream_with_stop_sequences, validate_generation_params, HasSamplingFields, Usage,
 };
-use super::handlers::AppState;
+use super::handlers::{select_executor, AppState};
 use super::metrics;
 use super::reasoning::{split_reasoning_for_format, ReasoningParser};
 use super::scheduled::generate_text_routed;
@@ -57,16 +57,11 @@ pub async fn chat_completions(
     }
 
     let load_start = Instant::now();
-    let executor = match state.scheduler.get_executor(&request.model).await {
-        Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
-    };
+    let executor =
+        match select_executor(&state, &request.model, request.lora_adapter.as_deref()).await {
+            Ok(e) => e,
+            Err(response) => return *response,
+        };
     let load_duration_ms = load_start.elapsed().as_millis() as u64;
 
     let context_prefix = match decode_context_prefix(&executor, &request.context) {

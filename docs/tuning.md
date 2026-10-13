@@ -129,12 +129,22 @@ The CUDA graph path needs a CUDA build. `inference.graphs` in `config.yaml` work
 
 ## LoRA adapters
 
-| Action             | Where set                                                       | Effect                                                                                                  |
-| ------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Load               | `POST /v1/lora` with a JSON body of `model`, `name`, and `path` | Registers an adapter with a model. The body fields come from `LoadLoraRequest` in `src/server/lora.rs`. |
-| Select per request | Request field `lora_adapter` on a generation request            | Applies the named adapter to that request. A request without the field uses the base weights.           |
-| List               | `GET /v1/lora?model=<model>`                                    | Lists the adapters loaded for a model.                                                                  |
-| Unload             | `DELETE /v1/lora/{name}?model=<model>`                          | Removes an adapter from a model.                                                                        |
+A PEFT LoRA adapter applies at load time as a variant of a loaded `qwen35` base model, named `<model>:<name>`. The variant shares the base weights and attaches the adapter unmerged. It runs on its own executor, so each variant holds its own KV cache and costs KV memory. The base keeps serving as `<model>`. Adapters do not stack. Other model types refuse an adapter.
+
+| Action             | Where set                                                                         | Effect                                                                                                                                       |
+| ------------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Load at start      | flag `--lora <dir>[=<name>]` (`serve`, repeatable), key `inference.lora`          | Builds one variant of the start model per adapter. The name defaults to the adapter directory name. The flag replaces the key.               |
+| Load at run time   | `POST /v1/lora` with a JSON body of `model`, `name`, and `path`                   | Registers and builds the variant `<model>:<name>`, loading `model` first when needed. A variant of the same name is replaced.                |
+| Select per request | `model: "<model>:<name>"`, or `lora_adapter: "<name>"` with `model: "<model>"`     | Runs the request on that variant. Both fields must name the same adapter when both are set. An unknown adapter is a `404`, never the base.   |
+| Default adapter    | key `generation.lora_adapter`                                                     | The adapter a request without `lora_adapter` selects. A `model` that names a variant ignores it.                                              |
+| List               | `GET /v1/lora[?model=<model>]`, `GET /v1/models`                                  | Lists the registered variants with base, adapter path, rank and adapted module count.                                                        |
+| Unload             | `DELETE /v1/lora/{name}?model=<model>`                                            | Unregisters the variant and drops its executor.                                                                                              |
+| One-shot decode    | flag `--lora <dir>[=<name>]` (`run`, `generate`, once)                             | Decodes with the variant in place of the base.                                                                                                |
+
+- Eviction and `keep_alive` drop a variant like any loaded model. A registered variant builds again from its base on its next request. Dropping a base drops its variants first. Only base models count against the loaded-model limit.
+- A variant runs one sequence at a time, as any model other than the start model does. It gets no batching engine.
+- With `inference.data_parallel` above `1`, the start model takes no adapter: `serve` refuses `--lora`, and `POST /v1/lora` returns `400`.
+- A VoxCPM2 TTS bundle's `adapters/<one>.safetensors` is a separate path: the adapter folds into that bundle at load. See `--tts-model`.
 
 ## CPU threads
 

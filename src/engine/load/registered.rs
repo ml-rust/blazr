@@ -188,7 +188,7 @@ mod tests {
         let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
         Executor::new(
             LoadedModel::Llama(Box::new(model)),
-            BlazrConfig::from_universal(config),
+            BlazrConfig::from_universal_with_dtype(config, "f32"),
             tokenizer,
             device,
             16,

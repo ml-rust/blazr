@@ -51,8 +51,28 @@ fn narration_argv(command: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Stack of the thread that runs the command. The command's `poll` frame
+/// holds every subcommand's locals, and the main thread of a Windows process
+/// has 1 MiB, against 8 MiB on Linux and macOS.
+const COMMAND_STACK_BYTES: usize = 16 << 20;
+
+fn main() -> Result<()> {
+    let command = std::thread::Builder::new()
+        .name("blazr".into())
+        .stack_size(COMMAND_STACK_BYTES)
+        .spawn(|| -> Result<()> {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(run())
+        })?;
+    match command.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+async fn run() -> Result<()> {
     blazr::tls::install_crypto_provider();
     let cli = Cli::parse();
 

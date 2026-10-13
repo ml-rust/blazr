@@ -8,6 +8,7 @@ pub mod error;
 pub mod kev_base;
 mod kev_model;
 pub mod limits;
+mod locate;
 mod prefix_cache;
 pub mod prepare;
 pub mod readout;

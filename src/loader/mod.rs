@@ -14,6 +14,7 @@ mod gguf_config;
 mod gguf_info;
 mod gguf_rope;
 mod gguf_template;
+pub mod hf_cache;
 #[cfg(feature = "audio")]
 pub mod hub;
 #[cfg(feature = "hub")]

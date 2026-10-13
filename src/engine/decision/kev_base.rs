@@ -24,32 +24,6 @@ pub struct KevBase {
     pub path: PathBuf,
 }
 
-/// The Hugging Face hub caches: `$HF_HUB_CACHE`, then `$HF_HOME/hub`, else
-/// `$XDG_CACHE_HOME/huggingface/hub`, else `~/.cache/huggingface/hub`.
-pub fn hub_caches() -> Vec<PathBuf> {
-    let var = |name: &str| {
-        std::env::var_os(name)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let hf_home = var("HF_HOME").unwrap_or_else(|| {
-        var("XDG_CACHE_HOME")
-            .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
-            .unwrap_or_else(|| PathBuf::from(".cache"))
-            .join("huggingface")
-    });
-    let mut out = Vec::with_capacity(2);
-    for dir in [var("HF_HUB_CACHE"), Some(hf_home.join("hub"))]
-        .into_iter()
-        .flatten()
-    {
-        if !out.contains(&dir) {
-            out.push(dir);
-        }
-    }
-    out
-}
-
 /// Whether `path` holds weights the loader reads.
 fn holds_weights(path: &Path) -> bool {
     detect_model_source(path).is_ok()
@@ -223,12 +197,5 @@ mod tests {
         let found = resolve_kev_base(kev.path(), None, models.path(), &[]).expect("found");
         assert_eq!(found.path, repo.join("old"));
         assert_eq!(found.name, found.path.display().to_string());
-    }
-
-    #[test]
-    fn hub_caches_end_with_the_hf_home_hub() {
-        let caches = hub_caches();
-        let last = caches.last().expect("at least the HF home hub");
-        assert!(last.ends_with("hub"), "{}", last.display());
     }
 }

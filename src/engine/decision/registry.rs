@@ -4,9 +4,8 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::SystemTime;
 
 use boostr::model::{LoadedModel, ModelClient};
 use boostr::ops::TensorOps;
@@ -15,6 +14,9 @@ use boostr::{
 };
 
 use super::error::DecisionFailure;
+use super::locate::{
+    blocking, cached_gguf_facts, locate_decision, renderer_of, settings_of, GgufHeaders,
+};
 use super::readout::ReadoutHead;
 use super::service::DecisionService;
 use super::stats::DecisionCounts;
@@ -22,8 +24,7 @@ use crate::config::DecisionConfig;
 use crate::engine::Scheduler;
 use crate::loader::decision::sidecar::{DECIDER_CONFIG, JEBADIAH_CARD, PROMPT_CONTRACT};
 use crate::loader::decision::{
-    decision_info_with_base, detect_decision_with, load_renderer, read_gguf_facts, DecisionInfo,
-    GgufFacts,
+    decision_info_with_base, detect_decision_with, DecisionInfo, GgufFacts,
 };
 use crate::model::decision_template::Family;
 
@@ -57,21 +58,21 @@ pub fn variant_decision_config(cfg: &DecisionConfig, base: &str, adapter: &Path)
 /// The decision services of one scheduler, and the GGUF headers it read.
 pub struct DecisionRegistry<R: Runtime<DType = DType>> {
     services: Mutex<HashMap<String, Arc<DecisionService<R>>>>,
-    headers: Mutex<HashMap<PathBuf, (Option<SystemTime>, GgufFacts)>>,
+    headers: Arc<Mutex<GgufHeaders>>,
 }
 
 impl<R: Runtime<DType = DType>> Default for DecisionRegistry<R> {
     fn default() -> Self {
         Self {
             services: Mutex::new(HashMap::new()),
-            headers: Mutex::new(HashMap::new()),
+            headers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 /// A lock that a panicking holder left poisoned still guards a map whose
 /// entries are whole: every insert and remove is one call.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -116,15 +117,7 @@ impl<R: Runtime<DType = DType>> DecisionRegistry<R> {
 
     /// What the GGUF header of `file` says, read once per file version.
     fn gguf_facts(&self, file: &Path) -> Result<GgufFacts, String> {
-        let stamp = std::fs::metadata(file).and_then(|m| m.modified()).ok();
-        if let Some((seen, facts)) = lock(&self.headers).get(file) {
-            if *seen == stamp && stamp.is_some() {
-                return Ok(facts.clone());
-            }
-        }
-        let facts = read_gguf_facts(file)?;
-        lock(&self.headers).insert(file.to_path_buf(), (stamp, facts.clone()));
-        Ok(facts)
+        cached_gguf_facts(&self.headers, file)
     }
 }
 
@@ -190,32 +183,23 @@ where
     /// The decision settings detection runs with for `name`: the server's,
     /// or for a LoRA variant, [`variant_decision_config`] over them.
     fn decision_settings(&self, name: &str) -> Cow<'_, DecisionConfig> {
-        match self.variant(name) {
-            Some(v) => Cow::Owned(variant_decision_config(
-                &self.decision_config,
-                &v.base,
-                &v.path,
-            )),
-            None => Cow::Borrowed(&self.decision_config),
-        }
+        settings_of(&self.decision_config, self.variant(name).as_ref())
     }
 
-    /// The weights path of `name`: its own, or for a LoRA variant its
-    /// base's.
-    async fn decision_weights(&self, name: &str) -> Result<PathBuf, DecisionFailure> {
+    /// Why `name` has no weights to serve decisions from: an unknown LoRA
+    /// variant, else no model of its name, or of its base's name for a
+    /// variant.
+    async fn missing_weights(&self, name: &str) -> DecisionFailure {
+        if let Some(error) = self.unknown_variant(name).await {
+            return error.into();
+        }
         let weights = self
             .variant(name)
             .map_or_else(|| name.to_string(), |v| v.base);
-        if let Some(path) = self.model_path(&weights) {
-            return Ok(path);
-        }
-        if let Some(error) = self.unknown_variant(name).await {
-            return Err(error.into());
-        }
-        Err(DecisionFailure::ModelNotFound(format!(
+        DecisionFailure::ModelNotFound(format!(
             "model '{weights}' not found: it is neither a path nor an entry of {}",
             self.model_dir().display()
-        )))
+        ))
     }
 
     /// What the decision worker of `name` did so far. `None` when the model
@@ -243,23 +227,21 @@ where
         &self,
         name: &str,
     ) -> Result<Arc<DecisionService<R>>, DecisionFailure> {
-        let path = match self.kev_dir(name) {
-            Some(dir) => dir,
-            None => self.decision_weights(name).await?,
+        let variant = self.variant(name);
+        let located = {
+            let model_dir = self.model_dir().to_path_buf();
+            let cfg = self.decision_config.clone();
+            let variant = variant.clone();
+            let target = name.to_string();
+            let headers = Arc::clone(&self.decisions.headers);
+            blocking(name, move || {
+                locate_decision(&model_dir, &cfg, variant.as_ref(), &target, &headers)
+            })
+            .await?
         };
-        let settings = self.decision_settings(name);
-        let source = detect_decision_with(&path, name, &settings, |file| {
-            self.decisions.gguf_facts(file)
-        })
-        .map_err(DecisionFailure::Internal)?
-        .ok_or_else(|| {
-            DecisionFailure::NotDecisionModel(format!(
-                "model '{name}' is not a System One decision model: it ships no \
-                 decider_config.json, prompt_contract.json, jebadiah.json or joint-schema head \
-                 (joint_head_config.json with joint_head.safetensors), its GGUF header names \
-                 no decision model, and no --decision-family applies to it"
-            ))
-        })?;
+        let Some((path, source)) = located else {
+            return Err(self.missing_weights(name).await);
+        };
         let executor = self.get_executor(name).await.map_err(|e| match e
             .downcast::<crate::engine::LoraError>()
         {
@@ -277,15 +259,26 @@ where
                 source.family.name()
             )));
         }
-        let base = match source.family {
-            Family::Kev => self.kev_base_path(name, &path),
-            Family::Jebadiah | Family::Decider | Family::Clef => None,
+        let (loaded, head) = {
+            let model_dir = self.model_dir().to_path_buf();
+            let cfg = self.decision_config.clone();
+            let target = name.to_string();
+            let model = Arc::clone(model);
+            let device = executor.device().clone();
+            blocking(name, move || {
+                let loaded =
+                    renderer_of(&model_dir, &cfg, variant.as_ref(), &target, &path, &source)?;
+                let pointer_head = loaded.pointer_head.as_deref();
+                let joint_head = loaded.joint_head.as_deref();
+                let head = ReadoutHead::load(pointer_head, joint_head, &model, &device)?;
+                Ok((loaded, head))
+            })
+            .await?
         };
-        let loaded = load_renderer(&source, &self.decision_config, base.as_deref())
-            .map_err(|e| DecisionFailure::Internal(format!("model '{name}': {e}")))?;
         let service = DecisionService::start(
             name,
             loaded,
+            head,
             model,
             executor.device().clone(),
             &self.decision_config,
@@ -298,6 +291,7 @@ where
 mod tests {
     use super::*;
     use crate::config::DecisionFamily;
+    use std::path::PathBuf;
 
     #[test]
     fn a_variant_takes_its_base_overrides_then_its_adapter_sidecar() {

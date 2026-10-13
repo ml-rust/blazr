@@ -1,6 +1,11 @@
 //! `/v1/audio/transcriptions` and `/v1/audio/translations` handlers, sharing
 //! one pipeline: decode, run Whisper per 30s chunk, render the requested
 //! format.
+//!
+//! `/v1/audio/transcriptions` accepts multipart `timestamp_granularities[]`
+//! (`word`, `segment`, or both), valid only with `response_format=verbose_json`
+//! (400 otherwise). `word` adds a `words: [{word, start, end}]` array to the
+//! response and is a 400 against a checkpoint with no `alignment_heads`.
 
 use std::sync::Arc;
 

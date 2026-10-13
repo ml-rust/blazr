@@ -257,7 +257,7 @@ Build with `--features wgpu`. Select the adapter with `device: wgpu` or `device:
 
 ## Sources
 
-- blazr: `src/loader/detect.rs`, `src/loader/safetensors/`, `src/loader/gguf_config.rs`, `src/loader/tts/`, `src/loader/whisper_loader.rs`, `src/model/chat_template/`, `src/tokenizer/`, `src/server/rerank.rs`, `src/server/embeddings.rs`.
+- blazr: `src/loader/detect.rs`, `src/loader/formats/safetensors/`, `src/loader/formats/gguf_config.rs`, `src/loader/speech_load/tts/`, `src/loader/speech_load/whisper_loader.rs`, `src/model/chat_template/`, `src/tokenizer/`, `src/server/text_api/rerank.rs`, `src/server/text_api/embeddings.rs`.
 - boostr: `src/format/hf_restructure.rs`, `src/model/config/block.rs`, `src/model/detection/`, `src/model/registry/load.rs`, `src/model/config/huggingface/model_type.rs`, `src/quant/format.rs`, `src/quant/cpu/dequant.rs`, `src/quant/cuda/dequant.rs`, `src/quant/cuda/kernels/dequant_generic.cu`.
 - Tests: `tests/` in blazr. Gated tests name their checkpoints in the constants at the top of each file.
 - Production checklist: `blazr_production_checklist.md`, sections 1 and 2.

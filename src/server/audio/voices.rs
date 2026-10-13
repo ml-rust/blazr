@@ -1,4 +1,7 @@
 //! `GET /v1/audio/voices` — list a TTS model's voice catalog.
+//!
+//! `GET /v1/audio/voices?model=<name>` lists a registered TTS model's voice
+//! catalog (`bundle.voices()`), 400 when `model` is missing or unknown.
 
 use std::sync::Arc;
 

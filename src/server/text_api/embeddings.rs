@@ -1,0 +1,370 @@
+//! Embeddings endpoint handler (`POST /v1/embeddings`)
+//!
+//! Supports OpenAI-compatible embedding generation with multiple pooling
+//! strategies. Uses the model's token embeddings (from `forward_embed`)
+//! with configurable pooling (mean, cls, last, none).
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{Json, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde::{Deserialize, Serialize};
+
+use crate::engine::pooling::{l2_normalize, pool_cls, pool_last, pool_mean};
+use crate::engine::Executor;
+use crate::server::encoding::encode_f32_base64;
+use crate::server::generation::{error_response, policy_error_response};
+use crate::server::handlers::{lookup_error_response, AppState, ServerRuntime};
+use crate::server::multimodal::{decode_image, ContentPart};
+
+/// The last hidden states of `ids`, computed on a blocking thread so the
+/// forward pass never holds an async worker.
+///
+/// # Errors
+///
+/// The forward pass's error, or the blocking task's when it panicked.
+pub(crate) async fn hidden_states(
+    executor: &Arc<Executor<ServerRuntime>>,
+    ids: Vec<u32>,
+) -> anyhow::Result<Vec<f32>> {
+    let executor = Arc::clone(executor);
+    tokio::task::spawn_blocking(move || executor.get_embeddings(&ids))
+        .await
+        .map_err(|e| anyhow::anyhow!("the embedding task stopped: {e}"))?
+}
+
+/// Embedding request (OpenAI-compatible)
+#[derive(Deserialize)]
+pub struct EmbeddingRequest {
+    /// Model name
+    pub model: String,
+    /// Input text(s) to embed — single string or array of strings
+    pub input: EmbeddingInput,
+    /// Encoding format: "float" (default) or "base64"
+    #[serde(default = "default_encoding_format")]
+    pub encoding_format: String,
+    /// Pooling strategy: "mean" (default), "cls", "last", "none"
+    #[serde(default = "default_pooling")]
+    pub pooling: String,
+    /// Whether to L2-normalize embeddings (default: false)
+    #[serde(default)]
+    pub normalize: bool,
+    /// Optional user identifier
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub user: Option<String>,
+}
+
+fn default_encoding_format() -> String {
+    "float".to_string()
+}
+
+fn default_pooling() -> String {
+    "mean".to_string()
+}
+
+/// Input can be a single string, array of strings, or multimodal content parts.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    /// Single text string
+    Single(String),
+    /// Multimodal input: array of content parts (text + images)
+    /// Follows OpenAI format: [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "..."}}]
+    /// Note: must appear before Batch — with serde(untagged), variants are tried in order
+    Multimodal(Vec<crate::server::multimodal::ContentPart>),
+    /// Batch of text strings
+    Batch(Vec<String>),
+}
+
+/// One unit of embedding work preserving the input order.
+enum EmbedItem<'a> {
+    Text(&'a str),
+    Image(&'a crate::server::multimodal::ImageUrl),
+}
+
+impl EmbeddingInput {
+    /// Flatten the input into ordered (text | image) items.
+    fn items(&self) -> Vec<EmbedItem<'_>> {
+        match self {
+            EmbeddingInput::Single(s) => vec![EmbedItem::Text(s.as_str())],
+            EmbeddingInput::Batch(v) => v.iter().map(|s| EmbedItem::Text(s.as_str())).collect(),
+            EmbeddingInput::Multimodal(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(EmbedItem::Text(text.as_str())),
+                    ContentPart::ImageUrl { image_url } => Some(EmbedItem::Image(image_url)),
+                    ContentPart::InputAudio { .. } => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Check if any content parts contain images.
+    fn has_images(&self) -> bool {
+        match self {
+            EmbeddingInput::Multimodal(parts) => parts
+                .iter()
+                .any(|p| matches!(p, crate::server::multimodal::ContentPart::ImageUrl { .. })),
+            _ => false,
+        }
+    }
+}
+
+/// Embedding response (OpenAI-compatible)
+#[derive(Serialize)]
+pub struct EmbeddingResponse {
+    pub object: &'static str,
+    pub data: Vec<EmbeddingData>,
+    pub model: String,
+    pub usage: EmbeddingUsage,
+}
+
+#[derive(Serialize)]
+pub struct EmbeddingData {
+    pub object: &'static str,
+    pub index: usize,
+    pub embedding: EmbeddingValue,
+}
+
+/// Embedding values — float array or base64-encoded
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum EmbeddingValue {
+    Float(Vec<f32>),
+    Base64(String),
+}
+
+#[derive(Serialize)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+}
+
+/// Embeddings endpoint
+pub async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EmbeddingRequest>,
+) -> Response {
+    let executor = match state.scheduler.get_executor(&request.model).await {
+        Ok(e) => e,
+        Err(e) => return lookup_error_response(&e),
+    };
+
+    // Validate pooling strategy
+    let pooling = match request.pooling.as_str() {
+        "mean" | "cls" | "last" | "none" => request.pooling.as_str(),
+        other => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Invalid pooling strategy '{}'. Must be one of: mean, cls, last, none",
+                    other
+                ),
+                "invalid_request_error",
+            );
+        }
+    };
+
+    // Route images to the standalone vision embedder registered for this model.
+    let vision_embedder = if request.input.has_images() {
+        match state.vision_embedder(&request.model).await {
+            Some(v) => Some(v),
+            None => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "Model '{}' is not registered as a vision embedder; image inputs require a loaded SigLIP/CLIP encoder",
+                        request.model
+                    ),
+                    "invalid_request_error",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let items = request.input.items();
+    if items.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Input must not be empty",
+            "invalid_request_error",
+        );
+    }
+
+    let mut embeddings_data = Vec::with_capacity(items.len());
+    let mut total_prompt_tokens = 0;
+
+    for (i, item) in items.into_iter().enumerate() {
+        let mut embedding = match item {
+            EmbedItem::Text(text) => {
+                // Raw caller text with no template around it: nothing in it may
+                // become a control token.
+                let token_ids = match executor
+                    .tokenizer()
+                    .encode_with(text, &splintr::SpecialMode::Ordinary)
+                {
+                    Ok(ids) => ids,
+                    Err(e) => return policy_error_response(&e),
+                };
+                let num_tokens = token_ids.len();
+                total_prompt_tokens += num_tokens;
+
+                let hidden = match hidden_states(&executor, token_ids).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Embedding generation failed: {}", e),
+                            "server_error",
+                        );
+                    }
+                };
+
+                let hidden_size = if hidden.is_empty() {
+                    0
+                } else {
+                    hidden.len() / num_tokens
+                };
+
+                match pooling {
+                    "mean" => pool_mean(&hidden, num_tokens, hidden_size),
+                    "cls" => pool_cls(&hidden, hidden_size),
+                    "last" => pool_last(&hidden, num_tokens, hidden_size),
+                    "none" => hidden,
+                    _ => unreachable!(),
+                }
+            }
+            EmbedItem::Image(image_url) => {
+                let embedder = vision_embedder
+                    .as_ref()
+                    .expect("vision_embedder present when items contain images");
+                let decoded = match decode_image(&image_url.url).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("Failed to decode image: {}", e),
+                            "invalid_request_error",
+                        );
+                    }
+                };
+                let device =
+                    <crate::server::handlers::ServerRuntime as boostr::Runtime>::default_device();
+                match embedder.embed_bytes_default(&decoded.data, &device) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &format!("Image embedding failed: {}", e),
+                            "server_error",
+                        );
+                    }
+                }
+            }
+        };
+
+        if request.normalize {
+            l2_normalize(&mut embedding);
+        }
+
+        let value = if request.encoding_format == "base64" {
+            EmbeddingValue::Base64(encode_f32_base64(&embedding))
+        } else {
+            EmbeddingValue::Float(embedding)
+        };
+
+        embeddings_data.push(EmbeddingData {
+            object: "embedding",
+            index: i,
+            embedding: value,
+        });
+    }
+
+    let response = EmbeddingResponse {
+        object: "list",
+        data: embeddings_data,
+        model: request.model,
+        usage: EmbeddingUsage {
+            prompt_tokens: total_prompt_tokens,
+            total_tokens: total_prompt_tokens,
+        },
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item_texts(input: &EmbeddingInput) -> Vec<&str> {
+        input
+            .items()
+            .into_iter()
+            .filter_map(|i| match i {
+                EmbedItem::Text(t) => Some(t),
+                EmbedItem::Image(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_embedding_input_single() {
+        let json = r#"{"model": "test", "input": "hello"}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(item_texts(&req.input), vec!["hello"]);
+    }
+
+    #[test]
+    fn test_embedding_input_batch() {
+        let json = r#"{"model": "test", "input": ["hello", "world"]}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(item_texts(&req.input), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_embedding_input_multimodal() {
+        let json = r#"{"model": "test", "input": [
+            {"type": "text", "text": "a photo of a cat"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+        ]}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
+        match &req.input {
+            EmbeddingInput::Multimodal(parts) => assert_eq!(parts.len(), 2),
+            _ => panic!("Expected Multimodal variant"),
+        }
+        // items() should extract only text parts from mixed input
+        assert_eq!(item_texts(&req.input), vec!["a photo of a cat"]);
+        assert!(req.input.has_images());
+    }
+
+    #[test]
+    fn test_embedding_input_multimodal_text_only() {
+        let json = r#"{"model": "test", "input": [
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "world"}
+        ]}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
+        match &req.input {
+            EmbeddingInput::Multimodal(parts) => assert_eq!(parts.len(), 2),
+            _ => panic!("Expected Multimodal variant"),
+        }
+        assert_eq!(item_texts(&req.input), vec!["hello", "world"]);
+        assert!(!req.input.has_images());
+    }
+
+    #[test]
+    fn test_defaults() {
+        let json = r#"{"model": "test", "input": "hello"}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.encoding_format, "float");
+        assert_eq!(req.pooling, "mean");
+        assert!(!req.normalize);
+    }
+}

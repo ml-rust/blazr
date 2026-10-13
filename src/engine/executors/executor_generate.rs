@@ -1,0 +1,454 @@
+//! `generate()` method for the inference executor.
+//!
+//! This is a separate `impl` block for `Executor<R>` — the struct and all other
+//! methods remain in `executor.rs`.
+
+use anyhow::{anyhow, Result};
+use async_stream::stream;
+use futures::Stream;
+use std::sync::Mutex;
+
+use boostr::inference::kv_cache::LayeredPagedKvCache;
+use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
+use boostr::inference::{LayeredKvCache, LayeredSsmState};
+use boostr::model::ModelClient;
+use boostr::ops::TensorOps;
+use boostr::{
+    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
+};
+
+use crate::config::GenerationConfig;
+use crate::engine::sampling::MirostatState;
+use crate::tokenizer::{token_piece, token_piece_bytes, TokenTextStream};
+
+use super::types::{FinishReason, GeneratedToken};
+
+use super::executor::Executor;
+use super::executor_generate_qwen35::{DecodeSetup, SamplerState};
+
+/// Clone the shared block allocator, confining the lock guard to this frame.
+///
+/// Deliberately NOT inlined into the `stream!` body: a `MutexGuard` held across
+/// a `?` inside an async generator becomes part of the generator's state, and
+/// `MutexGuard` is not `Send`, so the whole future stops being `Send` and
+/// `tokio::spawn` rejects it. Keeping the lock inside a plain fn means the
+/// guard is gone before the caller resumes.
+///
+/// A poisoned lock propagates rather than recovering: a panic mid-allocation
+/// can leave block accounting inconsistent, and handing out a double-allocated
+/// block would corrupt inference.
+fn clone_shared_allocator(shared: &Mutex<CpuBlockAllocator>) -> Result<CpuBlockAllocator> {
+    let guard = shared
+        .lock()
+        .map_err(|e| anyhow!("Block allocator lock poisoned: {e}"))?;
+    Ok(guard.clone())
+}
+
+impl<R: Runtime<DType = DType>> Executor<R>
+where
+    R::Client: TensorOps<R>
+        + ScalarOps<R>
+        + ConvOps<R>
+        + NormalizationOps<R>
+        + UnaryOps<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + TypeConversionOps<R>
+        + SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
+        + ModelClient<R>
+        + RoPEPackedOps<R>
+        + boostr::quant::traits::DequantOps<R>,
+{
+    /// Whether `next_token` ends generation, and why.
+    ///
+    /// Shared by the contiguous-KV and qwen35 decode loops so eos/length
+    /// policy can't drift between them.
+    pub(in crate::engine) fn decode_finish_reason(
+        &self,
+        next_token: u32,
+        step: usize,
+        max_tokens: usize,
+    ) -> Option<FinishReason> {
+        if self.tokenizer.is_eos(next_token) {
+            Some(FinishReason::Eos)
+        } else if step + 1 == max_tokens {
+            Some(FinishReason::Length)
+        } else {
+            None
+        }
+    }
+
+    /// Advance the CPU grammar DFA by `next_token`'s decoded bytes, then sync
+    /// the device-side DFA state used for on-device logit masking.
+    ///
+    /// Shared by the contiguous-KV and qwen35 decode loops.
+    pub(in crate::engine) fn advance_grammar_state(
+        &self,
+        grammar_dfa: &mut Option<crate::engine::grammar::GrammarDfa>,
+        device_grammar: &mut Option<boostr::DeviceGrammarDfa<R>>,
+        next_token: u32,
+    ) {
+        if let Some(ref mut dfa) = grammar_dfa {
+            for byte in token_piece_bytes(self.tokenizer(), next_token) {
+                dfa.advance(byte);
+            }
+            if let Some(ref mut dg) = device_grammar {
+                dg.current_state = dfa.current_state() as u32;
+            }
+        }
+    }
+
+    /// Repetition history, mirostat state and grammar DFAs for one request.
+    pub(in crate::engine) fn sampler_state(
+        &self,
+        prompt_tokens: &[u32],
+        gen_config: &GenerationConfig,
+    ) -> Result<SamplerState<R>> {
+        // Token history for repetition penalty
+        let token_history: Vec<u32> = prompt_tokens.to_vec();
+
+        // Mirostat state (if enabled)
+        let mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
+            Some(MirostatState::new(
+                gen_config.mirostat_tau,
+                gen_config.mirostat_eta,
+                gen_config.seed,
+            ))
+        } else {
+            None
+        };
+
+        // Grammar DFA (if enabled) — compile to CPU DFA for state tracking,
+        // and build a DeviceGrammarDfa for on-device logit masking
+        let mut grammar_dfa: Option<crate::engine::grammar::GrammarDfa> = None;
+        let mut device_grammar: Option<boostr::DeviceGrammarDfa<R>> = None;
+        if let Some(ref grammar) = gen_config.grammar {
+            match crate::engine::grammar::compile_grammar_to_dfa(grammar) {
+                Ok(dfa) => {
+                    tracing::info!("Grammar DFA compiled: {} states", dfa.num_states());
+                    // Build vocab byte representations for the device DFA
+                    let vocab_size = self.vocab_size();
+                    let vocab_bytes: Vec<Vec<u8>> = (0..vocab_size)
+                        .map(|i| token_piece_bytes(self.tokenizer(), i as u32))
+                        .collect();
+                    device_grammar = Some(dfa.to_device::<R>(&vocab_bytes, &self.device)?);
+                    grammar_dfa = Some(dfa);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to compile grammar DFA: {}", e);
+                }
+            }
+        }
+        Ok(SamplerState {
+            token_history,
+            mirostat,
+            grammar_dfa,
+            device_grammar,
+            text: TokenTextStream::new(self.tokenizer(), prompt_tokens),
+        })
+    }
+
+    /// Generate from already-encoded prompt ids.
+    ///
+    /// The ids are the caller's — the handler that validated them against its
+    /// special-token policy — so nothing here re-tokenizes text and no second
+    /// encode can disagree with the one that was checked.
+    pub fn generate<'a>(
+        &'a self,
+        prompt_tokens: &'a [u32],
+        gen_config: &'a GenerationConfig,
+    ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
+        stream! {
+            if gen_config.verbose_prompt {
+                let prompt = self.tokenizer.decode(prompt_tokens).unwrap_or_default();
+                eprintln!("\nprompt: '{}'", prompt);
+                eprintln!("number of tokens in prompt = {}", prompt_tokens.len());
+                for &tok in prompt_tokens {
+                    let piece = token_piece(&self.tokenizer, tok);
+                    eprintln!("{:>6} -> '{}'", tok, piece);
+                }
+                eprintln!();
+            }
+
+            if prompt_tokens.is_empty() {
+                return;
+            }
+
+            let max_seq_len = self.config.max_seq_len();
+            let max_tokens = gen_config.max_tokens.min(
+                max_seq_len.saturating_sub(prompt_tokens.len())
+            );
+
+            let input = self.create_input_tensor(prompt_tokens)?;
+
+            let SamplerState {
+                mut token_history,
+                mut mirostat,
+                mut grammar_dfa,
+                mut device_grammar,
+                mut text,
+            } = self.sampler_state(prompt_tokens, gen_config)?;
+
+            if self.model.needs_gdn_state() {
+                // ── qwen35 path: KV cache (attention layers) + GDN state ──
+                // Checked first: needs_kv_cache() is also true here, and the
+                // KV branches below size the cache by num_layers().
+                let setup = DecodeSetup {
+                    input,
+                    max_tokens,
+                    sampler: SamplerState {
+                        token_history,
+                        mirostat,
+                        grammar_dfa,
+                        device_grammar,
+                        text,
+                    },
+                    plan: None,
+                };
+                let inner = self.generate_qwen35(prompt_tokens, gen_config, setup);
+                for await item in inner {
+                    yield item;
+                }
+            } else if self.model.needs_ssm_state() {
+                // ── Mamba2 path: SSM state instead of KV cache ──
+                let mamba_config = self.model.mamba_config()
+                    .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
+                let num_layers = self.model.num_layers();
+
+                let state_dtype = self.config.compute_dtype()?;
+
+                let mut ssm_state = LayeredSsmState::new(
+                    num_layers, 1, mamba_config, state_dtype, &self.device,
+                )?;
+
+                // Prefill
+                tracing::info!(phase = "prefill_start", backend = "mamba2", prompt_tokens = prompt_tokens.len());
+                let mut logits = self.model.forward_with_ssm_state(&input, &mut ssm_state)
+                    .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
+                tracing::info!(phase = "prefill_end", backend = "mamba2");
+                tracing::info!(phase = "decode_start", backend = "mamba2", max_tokens = max_tokens);
+                for i in 0..max_tokens {
+                    let cur_logits = &logits;
+                    let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(cur_logits, &token_history, gen_config, &mut mirostat, device_grammar.as_ref())?;
+                    let event = token_gpu.record_event()
+                        .map_err(|e| anyhow!("Record event failed: {}", e))?;
+
+                    let next_input = token_gpu.reshape(&[1, 1])?;
+                    let next_logits = self.model.forward_with_ssm_state(&next_input, &mut ssm_state)
+                        .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
+
+                    let next_token = miro_id.map_or_else(
+                        || Self::read_token_id(&token_gpu, event),
+                        Ok,
+                    )?;
+                    token_history.push(next_token);
+                    self.advance_grammar_state(&mut grammar_dfa, &mut device_grammar, next_token);
+
+                    let finish = self.decode_finish_reason(next_token, i, max_tokens);
+
+                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                    if finish == Some(FinishReason::Eos) { break; }
+                    logits = next_logits;
+                }
+                tracing::info!(phase = "decode_end", backend = "mamba2");
+            } else if self.config.inference.paged_attention {
+                // ── Llama path: Paged KV cache ──
+                let num_layers = self.model.num_layers();
+                let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
+                let head_dim = self.model.head_dim().unwrap_or(64);
+                let block_size = self.config.inference.block_size;
+                let kv_dtype = self.config.kv_cache_dtype()?;
+
+                // Use shared allocator if available, otherwise create per-request
+                let total_tokens = prompt_tokens.len() + max_tokens;
+                let num_blocks = if self.config.inference.num_blocks > 0 {
+                    self.config.inference.num_blocks
+                } else {
+                    BlockTable::blocks_needed(total_tokens, block_size) + 4
+                };
+
+                let allocator = if let Some(ref shared) = self.shared_allocator {
+                    clone_shared_allocator(shared)?
+                } else {
+                    CpuBlockAllocator::new(num_blocks, block_size)
+                };
+
+                let mut paged_cache = LayeredPagedKvCache::new(
+                    num_layers, num_blocks, block_size, num_kv_heads, head_dim, kv_dtype, &self.device,
+                )?;
+
+                // Prefix cache: get block IDs with KV reuse for cached prefixes.
+                // Helper returns result without holding MutexGuard across yield points.
+                let (cached_token_count, prefix_cache_seq_id) =
+                    Self::prefix_cache_allocate(
+                        &self.prefix_cache, prompt_tokens, block_size,
+                        &mut paged_cache, &allocator,
+                    )?;
+
+                // Sync with GPU prefix cache (insert block mappings)
+                #[cfg(feature = "cuda")]
+                {
+                    let bt = paged_cache.block_table(0);
+                    Self::gpu_prefix_cache_insert(
+                        &self.gpu_prefix_cache, prompt_tokens, block_size, &bt.blocks,
+                    );
+                }
+
+                // If prefix cache provided cached tokens, only prefill the uncached suffix
+                let prefill_start = cached_token_count.min(prompt_tokens.len());
+                let prefill_tokens = &prompt_tokens[prefill_start..];
+
+                let slot_mapping_vec = paged_cache.compute_slot_mapping(prefill_start, prefill_tokens.len())
+                    .map_err(|e| anyhow!("Failed to compute slot mapping: {}", e))?;
+                let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prefill_tokens.len()], &self.device)?;
+
+                let bt_vec = paged_cache.block_table_device_format(0);
+                let max_num_blocks = bt_vec.len();
+                let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, max_num_blocks], &self.device)?;
+
+                let seq_len_k = prompt_tokens.len();
+                paged_cache.set_seq_len(seq_len_k);
+
+                // Build input for only the uncached portion
+                let prefill_input = if prefill_start > 0 && !prefill_tokens.is_empty() {
+                    self.create_input_tensor(prefill_tokens)?
+                } else {
+                    input.clone()
+                };
+
+                tracing::info!(
+                    phase = "prefill_start", backend = "paged",
+                    prompt_tokens = prompt_tokens.len(),
+                    cached_tokens = prefill_start,
+                    prefill_tokens = prefill_tokens.len(),
+                    num_blocks = num_blocks,
+                );
+                let t0 = std::time::Instant::now();
+                let mut logits = self.model.forward_with_paged_kv_cache(
+                    &prefill_input, &paged_cache, &slot_mapping, &block_table_tensor,
+                    seq_len_k, prefill_start, None, None,
+                ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
+                tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), prompt_tokens.len(), num_blocks);
+                tracing::info!(phase = "prefill_end", backend = "paged");
+                tracing::info!(phase = "decode_start", backend = "paged", max_tokens = max_tokens);
+                for i in 0..max_tokens {
+                    let t1 = std::time::Instant::now();
+
+                    let cur_logits = &logits;
+                    let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(cur_logits, &token_history, gen_config, &mut mirostat, device_grammar.as_ref())?;
+                    let event = token_gpu.record_event()
+                        .map_err(|e| anyhow!("Record event failed: {}", e))?;
+
+                    let cur_seq_len = paged_cache.seq_len();
+                    paged_cache.allocate_blocks(1, &allocator)
+                        .map_err(|e| anyhow!("Failed to allocate block for decode: {}", e))?;
+
+                    let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
+                        .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
+                    let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device)?;
+
+                    let bt_vec = paged_cache.block_table_device_format(0);
+                    let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device)?;
+
+                    let new_seq_len_k = cur_seq_len + 1;
+                    paged_cache.set_seq_len(new_seq_len_k);
+
+                    let next_input = token_gpu.reshape(&[1, 1])?;
+                    let next_logits = self.model.forward_with_paged_kv_cache(
+                        &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
+                        new_seq_len_k, cur_seq_len, None, None,
+                    ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
+                    let fwd_time = t1.elapsed();
+
+                    let t2 = std::time::Instant::now();
+                    let next_token = miro_id.map_or_else(
+                        || Self::read_token_id(&token_gpu, event),
+                        Ok,
+                    )?;
+                    token_history.push(next_token);
+                    self.advance_grammar_state(&mut grammar_dfa, &mut device_grammar, next_token);
+                    tracing::info!("Paged token {}: fwd_launch={:?} sync={:?} total={:?}", i+1, fwd_time, t2.elapsed(), t1.elapsed());
+
+                    let finish = self.decode_finish_reason(next_token, i, max_tokens);
+
+                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                    if finish == Some(FinishReason::Eos) { break; }
+                    logits = next_logits;
+                }
+                // Release prefix cache references and free blocks
+                let bt = paged_cache.block_table(0);
+                let blocks_to_free: Vec<_> = bt.blocks.clone();
+                Self::prefix_cache_release(
+                    &self.prefix_cache, prefix_cache_seq_id,
+                    &blocks_to_free, &allocator,
+                );
+                #[cfg(feature = "cuda")]
+                Self::gpu_prefix_cache_release(
+                    &self.gpu_prefix_cache, prompt_tokens, block_size,
+                );
+                tracing::debug!("Freed {} blocks back to pool", blocks_to_free.len());
+                tracing::info!(phase = "decode_end", backend = "paged");
+            } else {
+                // ── Llama path: contiguous KV cache ──
+                let num_layers = self.model.num_layers();
+                let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
+                let head_dim = self.model.head_dim().unwrap_or(64);
+                let initial_capacity = (prompt_tokens.len() + max_tokens).min(max_seq_len);
+
+                let kv_dtype = self.config.kv_cache_dtype()?;
+
+                let mut kv_cache = LayeredKvCache::new_positional(
+                    num_layers, 1, num_kv_heads, initial_capacity, max_seq_len,
+                    head_dim, kv_dtype, &self.device,
+                ).map_err(|e| anyhow!("Failed to create KV cache: {}", e))?;
+                let fresh_cache = crate::engine::tensor_parallel::KvCacheSpec {
+                    initial_capacity,
+                    max_seq_len,
+                    dtype: kv_dtype,
+                };
+                // A tensor-parallel group runs one sequence at a time.
+                let _tp_guard = self.tp_generation_guard().await;
+
+                tracing::info!(phase = "prefill_start", backend = "contiguous", prompt_tokens = prompt_tokens.len());
+                let t0 = std::time::Instant::now();
+                let mut logits = self.forward_contiguous(&input, &mut kv_cache, 0, Some(fresh_cache))?;
+                tracing::info!("Prefill: {:?} (seq_len={}, kv={})", t0.elapsed(), prompt_tokens.len(), kv_cache.seq_len());
+                tracing::info!(phase = "prefill_end", backend = "contiguous");
+                tracing::info!(phase = "decode_start", backend = "contiguous", max_tokens = max_tokens);
+                for i in 0..max_tokens {
+                    let t1 = std::time::Instant::now();
+
+                    let cur_logits = &logits;
+                    let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(cur_logits, &token_history, gen_config, &mut mirostat, device_grammar.as_ref())?;
+                    let event = token_gpu.record_event()
+                        .map_err(|e| anyhow!("Record event failed: {}", e))?;
+
+                    let next_input = token_gpu.reshape(&[1, 1])?;
+                    let position = kv_cache.seq_len();
+                    let next_logits = self.forward_contiguous(&next_input, &mut kv_cache, position, None)?;
+                    let fwd_time = t1.elapsed();
+
+                    let t2 = std::time::Instant::now();
+                    let next_token = miro_id.map_or_else(
+                        || Self::read_token_id(&token_gpu, event),
+                        Ok,
+                    )?;
+                    token_history.push(next_token);
+                    self.advance_grammar_state(&mut grammar_dfa, &mut device_grammar, next_token);
+                    tracing::trace!("Token {}: id={} fwd_launch={:?} sync={:?} total={:?}", i+1, next_token, fwd_time, t2.elapsed(), t1.elapsed());
+
+                    let finish = self.decode_finish_reason(next_token, i, max_tokens);
+
+                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                    if finish == Some(FinishReason::Eos) { break; }
+                    logits = next_logits;
+                }
+                tracing::info!(phase = "decode_end", backend = "contiguous");
+            }
+
+            tracing::debug!("Generation loop complete");
+        }
+    }
+}

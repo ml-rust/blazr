@@ -6,59 +6,25 @@
 //! `distributed` and `server`. The narration commands need `audio`. Every
 //! other command needs only the engine and the hub client.
 
-mod args;
-mod bench;
-mod chat;
-mod commands;
-mod convert;
+mod catalog;
+#[cfg(all(feature = "distributed", feature = "server"))]
+mod cluster;
+mod cmdline;
 mod decision;
-mod decision_args;
-#[cfg(all(feature = "distributed", feature = "server"))]
-mod disaggregated;
-#[cfg(all(feature = "distributed", feature = "server"))]
-mod disaggregated_forward;
-mod info;
-mod list;
-mod load_settings;
+mod local;
 #[cfg(feature = "audio")]
 mod narration;
 #[cfg(feature = "server")]
-mod ps;
-mod pull;
-mod run;
-mod run_load;
-mod run_repl;
-#[cfg(feature = "server")]
-mod serve;
-#[cfg(feature = "server")]
-mod serve_batching;
-#[cfg(feature = "server")]
-mod serve_replicas;
-#[cfg(all(feature = "distributed", feature = "server"))]
-mod swarm;
-#[cfg(all(feature = "distributed", feature = "server"))]
-mod swarm_forward;
+mod serving;
 mod util;
 
-pub use args::{DtypeArgs, LoraArgs, RuntimeArgs, SamplingArgs, VisionArgs};
-pub use bench::bench;
-pub use chat::chat;
-pub use commands::{Cli, Commands};
-pub use convert::convert;
-pub use decision::{decision, CalibrateArgs, DecisionCommand};
-pub use decision_args::DecisionArgs;
+pub use catalog::*;
 #[cfg(all(feature = "distributed", feature = "server"))]
-pub use disaggregated::{run_disagg_decode_worker, run_disagg_prefill_worker, run_disagg_router};
-pub use info::info;
-pub use list::list;
-pub use load_settings::{build_gpu_index, LoadSettings, RunSettings};
+pub use cluster::*;
+pub use cmdline::*;
+pub use decision::{decision, CalibrateArgs, DecisionCommand};
+pub use local::*;
 #[cfg(feature = "audio")]
 pub use narration::{sound_review, speak, transcribe, SoundReviewArgs, SpeakArgs, TranscribeArgs};
 #[cfg(feature = "server")]
-pub use ps::ps;
-pub use pull::pull;
-pub use run::run;
-#[cfg(feature = "server")]
-pub use serve::serve;
-#[cfg(all(feature = "distributed", feature = "server"))]
-pub use swarm::swarm;
+pub use serving::*;

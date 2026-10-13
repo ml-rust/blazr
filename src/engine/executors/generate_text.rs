@@ -1,0 +1,241 @@
+//! Non-streaming text generation with JSON retry support.
+
+use anyhow::{anyhow, Result};
+use futures::StreamExt;
+
+use boostr::model::ModelClient;
+use boostr::ops::TensorOps;
+use boostr::quant::{DequantOps, QuantMatmulOps};
+use boostr::{
+    ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, RoPEPackedOps, Runtime,
+    SamplingOps, ScalarOps, TypeConversionOps, UnaryOps,
+};
+
+use crate::config::GenerationConfig;
+use crate::tokenizer::TokenTextStream;
+
+use super::executor::Executor;
+use super::types::{is_valid_json, FinishReason, GeneratedToken, GenerationResult};
+
+impl<R: Runtime<DType = DType>> Executor<R>
+where
+    R::Client: TensorOps<R>
+        + ScalarOps<R>
+        + ConvOps<R>
+        + NormalizationOps<R>
+        + UnaryOps<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + TypeConversionOps<R>
+        + SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
+        + ModelClient<R>
+        + RoPEPackedOps<R>
+        + DequantOps<R>
+        + QuantMatmulOps<R>,
+{
+    /// Generate text from already-encoded prompt ids and return the complete
+    /// result with metadata.
+    ///
+    /// The ids come from the handler's validated encode; this path never
+    /// re-tokenizes.
+    pub async fn generate_text(
+        &self,
+        prompt_tokens: &[u32],
+        gen_config: &GenerationConfig,
+    ) -> Result<GenerationResult> {
+        // Use speculative decoding if configured
+        if self.config().inference.speculative.is_some() {
+            return self
+                .generate_text_speculative(prompt_tokens, gen_config)
+                .await;
+        }
+
+        let max_attempts = if gen_config.json_mode { 3 } else { 1 };
+        for attempt in 0..max_attempts {
+            let result = self.generate_text_once(prompt_tokens, gen_config).await?;
+            if !gen_config.json_mode || is_valid_json(&result.text) {
+                return Ok(result);
+            }
+            tracing::warn!(
+                "JSON mode: attempt {}/{} produced invalid JSON, retrying",
+                attempt + 1,
+                max_attempts
+            );
+        }
+        self.generate_text_once(prompt_tokens, gen_config).await
+    }
+
+    /// Speculative decoding path: uses draft model for fast speculation, target for verification.
+    async fn generate_text_speculative(
+        &self,
+        prompt_tokens: &[u32],
+        gen_config: &GenerationConfig,
+    ) -> Result<GenerationResult> {
+        let spec_config = self
+            .config()
+            .inference
+            .speculative
+            .as_ref()
+            .ok_or_else(|| anyhow!("speculative config missing"))?;
+
+        let prompt_len = prompt_tokens.len();
+        let prefill_start = std::time::Instant::now();
+
+        // Load separate draft model (smaller, faster model for speculation)
+        let draft_model_arc = self.get_or_load_draft_model()?;
+        let draft = crate::engine::speculative::BlazrSpeculativeModel::new(
+            draft_model_arc,
+            self.device().clone(),
+            self.config().dtype(),
+            &spec_config.draft_model,
+        )?;
+
+        // Target model is the main (larger) model
+        let target = crate::engine::speculative::BlazrSpeculativeModel::new(
+            std::sync::Arc::clone(self.model_arc()),
+            self.device().clone(),
+            self.config().dtype(),
+            "target",
+        )?;
+
+        let boostr_config = boostr::inference::speculative::SpeculativeConfig {
+            num_speculative_tokens: spec_config.num_speculative_tokens,
+            adaptive_depth: spec_config.adaptive_depth,
+            seed: gen_config.seed,
+            ..Default::default()
+        };
+
+        let mut executor =
+            boostr::inference::speculative::SpeculativeExecutor::new(draft, target, boostr_config);
+
+        let generated_ids = executor
+            .generate(prompt_tokens, gen_config.max_tokens)
+            .map_err(|e| anyhow!("speculative generation failed: {}", e))?;
+
+        let prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
+
+        // Text ends at the first EOS. The prompt primes the decoder, so the
+        // first generated token keeps its leading space, as when streaming.
+        let eos_pos = generated_ids
+            .iter()
+            .position(|&t| self.tokenizer().is_eos(t));
+        let kept = &generated_ids[..eos_pos.unwrap_or(generated_ids.len())];
+        let mut stream = TokenTextStream::new(self.tokenizer(), prompt_tokens);
+        let mut final_text: String = kept
+            .iter()
+            .map(|&id| stream.push(self.tokenizer(), id))
+            .collect();
+        final_text.push_str(&stream.finish());
+        let finish_reason = if eos_pos.is_some() {
+            FinishReason::Eos
+        } else {
+            FinishReason::Length
+        };
+
+        let stats = executor.stats;
+        tracing::info!(
+            speculative_iterations = stats.iterations,
+            speculative_accepted = stats.accepted_tokens,
+            speculative_rejected = stats.rejected_tokens,
+            "speculative decoding complete"
+        );
+
+        Ok(GenerationResult {
+            text: final_text,
+            prompt_tokens: prompt_len,
+            completion_tokens: generated_ids.len(),
+            finish_reason,
+            prompt_eval_duration_ms,
+            token_logprobs: None,
+        })
+    }
+
+    /// Single generation attempt (used by generate_text for JSON retry)
+    async fn generate_text_once(
+        &self,
+        prompt_tokens: &[u32],
+        gen_config: &GenerationConfig,
+    ) -> Result<GenerationResult> {
+        let stream = self.generate(prompt_tokens, gen_config);
+        collect_generation(stream, prompt_tokens.len(), gen_config).await
+    }
+}
+
+/// Drain a token stream into one `GenerationResult`: stop sequences cut the
+/// text and finish with `Stop`, logprobs are kept when asked for, and the
+/// prompt eval time is the time to the first token.
+pub(in crate::engine) async fn collect_generation<S>(
+    stream: S,
+    prompt_token_count: usize,
+    gen_config: &GenerationConfig,
+) -> Result<GenerationResult>
+where
+    S: futures::Stream<Item = Result<GeneratedToken>>,
+{
+    let mut result = String::new();
+    let mut completion_tokens = 0usize;
+    let mut finish_reason = FinishReason::Length;
+    let mut stream = std::pin::pin!(stream);
+    let prefill_start = std::time::Instant::now();
+    let mut prompt_eval_duration_ms = 0u64;
+    let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
+    let mut last_token = prefill_start;
+
+    while let Some(token_result) = stream.next().await {
+        let token = token_result?;
+        completion_tokens += 1;
+
+        // The first token closes the prompt eval. Each later one is an ITL
+        // sample for the metrics and the SLO checks.
+        let now = std::time::Instant::now();
+        if completion_tokens == 1 {
+            prompt_eval_duration_ms = now.duration_since(prefill_start).as_millis() as u64;
+        } else {
+            crate::telemetry::record::record_itl(now.duration_since(last_token).as_secs_f64());
+        }
+        last_token = now;
+
+        result.push_str(&token.text);
+
+        if let Some(reason) = token.finish_reason {
+            finish_reason = reason;
+        }
+
+        if gen_config.logprobs {
+            token_logprobs.push(token);
+        }
+
+        // Check stop sequences
+        for stop in &gen_config.stop_sequences {
+            if result.ends_with(stop) {
+                result.truncate(result.len() - stop.len());
+                return Ok(GenerationResult {
+                    text: result,
+                    prompt_tokens: prompt_token_count,
+                    completion_tokens,
+                    finish_reason: FinishReason::Stop,
+                    prompt_eval_duration_ms,
+                    token_logprobs: if gen_config.logprobs {
+                        Some(token_logprobs)
+                    } else {
+                        None
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(GenerationResult {
+        text: result,
+        prompt_tokens: prompt_token_count,
+        completion_tokens,
+        finish_reason,
+        prompt_eval_duration_ms,
+        token_logprobs: if gen_config.logprobs {
+            Some(token_logprobs)
+        } else {
+            None
+        },
+    })
+}

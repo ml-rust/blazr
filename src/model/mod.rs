@@ -4,6 +4,7 @@
 
 pub mod chat_template;
 mod config;
+pub mod decision_template;
 pub mod detect;
 
 pub use chat_template::{ChatMessage, ChatTemplate};

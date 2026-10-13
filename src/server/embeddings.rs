@@ -16,8 +16,26 @@ use serde::{Deserialize, Serialize};
 use super::encoding::encode_f32_base64;
 use super::generation::{error_response, policy_error_response};
 use super::handlers::AppState;
+use super::handlers::ServerRuntime;
 use super::multimodal::{decode_image, ContentPart};
 use crate::engine::pooling::{l2_normalize, pool_cls, pool_last, pool_mean};
+use crate::engine::Executor;
+
+/// The last hidden states of `ids`, computed on a blocking thread so the
+/// forward pass never holds an async worker.
+///
+/// # Errors
+///
+/// The forward pass's error, or the blocking task's when it panicked.
+pub(crate) async fn hidden_states(
+    executor: &Arc<Executor<ServerRuntime>>,
+    ids: Vec<u32>,
+) -> anyhow::Result<Vec<f32>> {
+    let executor = Arc::clone(executor);
+    tokio::task::spawn_blocking(move || executor.get_embeddings(&ids))
+        .await
+        .map_err(|e| anyhow::anyhow!("the embedding task stopped: {e}"))?
+}
 
 /// Embedding request (OpenAI-compatible)
 #[derive(Deserialize)]
@@ -204,7 +222,7 @@ pub async fn embeddings(
                 let num_tokens = token_ids.len();
                 total_prompt_tokens += num_tokens;
 
-                let hidden = match executor.get_embeddings(&token_ids).await {
+                let hidden = match hidden_states(&executor, token_ids).await {
                     Ok(h) => h,
                     Err(e) => {
                         return error_response(

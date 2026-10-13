@@ -3,7 +3,7 @@
 use std::ffi::c_char;
 
 use super::error::{guard, BlazrStatus, FfiError};
-use super::handle::{self, with_executor, BlazrModel, EngineClient, ModelInner};
+use super::handle::{self, with_executor, BlazrModel, EngineClient};
 use super::string::{into_c_array, read_str, write_out};
 use crate::engine::pooling::{l2_normalize, pool_mean};
 use crate::engine::Executor;
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn blazr_embed(
         let inner = handle::lookup(model)?;
         // SAFETY: forwarded from the caller.
         let text = unsafe { read_str(text, "text") }?;
-        let vector = with_executor!(&inner.executor, executor => embed(executor, &inner, text))?;
+        let vector = with_executor!(&inner.executor, executor => embed(executor, text))?;
         let (ptr, len) = into_c_array(vector);
         // SAFETY: both pointers checked non-null above.
         unsafe {
@@ -47,7 +47,7 @@ pub unsafe extern "C" fn blazr_embed(
     })
 }
 
-fn embed<R>(executor: &Executor<R>, inner: &ModelInner, text: &str) -> Result<Vec<f32>, FfiError>
+fn embed<R>(executor: &Executor<R>, text: &str) -> Result<Vec<f32>, FfiError>
 where
     R: Runtime<DType = DType>,
     R::Client: EngineClient<R>,
@@ -63,9 +63,8 @@ where
             "text encodes to no tokens. Pass a non-empty text",
         ));
     }
-    let hidden = inner
-        .runtime
-        .block_on(executor.get_embeddings(&ids))
+    let hidden = executor
+        .get_embeddings(&ids)
         .map_err(|e| FfiError::new(BlazrStatus::Unsupported, format!("{e:#}")))?;
     if hidden.is_empty() || hidden.len() % ids.len() != 0 {
         return Err(FfiError::new(

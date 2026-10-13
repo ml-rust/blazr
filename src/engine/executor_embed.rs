@@ -36,7 +36,10 @@ where
     /// is the hidden state after the full transformer stack + final norm (before
     /// `lm_head`). The caller is responsible for pooling (mean, cls, last, none) and
     /// optional L2 normalization.
-    pub async fn get_embeddings(&self, token_ids: &[u32]) -> Result<Vec<f32>> {
+    ///
+    /// The forward pass runs on the calling thread until it returns. An
+    /// async caller runs it on a blocking thread, never inside a task.
+    pub fn get_embeddings(&self, token_ids: &[u32]) -> Result<Vec<f32>> {
         let device = &self.device;
 
         let ids_i64: Vec<i64> = token_ids.iter().map(|&t| t as i64).collect();

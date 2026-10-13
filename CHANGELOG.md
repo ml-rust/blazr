@@ -21,6 +21,7 @@ preview on crates.io that shares no code with it.
 
 - `POST /v1/lora` reads adapters through boostr's `PeftAdapter`. A load now fails when `adapter_config.json` is missing or lacks `r` or `lora_alpha`. It also fails on an unpaired `lora_A`/`lora_B`, a rank mismatch, `.bin` weights, DoRA, `fan_in_fan_out`, `lora_bias` and `modules_to_save`. `use_rslora`, `rank_pattern` and `alpha_pattern` now set each module's scaling.
 
+- `Executor::get_embeddings` is a plain function. `/v1/embeddings` and `/rerank` run it on a blocking thread, never inside an async task.
 ### Removed
 
 - `engine::load_lora_adapter` and `engine::LoraAdapter`. `LoraAdapterRegistry` holds `boostr::format::PeftAdapter`, and `insert` takes the adapter name.

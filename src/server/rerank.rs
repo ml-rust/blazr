@@ -12,6 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::embeddings::hidden_states;
 use super::generation::{error_response, policy_error_response};
 use super::handlers::AppState;
 use crate::engine::pooling::pool_mean;
@@ -115,7 +116,7 @@ pub async fn rerank(
         Err(e) => return policy_error_response(&e),
     };
 
-    let query_embedding = match executor.get_embeddings(&query_tokens).await {
+    let query_embedding = match hidden_states(&executor, query_tokens.clone()).await {
         Ok(emb) => emb,
         Err(e) => {
             return error_response(
@@ -147,7 +148,7 @@ pub async fn rerank(
         let doc_len = doc_tokens.len();
         total_tokens += doc_len;
 
-        let doc_embedding = match executor.get_embeddings(&doc_tokens).await {
+        let doc_embedding = match hidden_states(&executor, doc_tokens).await {
             Ok(emb) => emb,
             Err(e) => {
                 return error_response(

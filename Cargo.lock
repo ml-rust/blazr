@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "blazr"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -471,9 +471,9 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eafaff2bca75a347840d81daf0cbe763797bcc6c0826802850950092b70f1a26"
+checksum = "e9fd7357da5018800038abaaa115c3f579b66998a5cdc349ab8e578ea6a77726"
 dependencies = [
  "anyhow",
  "blake3",
@@ -485,6 +485,7 @@ dependencies = [
  "nexar",
  "numr",
  "rayon",
+ "regexr",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -2571,9 +2572,9 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc3c3feb23f915b8d53975776f8ce11bba15262640d481742dda2dbf2887fe6f"
+checksum = "ae7051738770b875a102b10275d9c96b7866cd2a741298707fba15a957ab27ca"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -4922,9 +4923,9 @@ dependencies = [
 
 [[package]]
 name = "voxr"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b6dbc537fbf965939bff37412a23cf3f6cb2c19dce85fdde256a14b6b5c3c9e"
+checksum = "d1b3e426318b5a4077678c794fbe78c0d3d2c7b8e7bee1c33b861f96d379f4fe"
 dependencies = [
  "biquad",
  "boostr",
@@ -4947,9 +4948,9 @@ dependencies = [
 
 [[package]]
 name = "voxr-narrate"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "967ecb34834e640fc5a4237e1631d821ccc9f1405461aaa44e3f5343f106609e"
+checksum = "4bae244880f6c0110093eb02155327de970031c3b68bb5b7139d17d02eb7838d"
 dependencies = [
  "biquad",
  "boostr",

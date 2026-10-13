@@ -10,7 +10,9 @@ preview on crates.io that shares no code with it.
 
 ---
 
-## [Unreleased]
+## [0.4.0] - 2026-10-14
+
+Serves System One decision models at `POST /v1/systemone`, with the Kev and Clef families, LoRA variants and a prefix-state cache.
 
 ### Added
 
@@ -29,6 +31,7 @@ preview on crates.io that shares no code with it.
 
 - **Decision prefix-state cache** — each decision model's worker keeps the model's state after a request's state prefix on the device. A later `/v1/systemone` request about the same state reads it back and runs only its questions. The key is the loaded weights (each LoRA or Kev variant has its own), the family and the prefix ids. With the cache on, a request's prefix ends at the family's state boundary, for one question too. Kept states count against `lane_budget_mb`: before a run the worker drops the least recently used states so that they, the run's state and its largest pass fit. A model that unloads drops its states. Clef keeps none, since its head reads the whole record. Size: `inference.decision.prefix_cache_mb` and `--decision-prefix-cache-mb`, default 2048 MiB, `0` off. Responses fill `usage.cached_tokens` and the new `usage.cached_input_tokens` with the prefix tokens a hit saved. Kev's `usage` is unchanged. `/v1/models` adds `decision.prefix_cache`. New metrics: `blazr_decision_prefix_cache_{hits,misses,evictions}_total` and `blazr_decision_prefix_cache_bytes`.
 - **`tests/decision_prefix_cache_real_file.rs`** — the route with the cache on: each fixture twice, then the same state with other questions twice. The first send matches the reference, and each hit matches the first send to one rounding unit. It skips unless `BLAZR_DECISION_MODEL_DIR` and `BLAZR_DECISION_FIXTURE_DIR` are set.
+- **`docs/decision-models.md`** — the System One guide: the families, how to run each, calibration, the prefix-state cache, limits and the tested matrix. The README, API reference and configuration reference link to it.
 
 ### Changed
 
@@ -36,6 +39,12 @@ preview on crates.io that shares no code with it.
 - `RenderedDecision` gains `state_end`, the row position where the state ends, and `RenderedDecision::new`.
 - `Executor::get_embeddings` is a plain function. `/v1/embeddings` and `/rerank` run it on a blocking thread, never inside an async task.
 - `POST /v1/lora` reads adapters through boostr's `PeftAdapter`. A load now fails when `adapter_config.json` is missing or lacks `r` or `lora_alpha`. It also fails on an unpaired `lora_A`/`lora_B`, a rank mismatch, `.bin` weights, DoRA, `fan_in_fan_out`, `lora_bias` and `modules_to_save`. `use_rslora`, `rank_pattern` and `alpha_pattern` now set each module's scaling.
+- **Model lookup errors** — an unknown model or LoRA adapter returns `404` `model_not_found`. A load that fails returns `500` `model_load_failed`. A load the device cannot hold returns `503` `model_load_out_of_memory`. Before, a failed load returned `404`.
+- **Model loads** — base-model and LoRA-variant loads run on a blocking thread. A load gate makes concurrent requests for one model wait for a single load.
+- **Load path** — the server, `run`, `chat` and `bench` share one set of load steps. `run`, `chat` and `bench` report a failed CUDA client as `Failed to create CUDA client for preload: ...`. The text was `Failed to create CUDA client: ...`.
+- **Chat template file** — a model directory's `chat_template.jinja` is read before `tokenizer_config.json`. `bos_token` and `eos_token` come from the model's config. `tojson` honours `separators`, and floats render as Python's `repr`.
+- **Dependencies** — boostr 0.9, voxr 0.7, and voxr-narrate 0.7.
+- **Tests** — `.config/nextest.toml` runs `arch_reference` and `batch_decode_per_row` in a `heavy-model` group of two threads.
 
 ### Removed
 
@@ -43,6 +52,7 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
+- **Command stack on Windows** — the binary runs its command on a thread with a 16 MiB stack. The command's frames overflowed the 1 MiB main-thread stack of a Windows process, and `sound-review` and `speak` crashed at start. Linux and macOS have 8 MiB and did not crash.
 - **Sharded SafeTensors directories** — a directory with `model.safetensors.index.json` loads only the shards the index names (boostr's `SafeTensorsLoader`). Every `.safetensors` file of the directory loaded before, so a head or adapter file beside the shards was read as part of the model.
 - **`lora_adapter` on generation requests** — it now runs the request on the adapter's variant. It was logged and ignored before: the request generated with the base weights, and an unknown name fell back to the base.
 - **Qwen3.5 SafeTensors configs** — a `qwen3_5` (nested `text_config`) or `qwen3_5_text` `config.json` goes to boostr's `qwen35_config_from_hf` before any other parse. It fell through to tensor-name detection or a partial parse before.
@@ -51,6 +61,7 @@ preview on crates.io that shares no code with it.
 - **Qwen3.5 edit precision** — `1 + w` and `-exp(A_log)` round once, to the compute dtype. Each 1-D tensor waits in F32 when the compute dtype cannot hold its file value. A BF16 model rounded these edits twice before, and the F32 `A_log` was rounded to BF16 first.
 - **Sharded checkpoints named by an index** — a directory with `model.safetensors.index.json` is SafeTensors whatever its shard names, such as `model.safetensors-00001-of-00002.safetensors`. It failed with `No supported model files found` before.
 - **Offloading load** — `load_safetensors_with_offloading` calls `restructure_hf_checkpoint`, as the other SafeTensors paths do. It takes the layer count from the config and the layer prefix from the tensor names. Non-Llama layouts failed to load through it before.
+- **Qwen3.5 GGUF configs** — the GGUF config builder passes the open GGUF file to boostr's `qwen35_config_from_gguf`. It passed a bare metadata map before. Qwen3.5 GGUF models, decision models included, load through this path.
 
 ---
 

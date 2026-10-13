@@ -1,6 +1,6 @@
 [package]
 name = "blazr"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.95"
 authors = ["Farhan Syah"]
@@ -103,12 +103,12 @@ required-features = ["cli", "server"]
 
 [dependencies]
 # ML framework (model architectures, quant kernels, tensors via numr)
-boostr = { version = "0.8" }
+boostr = { version = "0.9" }
 # Sample-level audio: codecs, resampling, WAV encoding, TTS engines.
-voxr = { version = "0.6", optional = true }
+voxr = { version = "0.7", optional = true }
 # Narration: `speak` and `transcribe`, the take loop, the speech check and
 # every line, file and exit code they hold.
-voxr-narrate = { version = "0.6", optional = true }
+voxr-narrate = { version = "0.7", optional = true }
 
 # Tokenization
 splintr = { version = "0.22", features = [

@@ -8,18 +8,18 @@ use boostr::format::SafeTensorsLoader;
 use boostr::model::{LoadedModel, UniversalConfig};
 use boostr::ops::TensorOps;
 use boostr::VarBuilder;
-use boostr::VarMap;
 use boostr::{DType, Runtime};
 
 use crate::config::{BlazrConfig, DtypeRequest};
 
+use super::checkpoint_map::{load_checkpoint_map, TensorLoadReport};
 use super::config::{checkpoint_compute_dtype, config_from_detected, load_or_create_config};
 use super::detect_arch::{detect_architecture_from_loader, detect_awq, detect_gptq};
 
 /// Load a regular (non-AWQ) SafeTensors model.
 ///
 /// `request` is the user's compute dtype, see `config::compute_dtype`.
-/// Every float weight is cast to the resolved dtype.
+/// Every float weight takes the resolved dtype.
 pub fn load_safetensors_regular<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
@@ -28,30 +28,38 @@ pub fn load_safetensors_regular<R: Runtime<DType = DType>, P: AsRef<Path>>(
 where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
-    let path = path.as_ref();
+    let (model, config, _) = load_safetensors_with_report(path, device, request)?;
+    Ok((model, config))
+}
 
-    // Determine config directory
-    let config_dir = if path.is_file() {
-        path.parent()
-    } else {
-        Some(path)
-    };
+/// [`load_safetensors_regular`], plus what the load read from the files.
+///
+/// The report is `None` for a GPTQ or AWQ checkpoint, which loads through
+/// its own reader.
+pub fn load_safetensors_with_report<R: Runtime<DType = DType>, P: AsRef<Path>>(
+    path: P,
+    device: &R::Device,
+    request: Option<&DtypeRequest>,
+) -> Result<(LoadedModel<R>, BlazrConfig, Option<TensorLoadReport>)>
+where
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
+{
+    let path = path.as_ref();
+    let config_dir = config_dir_of(path);
 
     // Use boostr's unified SafeTensorsLoader
     let mut loader =
         SafeTensorsLoader::open(path).map_err(|e| anyhow!("Failed to open SafeTensors: {}", e))?;
 
-    // Check if this is a GPTQ model
     if detect_gptq(&loader, config_dir) {
-        return super::gptq::load_safetensors_gptq(path, device, request);
+        let (model, config) = super::gptq::load_safetensors_gptq(path, device, request)?;
+        return Ok((model, config, None));
     }
-
-    // Check if this is an AWQ model
     if detect_awq(&loader, config_dir) {
-        return super::awq::load_safetensors_awq(path, device, request);
+        let (model, config) = super::awq::load_safetensors_awq(path, device, request)?;
+        return Ok((model, config, None));
     }
 
-    // Log loading info
     if loader.is_sharded() {
         tracing::info!(
             "Loading sharded model with {} shards, total size: {:.2} GB",
@@ -68,66 +76,18 @@ where
     // Resolve the compute dtype before any weight loads. Tensor names are
     // read only when no config.json describes the model.
     let dtype = checkpoint_compute_dtype::<R>(config_dir, request);
-    let config = match config_dir {
-        Some(dir) => {
-            load_or_create_config(dir, || detect_architecture_from_loader(&loader), dtype)?
-        }
-        None => config_from_detected(&detect_architecture_from_loader(&loader)?, dtype)?,
-    };
+    let config = resolve_config(&loader, config_dir, dtype)?;
 
-    // Load all tensors into a VarMap, every float weight at `dtype`, then
-    // put a non-Llama checkpoint into the Llama tensor layout.
-    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
-    boostr::format::restructure_hf_checkpoint(&mut var_map, &config.model, device)
-        .map_err(|e| anyhow!("{e}"))?;
+    let (mut var_map, report) =
+        load_checkpoint_map::<R>(&mut loader, &config.model, device, dtype)?;
 
-    // VarMap only needs to live through model loading — LoadedModel::load takes
-    // tensors out via take_tensor, so VarMap is empty after load and can be dropped.
+    // LoadedModel::load takes every tensor out of the map, so the map is
+    // empty afterwards.
     let mut vb = VarBuilder::new(&mut var_map, device);
-
-    // Load model using boostr's LoadedModel
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {}", e))?;
 
-    Ok((model, config))
-}
-
-/// Load all tensors from a SafeTensorsLoader into a VarMap.
-///
-/// Every F32, F16 and BF16 tensor is cast to `dtype`, the compute dtype.
-/// Integer tensors keep their dtype.
-pub fn load_tensors_from_loader<R: Runtime<DType = DType>>(
-    loader: &mut SafeTensorsLoader,
-    device: &R::Device,
-    dtype: DType,
-) -> Result<VarMap<R>>
-where
-    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
-{
-    let mut var_map = VarMap::<R>::new();
-    let client = R::default_client(device);
-
-    let tensor_names = loader.tensor_names();
-    let total = tensor_names.len();
-
-    tracing::info!("Loading {} tensors to device...", total);
-
-    for (idx, name) in tensor_names.into_iter().enumerate() {
-        if idx % 50 == 0 {
-            tracing::debug!("Loading tensor {}/{}: {}", idx + 1, total, name);
-        }
-
-        let tensor = loader
-            .load_tensor::<R>(&name, device)
-            .map_err(|e| anyhow!("Failed to load tensor '{}': {}", name, e))?;
-        let tensor = cast_float(&client, tensor, dtype)
-            .map_err(|e| anyhow!("tensor '{name}' did not cast to {dtype:?}: {e}"))?;
-        var_map.insert(name, tensor);
-    }
-
-    tracing::info!("Loaded {} tensors successfully", var_map.len());
-
-    Ok(var_map)
+    Ok((model, config, Some(report)))
 }
 
 /// Load a tensor-parallel model from SafeTensors.
@@ -142,22 +102,13 @@ where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
     let path = path.as_ref();
-    let config_dir = if path.is_file() {
-        path.parent()
-    } else {
-        Some(path)
-    };
+    let config_dir = config_dir_of(path);
 
     let mut loader =
         SafeTensorsLoader::open(path).map_err(|e| anyhow!("Failed to open SafeTensors: {}", e))?;
 
     let dtype = checkpoint_compute_dtype::<R>(config_dir, request);
-    let config = match config_dir {
-        Some(dir) => {
-            load_or_create_config(dir, || detect_architecture_from_loader(&loader), dtype)?
-        }
-        None => config_from_detected(&detect_architecture_from_loader(&loader)?, dtype)?,
-    };
+    let config = resolve_config(&loader, config_dir, dtype)?;
 
     // Check the head split before any weight loads.
     if let Some(attention) = &config.model.attention {
@@ -175,9 +126,7 @@ where
         comm.world_size()
     );
 
-    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
-    boostr::format::restructure_hf_checkpoint(&mut var_map, &config.model, device)
-        .map_err(|e| anyhow!("{e}"))?;
+    let (mut var_map, _) = load_checkpoint_map::<R>(&mut loader, &config.model, device, dtype)?;
     let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model = LoadedModel::load_tp(&config.model, &mut vb, comm)
@@ -208,15 +157,8 @@ where
         );
     }
 
-    let config_dir = if path.is_file() {
-        path.parent()
-    } else {
-        Some(path)
-    };
-    let dtype = checkpoint_compute_dtype::<R>(config_dir, None);
-    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
-    boostr::format::restructure_hf_checkpoint(&mut var_map, config, device)
-        .map_err(|e| anyhow!("{e}"))?;
+    let dtype = checkpoint_compute_dtype::<R>(config_dir_of(path), None);
+    let (mut var_map, _) = load_checkpoint_map::<R>(&mut loader, config, device, dtype)?;
     let mut vb = VarBuilder::new(&mut var_map, device);
 
     let model =
@@ -225,57 +167,25 @@ where
     Ok(model)
 }
 
-/// `tensor` at `dtype` when it holds F32, F16 or BF16. Any other tensor
-/// passes unchanged.
-pub(super) fn cast_float<R: Runtime<DType = DType>>(
-    client: &R::Client,
-    tensor: boostr::Tensor<R>,
-    dtype: DType,
-) -> Result<boostr::Tensor<R>>
-where
-    R::Client: TensorOps<R>,
-{
-    let float = matches!(tensor.dtype(), DType::F32 | DType::F16 | DType::BF16);
-    if !float || tensor.dtype() == dtype {
-        return Ok(tensor);
+/// The directory that holds `path`'s `config.json`: `path` itself, or the
+/// parent of a file.
+pub(super) fn config_dir_of(path: &Path) -> Option<&Path> {
+    if path.is_file() {
+        path.parent()
+    } else {
+        Some(path)
     }
-    boostr::TypeConversionOps::cast(client, &tensor, dtype).map_err(|e| anyhow!("{e}"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use boostr::{CpuDevice, CpuRuntime, Tensor};
-
-    #[cfg(feature = "f16")]
-    #[test]
-    fn float_weights_take_the_compute_dtype() {
-        let device = CpuDevice::new();
-        let client = CpuRuntime::default_client(&device);
-        let values = [1.5f32, -2.25, 0.125, 3.0];
-        let bf16: Vec<half::bf16> = values.iter().map(|&v| half::bf16::from_f32(v)).collect();
-        let weight = Tensor::<CpuRuntime>::from_slice(&bf16, &[2, 2], &device).unwrap();
-        let up = cast_float(&client, weight, DType::F32).unwrap();
-        assert_eq!(up.dtype(), DType::F32);
-        assert_eq!(up.to_vec::<f32>(), values);
-
-        let f32_weight = Tensor::<CpuRuntime>::from_slice(&values, &[4], &device).unwrap();
-        assert_eq!(
-            cast_float(&client, f32_weight, DType::BF16)
-                .unwrap()
-                .dtype(),
-            DType::BF16
-        );
-    }
-
-    #[test]
-    fn integer_tensors_keep_their_dtype() {
-        let device = CpuDevice::new();
-        let client = CpuRuntime::default_client(&device);
-        let ids = Tensor::<CpuRuntime>::from_slice(&[1i32, 2, 3], &[3], &device).unwrap();
-        assert_eq!(
-            cast_float(&client, ids, DType::F32).unwrap().dtype(),
-            DType::I32
-        );
+/// The config of the checkpoint `loader` reads, from `config.json` in
+/// `config_dir` when present, else from its tensor names.
+pub(super) fn resolve_config(
+    loader: &SafeTensorsLoader,
+    config_dir: Option<&Path>,
+    dtype: DType,
+) -> Result<BlazrConfig> {
+    match config_dir {
+        Some(dir) => load_or_create_config(dir, || detect_architecture_from_loader(loader), dtype),
+        None => config_from_detected(&detect_architecture_from_loader(loader)?, dtype),
     }
 }

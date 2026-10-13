@@ -21,15 +21,15 @@ use boostr::{DType, Runtime};
 
 #[cfg(feature = "cuda")]
 use crate::config::{BlazrConfig, DtypeRequest};
-#[cfg(feature = "cuda")]
-use crate::model::detect::DetectedConfig;
 
 #[cfg(feature = "cuda")]
-use super::config::{checkpoint_compute_dtype, config_from_detected, load_or_create_config};
+use super::config::checkpoint_compute_dtype;
 #[cfg(feature = "cuda")]
-use super::detect_arch::{detect_architecture_from_loader, detect_awq, detect_gptq};
+use super::detect_arch::{detect_awq, detect_gptq};
 #[cfg(feature = "cuda")]
-use super::regular::cast_float;
+use super::regular::{config_dir_of, resolve_config};
+#[cfg(feature = "cuda")]
+use super::tensors::TensorPolicy;
 
 /// VRAM reserved for KV cache and working memory (2GB default)
 const DEFAULT_KV_CACHE_RESERVE: u64 = 2 * 1024 * 1024 * 1024;
@@ -71,8 +71,9 @@ impl OffloadingOptions {
     }
 }
 
-/// Information about layer offloading
-#[derive(Debug, Clone)]
+/// Information about layer offloading. The default, all zero, describes a
+/// load that placed no layers.
+#[derive(Debug, Clone, Default)]
 pub struct OffloadingInfo {
     /// Number of layers on GPU
     pub gpu_layers: usize,
@@ -100,11 +101,7 @@ where
 
     let path = path.as_ref();
 
-    let config_dir = if path.is_file() {
-        path.parent()
-    } else {
-        Some(path)
-    };
+    let config_dir = config_dir_of(path);
 
     let mut loader =
         SafeTensorsLoader::open(path).map_err(|e| anyhow!("Failed to open SafeTensors: {}", e))?;
@@ -112,42 +109,37 @@ where
     // Check if this is a GPTQ model — delegate to GPTQ loader
     if detect_gptq(&loader, config_dir) {
         let (model, config) = super::gptq::load_safetensors_gptq(path, gpu_device, request)?;
-        let info = OffloadingInfo {
-            gpu_layers: 0,
-            cpu_layers: 0,
-            gpu_bytes: 0,
-            cpu_bytes: 0,
-            total_layers: 0,
-        };
-        return Ok((model, config, info));
+        return Ok((model, config, OffloadingInfo::default()));
     }
 
     // Check if this is an AWQ model — delegate to AWQ loader which handles
     // qweight/qzeros/scales triplets and DecomposedQuantTensor construction
     if detect_awq(&loader, config_dir) {
         let (model, config) = super::awq::load_safetensors_awq(path, gpu_device, request)?;
-        let info = OffloadingInfo {
-            gpu_layers: 0,
-            cpu_layers: 0,
-            gpu_bytes: 0,
-            cpu_bytes: 0,
-            total_layers: 0,
-        };
-        return Ok((model, config, info));
+        return Ok((model, config, OffloadingInfo::default()));
     }
 
-    let model_bytes = loader.total_size();
-    let detected = detect_architecture_from_loader(&loader)?;
-    let total_layers = detected.num_layers;
-
-    // Resolve the compute dtype before any weight loads.
+    // Resolve the compute dtype before any weight loads. Tensor names are
+    // read only when no config.json describes the model.
     let compute = checkpoint_compute_dtype::<R>(config_dir, request);
-    let config = if let Some(dir) = config_dir {
-        load_or_create_config(dir, || Ok(detected.clone()), compute)?
-    } else {
-        config_from_detected(&detected, compute)?
-    };
+    let config = resolve_config(&loader, config_dir, compute)?;
+    let total_layers = config.model.num_layers;
+    let policy = TensorPolicy::new(&config.model, compute);
     let client = R::default_client(gpu_device);
+
+    // Tensors the model never reads stay on disk and out of the budget.
+    let tensor_names: Vec<String> = loader
+        .tensor_names()
+        .into_iter()
+        .filter(|name| policy.reads(name))
+        .collect();
+    let mut model_bytes = 0u64;
+    for name in &tensor_names {
+        let info = loader
+            .tensor_info(name)
+            .map_err(|e| anyhow!("Failed to get tensor info for '{}': {}", name, e))?;
+        model_bytes += info.size_bytes() as u64;
+    }
 
     let vram_limit = options
         .vram_limit
@@ -167,7 +159,7 @@ where
     });
 
     let device_map = LayerDeviceMap::with_gpu_layers(total_layers, gpu_layers);
-    let layer_prefix = detect_layer_prefix(&detected);
+    let layer_prefix = layer_prefix(&tensor_names);
 
     let model_gb = model_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let vram_gb = vram_limit as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -198,7 +190,6 @@ where
     let mut var_map = VarMap::<R>::new();
     let cpu_dev = CpuDevice::new();
 
-    let tensor_names = loader.tensor_names();
     let mut gpu_direct_count = 0;
     let mut cpu_staged_count = 0;
     let mut gpu_bytes = 0u64;
@@ -208,7 +199,7 @@ where
     let mut secondary_tensors = Vec::new();
 
     for name in tensor_names {
-        let layer_idx = extract_layer_index(&name, &layer_prefix);
+        let layer_idx = extract_layer_index(&name, layer_prefix);
         let placement = match layer_idx {
             Some(idx) => device_map.placement(idx),
             None => DevicePlacement::Gpu,
@@ -241,8 +232,9 @@ where
         let tensor = loader
             .load_tensor::<R>(name, gpu_device)
             .map_err(|e| anyhow!("Failed to load tensor '{}' to GPU: {}", name, e))?;
-        let tensor = cast_float(&client, tensor, compute)
-            .map_err(|e| anyhow!("tensor '{name}' did not cast to {compute:?}: {e}"))?;
+        let tensor = policy
+            .admit(&client, tensor)
+            .map_err(|e| anyhow!("tensor '{name}' did not cast: {e}"))?;
         var_map.insert(name.clone(), tensor);
         gpu_direct_count += 1;
         gpu_bytes += tensor_bytes;
@@ -284,8 +276,9 @@ where
                     .map_err(|e| anyhow!("Failed to transfer tensor '{}' to GPU: {}", name, e))?;
 
             drop(cpu_tensor);
-            let gpu_tensor = cast_float(&client, gpu_tensor, compute)
-                .map_err(|e| anyhow!("tensor '{name}' did not cast to {compute:?}: {e}"))?;
+            let gpu_tensor = policy
+                .admit(&client, gpu_tensor)
+                .map_err(|e| anyhow!("tensor '{name}' did not cast: {e}"))?;
 
             var_map.insert(name.clone(), gpu_tensor);
             cpu_staged_count += 1;
@@ -302,6 +295,8 @@ where
         staged_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
     );
 
+    // Put a non-Llama checkpoint into the layout its model reads.
+    policy.finish(&mut var_map, &config.model, gpu_device)?;
     let mut vb = VarBuilder::new(&mut var_map, gpu_device);
 
     let model = LoadedModel::load(&config.model, &mut vb)
@@ -381,10 +376,13 @@ fn extract_layer_index(tensor_name: &str, layer_prefix: &str) -> Option<usize> {
     index_str.parse::<usize>().ok()
 }
 
+/// The name prefix of the checkpoint's numbered layers: Qwen3.5's
+/// `model.language_model.layers.`, the Hugging Face `model.layers.`, or
+/// oxidizr's `layers.`.
 #[cfg(feature = "cuda")]
-fn detect_layer_prefix(detected: &DetectedConfig) -> String {
-    match detected.format {
-        crate::model::detect::ModelFormat::HuggingFace => "model.layers.".to_string(),
-        crate::model::detect::ModelFormat::Oxidizr => "layers.".to_string(),
-    }
+fn layer_prefix(names: &[String]) -> &'static str {
+    ["model.language_model.layers.", "model.layers.", "layers."]
+        .into_iter()
+        .find(|prefix| names.iter().any(|name| name.starts_with(prefix)))
+        .unwrap_or("model.layers.")
 }

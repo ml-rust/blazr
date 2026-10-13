@@ -10,28 +10,15 @@ use boostr::model::{
 
 use boostr::{DType, Runtime};
 
-use crate::config::{
-    compute_dtype, dtype_name, torch_dtype, BlazrConfig, DtypeRequest, InferenceConfig,
-};
+use crate::config::{compute_dtype, dtype_name, BlazrConfig, DtypeRequest, InferenceConfig};
 use crate::model::detect::DetectedConfig;
 
-/// The dtype a model's `config.json` names in `torch_dtype`. `None` when
-/// the file, the key or a known value is missing.
-pub fn model_torch_dtype(dir: &Path) -> Option<DType> {
-    let content = std::fs::read_to_string(dir.join("config.json")).ok()?;
-    torch_dtype_of(&content)
-}
-
-/// The `torch_dtype` that the text of a `config.json` names.
-pub fn torch_dtype_of(config_json: &str) -> Option<DType> {
-    let json = serde_json::from_str::<serde_json::Value>(config_json).ok()?;
-    json.get("torch_dtype")
-        .and_then(|v| v.as_str())
-        .and_then(torch_dtype)
-}
+use super::config_dtype::model_torch_dtype;
+use super::hf_qwen35::qwen35_config_of;
 
 /// The compute dtype of a regular SafeTensors checkpoint in `dir` on
-/// runtime `R`: `request`, then `torch_dtype`, then the backend default.
+/// runtime `R`: `request`, then the dtype `config.json` names (see
+/// `config_dtype::torch_dtype_of`), then the backend default.
 pub fn checkpoint_compute_dtype<R: Runtime<DType = DType>>(
     dir: Option<&Path>,
     request: Option<&DtypeRequest>,
@@ -66,7 +53,8 @@ pub fn load_or_create_config(
 }
 
 /// [`load_or_create_config`] over the text of a `config.json`. The text is
-/// a blazr config, a boostr `UniversalConfig`, or a Hugging Face config.
+/// a Hugging Face Qwen3.5 config, a blazr config, a boostr
+/// `UniversalConfig`, or another Hugging Face config, tried in that order.
 /// `None`, or text that is none of them, falls back to `detect`.
 ///
 /// # Errors
@@ -80,6 +68,9 @@ pub fn config_from_text(
 ) -> Result<BlazrConfig> {
     let dtype = dtype_name(dtype)?;
     if let Some(content) = config_json {
+        if let Some(model) = qwen35_config_of(content) {
+            return Ok(BlazrConfig::from_universal_with_dtype(model?, dtype));
+        }
         if let Ok(mut config) = serde_json::from_str::<BlazrConfig>(content) {
             config.inference.dtype = dtype.to_string();
             return Ok(config);

@@ -11,9 +11,10 @@ use splintr::AnyTokenizer;
 use crate::config::{compute_dtype, BlazrConfig, DtypeRequest};
 use crate::tokenizer::{apply_bos_files, from_vocab_size, CheckpointTokenizerFiles};
 
-use super::config::{config_from_text, torch_dtype_of};
+use super::checkpoint_map::load_checkpoint_map;
+use super::config::config_from_text;
+use super::config_dtype::torch_dtype_of;
 use super::detect_arch::{detect_architecture_from_loader, detect_awq, detect_gptq};
-use super::regular::load_tensors_from_loader;
 
 /// One SafeTensors checkpoint held in memory.
 #[derive(Debug, Clone, Default)]
@@ -41,8 +42,8 @@ fn parse_json(text: Option<&str>, name: &str) -> Result<Option<serde_json::Value
 /// Load a regular SafeTensors checkpoint from memory.
 ///
 /// The tokenizer is `tokenizer_json` when set, else the bundled vocabulary
-/// the config's `vocab_size` matches. The JSON files set its BOS rule. GPTQ and AWQ checkpoints are
-/// refused.
+/// the config's `vocab_size` matches. The JSON files set its BOS rule. GPTQ
+/// and AWQ checkpoints are refused.
 ///
 /// # Errors
 ///
@@ -83,9 +84,7 @@ where
         dtype,
     )?;
 
-    let mut var_map = load_tensors_from_loader::<R>(&mut loader, device, dtype)?;
-    boostr::format::restructure_hf_checkpoint(&mut var_map, &config.model, device)
-        .map_err(|e| anyhow!("{e}"))?;
+    let (mut var_map, _) = load_checkpoint_map::<R>(&mut loader, &config.model, device, dtype)?;
     let mut vb = VarBuilder::new(&mut var_map, device);
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {e}"))?;

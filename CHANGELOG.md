@@ -12,6 +12,11 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### Added
+
+- **`loader::load_safetensors_with_report`** — the regular SafeTensors load, plus a `TensorLoadReport`: the tensors uploaded, the tensors left on disk, and the compute dtype. `loader::model_torch_dtype` gives the dtype a model's `config.json` names.
+- **`tests/decision_loader_real_file.rs`** — a Qwen3.5 decision model (Jebadiah, the Mapika decider) through blazr's loader, then `LabelTokenHead` against reference fixtures, from SafeTensors or GGUF, on CPU or CUDA. It skips unless `BLAZR_DECISION_MODEL_DIR` or `BLAZR_DECISION_GGUF`, and `BLAZR_DECISION_FIXTURE_DIR`, are set.
+
 ### Changed
 
 - `POST /v1/lora` reads adapters through boostr's `PeftAdapter`. A load now fails when `adapter_config.json` is missing or lacks `r` or `lora_alpha`. It also fails on an unpaired `lora_A`/`lora_B`, a rank mismatch, `.bin` weights, DoRA, `fan_in_fan_out`, `lora_bias` and `modules_to_save`. `use_rslora`, `rank_pattern` and `alpha_pattern` now set each module's scaling.
@@ -19,6 +24,15 @@ preview on crates.io that shares no code with it.
 ### Removed
 
 - `engine::load_lora_adapter` and `engine::LoraAdapter`. `LoraAdapterRegistry` holds `boostr::format::PeftAdapter`, and `insert` takes the adapter name.
+
+### Fixed
+
+- **Qwen3.5 SafeTensors configs** — a `qwen3_5` (nested `text_config`) or `qwen3_5_text` `config.json` goes to boostr's `qwen35_config_from_hf` before any other parse. It fell through to tensor-name detection or a partial parse before.
+- **Config dtype** — the compute dtype reads `torch_dtype`, then `dtype`, then both under `text_config`. Only the top-level `torch_dtype` was read before, so transformers v5 and `Qwen3_5ForConditionalGeneration` configs fell back to the backend default.
+- **Qwen3.5 MTP and vision tensors** — they stay on disk in every SafeTensors path. They were uploaded to the device and then dropped before.
+- **Qwen3.5 edit precision** — `1 + w` and `-exp(A_log)` round once, to the compute dtype. Each 1-D tensor waits in F32 when the compute dtype cannot hold its file value. A BF16 model rounded these edits twice before, and the F32 `A_log` was rounded to BF16 first.
+- **Sharded checkpoints named by an index** — a directory with `model.safetensors.index.json` is SafeTensors whatever its shard names, such as `model.safetensors-00001-of-00002.safetensors`. It failed with `No supported model files found` before.
+- **Offloading load** — `load_safetensors_with_offloading` calls `restructure_hf_checkpoint`, as the other SafeTensors paths do. It takes the layer count from the config and the layer prefix from the tensor names. Non-Llama layouts failed to load through it before.
 
 ---
 

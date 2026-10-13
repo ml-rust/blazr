@@ -37,7 +37,8 @@ pub use gguf_info::{get_gguf_info, GgufInfo};
 pub use gguf_template::{chat_template_from_metadata, gguf_chat_template};
 pub use safetensors::{
     load_safetensors, load_safetensors_bytes, load_safetensors_with_offloading,
-    model_config_inference, OffloadingInfo, OffloadingOptions, SafeTensorsBytes,
+    load_safetensors_with_report, model_config_inference, model_torch_dtype, OffloadingInfo,
+    OffloadingOptions, SafeTensorsBytes, TensorLoadReport,
 };
 #[cfg(feature = "audio")]
 pub use tts::{

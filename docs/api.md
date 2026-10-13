@@ -812,7 +812,7 @@ Each answer has the shape the family's own server returns.
 | `noul`   | `noul`: P(true)                                                                           | `noul`: P(true)                                         |
 | `score`  | `score`, `confidence` (level distance), `x_p_max`, `certainty`, `legend`, `probabilities` | `score`, `confidence` (chance-corrected), `legend`, `probabilities` |
 
-An isolated decider Score answer adds `level_fit` and `fit_mass`. The response also carries `model`, `usage` (`input_tokens` with the shared prefix counted once, `output_tokens` 0, `cached_tokens`), `latency_ms`, `calibration` (`applied`, `temperatures`, `source`), and `warnings`.
+An isolated decider Score answer adds `level_fit` and `fit_mass`. The response also carries `model`, `usage` (`input_tokens` with the shared prefix counted once, `output_tokens` 0, and `cached_tokens` and `cached_input_tokens`, the prompt tokens a kept prefix state saved), `latency_ms`, `calibration` (`applied`, `temperatures`, `source`), and `warnings`.
 
 | Status | `code`                 | When                                                             |
 | ------ | ---------------------- | ---------------------------------------------------------------- |
@@ -825,6 +825,21 @@ An isolated decider Score answer adds `level_fit` and `fit_mass`. The response a
 | `500`  | `internal_error`       | The model did not load, its sidecars did not read, or the run failed |
 
 The family comes from `--decision-family`, then a sidecar (`decider_config.json`: decider; `prompt_contract.json` or `jebadiah.json`: Jebadiah) in the model directory or beside the `.gguf`, then a GGUF `general.basename` of `decider` or `jebadiah` tagged `system-one` or `decision-model`. A `.gguf` with no sidecar takes one from `--decision-config`. Without it, answers are uncalibrated and `warnings` says so. A Kev directory is always Kev: see [Kev models](#kev-models). A checkpoint with `joint_head_config.json` and `joint_head.safetensors` beside its weights is Clef: see [Clef models](#clef-models).
+
+#### Prefix-state cache
+
+Requests about one state often differ only in their questions. Each decision model's worker keeps, on the device, the model's state after a request's state prefix. A later request about the same state reads it back and runs only its questions.
+
+- Key: the loaded weights, the family, and the prefix token ids. A LoRA or Kev variant runs its own weights, so variants never share a state. A hit needs the same ids up to the state's end: the same state, and the same request fields that shape the state block, such as decider `max_state_tokens`.
+- Prefix: with the cache on, a request whose state takes at least `shared_min_tokens` tokens plans its prefix at the family's state boundary, a one-question request included. Such a request runs alone and never merges. Decider: the chat head and the `Context:` block. Jebadiah: the chat head and the user message up to `QUESTION:`. Kev: the state delimiter and the state.
+- Clef keeps no state: its head reads every row of the record.
+- Size: `inference.decision.prefix_cache_mb` (`--decision-prefix-cache-mb`), `2048` MiB per model by default. `0` turns the cache off, and requests plan as they did before it.
+- Memory: kept states count against `inference.decision.lane_budget_mb`. Before a run, the worker drops the least recently used states until the kept states, the run's own state and its largest pass fit the budget. It never drops the state the run reads. A full cache drops its least recently used state first.
+- Unload: when the model unloads (eviction, keep-alive, unload), its worker drops every state within one second.
+- Answers: a hit gives the answers of a miss, since both runs read the same state.
+- Cancel: a prefix that fails, or whose request is cancelled before it runs, keeps nothing. A prefix that ran is kept even when its request is cancelled later, so a retry finds it.
+- Usage: `cached_tokens` and `cached_input_tokens` count the prefix tokens a hit saved. Both are 0 on a miss and with the cache off. Kev responses carry Kev's own `usage` fields only.
+- Reports: `GET /v1/models` adds `decision.prefix_cache` while the worker runs (see [GET /v1/models](#get-v1models)). Metrics, by `model`: `blazr_decision_prefix_cache_hits_total`, `blazr_decision_prefix_cache_misses_total`, `blazr_decision_prefix_cache_evictions_total`, and the gauge `blazr_decision_prefix_cache_bytes`.
 
 #### Kev models
 
@@ -905,14 +920,14 @@ Answers follow `systemone_answer`, every value rounded to 4 digits:
                 "legend": {"0": "not urgent at all", "1": "low", "2": "medium", "3": "high", "4": "critical, act now"},
                 "probabilities": {"0": 0.0134, "1": 0.0123, "2": 0.0392, "3": 0.7762, "4": 0.1589}}
   },
-  "usage": {"input_tokens": 495, "output_tokens": 0, "cached_tokens": 0},
+  "usage": {"input_tokens": 495, "output_tokens": 0, "cached_tokens": 0, "cached_input_tokens": 0},
   "latency_ms": "<milliseconds>",
   "calibration": {"applied": false, "temperatures": null, "source": null},
   "warnings": []
 }
 ```
 
-`usage.input_tokens` is the record's length. `latency_ms`, `calibration`, `warnings` and `usage.cached_tokens` are blazr's fields. blazr reads Clef requests as text only: a request with `images` or `videos` is a `422`.
+`usage.input_tokens` is the record's length. `latency_ms`, `calibration`, `warnings`, `usage.cached_tokens` and `usage.cached_input_tokens` are blazr's fields. The last two are always 0 for Clef. blazr reads Clef requests as text only: a request with `images` or `videos` is a `422`.
 
 #### Fitted temperatures
 
@@ -948,7 +963,7 @@ A type with fewer than `--min-rows` answers is not fitted. Score pools listed an
 
 ### GET /v1/models
 
-Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A Kev model is listed once, with its `lora` object once it loaded. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family` (`jebadiah`, `decider`, `kev` or `clef`), `readout` (`label_token`, `pointer` or `joint_schema`), `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider, Kev) and `max_prompt_tokens` (Jebadiah; Kev's row limit; Clef's record limit, `16384`), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. Kev adds `base_path`, `adapter_rank` and `temperature`. Clef adds `head_width`, `head_hidden_size` and `head_dtype` (`f32`). When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
+Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A Kev model is listed once, with its `lora` object once it loaded. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family` (`jebadiah`, `decider`, `kev` or `clef`), `readout` (`label_token`, `pointer` or `joint_schema`), `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider, Kev) and `max_prompt_tokens` (Jebadiah; Kev's row limit; Clef's record limit, `16384`), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. Kev adds `base_path`, `adapter_rank` and `temperature`. Clef adds `head_width`, `head_hidden_size` and `head_dtype` (`f32`). While the model's decision worker runs, `prefix_cache` reports its [prefix-state cache](#prefix-state-cache): `enabled`, `capacity_mb`, `bytes`, `entries`, `hits`, `misses` and `evictions`. When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
 
 ```bash
 curl http://localhost:8080/v1/models

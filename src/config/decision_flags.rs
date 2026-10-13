@@ -12,6 +12,7 @@ pub struct DecisionFlags {
     pub config: Option<PathBuf>,
     pub shared_min_tokens: Option<usize>,
     pub lane_budget_mb: Option<usize>,
+    pub prefix_cache_mb: Option<usize>,
     pub max_rows: Option<usize>,
     pub max_row_tokens: Option<usize>,
     pub max_request_tokens: Option<usize>,
@@ -44,6 +45,7 @@ pub fn resolve_decision(
     cfg.config = flags.config.or(cfg.config);
     cfg.shared_min_tokens = flags.shared_min_tokens.unwrap_or(cfg.shared_min_tokens);
     cfg.lane_budget_mb = flags.lane_budget_mb.unwrap_or(cfg.lane_budget_mb);
+    cfg.prefix_cache_mb = flags.prefix_cache_mb.unwrap_or(cfg.prefix_cache_mb);
     cfg.max_rows = flags.max_rows.unwrap_or(cfg.max_rows);
     cfg.max_row_tokens = flags.max_row_tokens.or(cfg.max_row_tokens);
     cfg.max_request_tokens = flags.max_request_tokens.unwrap_or(cfg.max_request_tokens);
@@ -76,11 +78,13 @@ mod tests {
         let flags = DecisionFlags {
             family: Some(DecisionFamily::Decider),
             max_queue_rows: Some(9),
+            prefix_cache_mb: Some(0),
             allow_contract_mismatch: true,
             ..Default::default()
         };
         let cfg = resolve_decision(flags, &from_file, Some("m".into())).expect("resolves");
         assert_eq!(cfg.family, Some(DecisionFamily::Decider));
+        assert_eq!(cfg.prefix_cache_mb, 0, "the flag turns the cache off");
         assert_eq!(
             (cfg.max_rows, cfg.max_queue_rows, cfg.batch_wait_ms),
             (8, 9, 5)

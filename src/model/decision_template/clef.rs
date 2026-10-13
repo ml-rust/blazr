@@ -210,15 +210,7 @@ impl ClefRenderer {
         ids.extend_from_slice(&self.suffix);
         let last = ids.len().saturating_sub(1);
 
-        let mut out = RenderedDecision {
-            family: Family::Clef,
-            rows: Vec::new(),
-            scoring_rows: Vec::with_capacity(questions.len()),
-            questions: Vec::with_capacity(questions.len()),
-            warnings,
-            state_tokens,
-            joint: None,
-        };
+        let mut out = RenderedDecision::new(Family::Clef, warnings, state_tokens);
         let mut fields = Vec::with_capacity(questions.len());
         for (i, (q, (question, options))) in questions.into_iter().zip(spans).enumerate() {
             let options: Vec<Range<usize>> = options.iter().map(|o| shifted(o, offset)).collect();
@@ -352,6 +344,7 @@ mod tests {
         want.extend(&r.suffix);
         assert_eq!(out.rows, vec![want.clone()]);
         assert_eq!(out.state_tokens, state.len());
+        assert_eq!(out.state_end, 0, "the record shares no state prefix");
         assert!(out.warnings.is_empty());
 
         let layout = out.joint.as_ref().expect("a joint layout");

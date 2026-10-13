@@ -35,7 +35,7 @@ mod decision_route;
 
 use axum::http::StatusCode;
 use blazr::boostr::inference::decision::{answer_from_probs, AnswerOptions, DecisionResult};
-use blazr::engine::decision::{prepare, unique_tokens, DecisionService, Pending};
+use blazr::engine::decision::{prepare, unique_tokens, DecisionService, Pending, PrefixRule};
 use blazr::model::decision_template::{DecisionRenderer, JevRequest};
 use blazr::server::decision::answers_json;
 use blazr::server::handlers::ServerRuntime;
@@ -149,11 +149,9 @@ async fn route_checks(served: &Served, fixtures: &[Fixture], tol: Tolerance) {
         let got = answers_of(&body, &what);
         compare::answers(&fx.family, &got, &fx.reference_answers, tol, &what);
         assert_eq!(body["model"], json!(served.name), "{what}: model");
-        assert_eq!(
-            body["usage"],
-            json!({"input_tokens": unique_tokens(&fx.rows), "output_tokens": 0, "cached_tokens": 0}),
-            "{what}: usage"
-        );
+        let usage = json!({"input_tokens": unique_tokens(&fx.rows), "output_tokens": 0,
+            "cached_tokens": 0, "cached_input_tokens": 0});
+        assert_eq!(body["usage"], usage, "{what}: usage, the prefix cache off");
         assert_eq!(
             body["calibration"]["applied"],
             json!(true),
@@ -191,7 +189,11 @@ async fn route_checks(served: &Served, fixtures: &[Fixture], tol: Tolerance) {
         let what = format!("{} over its shared prefix", fx.label());
         let request = JevRequest::parse(&fx.request, service.family()).expect("parsed above");
         let rendered = service.renderer().render(&request).expect("rendered above");
-        let prepared = prepare(&rendered, service.temperature_policy(false), 1)
+        let rule = PrefixRule {
+            min_tokens: 1,
+            at_state: false,
+        };
+        let prepared = prepare(&rendered, service.temperature_policy(false), rule)
             .unwrap_or_else(|e| panic!("{what}: prepare: {e}"));
         if !prepared.has_prefix() {
             continue;

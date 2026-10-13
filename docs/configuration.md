@@ -250,7 +250,8 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `decision.family`                    | string   | detected            | `jebadiah`, `decider` or `clef` for the start model, else every model, over sidecar, head and GGUF detection.                |
 | `decision.config`                    | path     | unset               | Sidecar (`decider_config.json`, `prompt_contract.json`, `jebadiah.json`, or Clef's `joint_head_config.json` with `joint_head.safetensors` beside it) for a model that ships none. Same scope as `family`. |
 | `decision.shared_min_tokens`         | integer  | `768`               | Shortest shared prefix one request runs once. Shorter prefixes run as full rows merged with other requests.                  |
-| `decision.lane_budget_mb`            | integer  | `8192`              | Lane-state budget of one decision forward pass in MiB. `0` sets none.                                                        |
+| `decision.lane_budget_mb`            | integer  | `8192`              | Lane-state budget of one decision forward pass in MiB. `0` sets none. Kept prefix states count against it.                   |
+| `decision.prefix_cache_mb`           | integer  | `2048`              | Device memory in MiB for the prefix states each decision model's worker keeps across requests. `0` keeps none. See [Prefix-state cache](api.md#prefix-state-cache). |
 | `decision.max_rows`                  | integer  | `1024`              | Most prompt rows one request expands to. More answers `413`.                                                                 |
 | `decision.max_row_tokens`            | integer  | state cap + `4096`  | Most tokens in one row. More answers `413`. Kev's default is its own row limit, `73728`. Clef's is its record limit, `16384`. |
 | `decision.max_request_tokens`        | integer  | `1048576`           | Most tokens over all rows of one request. More answers `413`.                                                                |
@@ -393,6 +394,7 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 | `--decision-config <FILE>`            | `inference.decision.config` | Sidecar of a model that ships none, such as a bare `.gguf`, or a Clef head's `joint_head_config.json`                  |
 | `--decision-shared-min-tokens <N>`    | `inference.decision.shared_min_tokens`, else `768` | Shortest shared prefix one request runs once                                                    |
 | `--decision-lane-budget-mb <MIB>`     | `inference.decision.lane_budget_mb`, else `8192` | Lane-state budget of one decision forward pass                                                    |
+| `--decision-prefix-cache-mb <MIB>`    | `inference.decision.prefix_cache_mb`, else `2048` | Device memory for the prefix states each decision model keeps. `0` keeps none                    |
 | `--decision-max-rows <N>`             | `inference.decision.max_rows`, else `1024` | Most prompt rows per request                                                                             |
 | `--decision-max-row-tokens <N>`       | `inference.decision.max_row_tokens`, else state cap + `4096` | Most tokens per row                                                                    |
 | `--decision-max-request-tokens <N>`   | `inference.decision.max_request_tokens`, else `1048576` | Most tokens per request                                                                    |

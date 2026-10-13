@@ -122,6 +122,22 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
         names::DECISION_QUEUE_ROWS,
         "Decision rows queued or running, by model"
     );
+    metrics::describe_counter!(
+        names::DECISION_PREFIX_CACHE_HITS_TOTAL,
+        "Decision requests whose prefix state the worker kept, by model"
+    );
+    metrics::describe_counter!(
+        names::DECISION_PREFIX_CACHE_MISSES_TOTAL,
+        "Decision requests whose prefix the worker ran and offered to its cache, by model"
+    );
+    metrics::describe_counter!(
+        names::DECISION_PREFIX_CACHE_EVICTIONS_TOTAL,
+        "Prefix states the decision worker removed from its cache, by model"
+    );
+    metrics::describe_gauge!(
+        names::DECISION_PREFIX_CACHE_BYTES,
+        "Device bytes of the prefix states a decision worker keeps, by model"
+    );
 
     Ok(handle)
 }

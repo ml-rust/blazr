@@ -4,29 +4,38 @@
 //! alone over that prefix, and sends each request its answers. The model's
 //! readout head, label-token, pointer or joint-schema, scores every run. A
 //! joint-schema record is its plan's prefix, so it always runs alone.
+//!
+//! A request with a shared prefix reads its prefix state from the worker's
+//! prefix-state cache when an earlier request kept it, and keeps the state
+//! it runs. The worker drops every kept state once its model unloads.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use boostr::inference::decision::run::prefill_prefix;
 use boostr::inference::decision::{
-    merge_requests, split_result, CancelToken, DecisionPlan, DecisionRequest, DecisionResult,
-    PrefixState, RunnerConfig,
+    merge_requests, split_result, CancelToken, DecisionRequest, RunnerConfig,
 };
 use boostr::model::{LoadedModel, ModelClient, Qwen35Model};
 use boostr::{DType, Runtime};
 use tokio::sync::oneshot;
 
 use super::error::DecisionFailure;
+use super::prefix_cache::{publish, WorkerCache};
 use super::readout::{ReadoutHead, ReadoutItem};
+use super::service::Answered;
 use super::stats::DecisionStats;
+use crate::model::decision_template::Family;
 use crate::telemetry::decision::{record_decision, set_decision_queue_rows};
 
 /// Where a job's answers go.
-pub(super) type Reply = oneshot::Sender<Result<DecisionResult, DecisionFailure>>;
+pub(super) type Reply = oneshot::Sender<Result<Answered, DecisionFailure>>;
+
+/// How often an idle worker that keeps prefix states checks whether its
+/// model unloaded, to free them.
+const RELEASE_CHECK: Duration = Duration::from_secs(1);
 
 /// One queued request.
 pub(super) struct Job {
@@ -53,6 +62,10 @@ pub(super) struct WorkerSettings {
     pub max_lane_bytes: Option<usize>,
     /// How long to wait after a request for more to merge with it.
     pub batch_wait: Duration,
+    /// The byte bound of the prefix-state cache. 0 keeps no state.
+    pub prefix_cache_bytes: usize,
+    /// The family the model's prompts are rendered for.
+    pub family: Family,
 }
 
 /// What the worker shares with its service.
@@ -80,6 +93,7 @@ struct Worker<R: Runtime<DType = DType>> {
     head: ReadoutHead<R>,
     client: R::Client,
     shared: Arc<Shared>,
+    cache: WorkerCache<R>,
 }
 
 /// Start the worker thread of `model` on `device`, scoring with `head`.
@@ -111,12 +125,15 @@ where
         .spawn(move || {
             let _guard = guard;
             let client = R::default_client(&device);
+            let address = model.as_ptr() as *const () as usize;
+            let cache = WorkerCache::new(settings.prefix_cache_bytes, address, settings.family);
             Worker {
                 settings,
                 model,
                 head,
                 client,
                 shared,
+                cache,
             }
             .serve(rx);
         })
@@ -142,8 +159,28 @@ where
     R::Client: ModelClient<R>,
 {
     /// Take every waiting job, run them, repeat until the queue closes.
-    fn serve(self, rx: Receiver<Job>) {
-        while let Ok(first) = rx.recv() {
+    /// While it keeps prefix states, an idle worker checks every
+    /// [`RELEASE_CHECK`] whether its model unloaded.
+    fn serve(mut self, rx: Receiver<Job>) {
+        self.shared.stats.set_prefix_cache(&self.cache.stats());
+        loop {
+            let first = if self.cache.is_empty() {
+                match rx.recv() {
+                    Ok(job) => job,
+                    Err(_) => break,
+                }
+            } else {
+                match rx.recv_timeout(RELEASE_CHECK) {
+                    Ok(job) => job,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if self.model.strong_count() == 0 {
+                            self.drop_states();
+                        }
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            };
             let mut jobs = vec![first];
             let deadline = Instant::now() + self.settings.batch_wait;
             loop {
@@ -161,7 +198,15 @@ where
         }
     }
 
-    fn run_batch(&self, jobs: Vec<Job>) {
+    /// Drop every kept prefix state and publish it.
+    fn drop_states(&mut self) {
+        let before = self.cache.stats();
+        self.cache.release();
+        let name = &self.settings.name;
+        publish(name, &self.shared.stats, &before, &self.cache.stats());
+    }
+
+    fn run_batch(&mut self, jobs: Vec<Job>) {
         let mut live = Vec::with_capacity(jobs.len());
         for job in jobs {
             if job.abandoned() {
@@ -175,6 +220,7 @@ where
             return;
         }
         let Some(loaded) = self.model.upgrade() else {
+            self.drop_states();
             let msg = format!(
                 "model '{}' was unloaded; send the request again to load it",
                 self.settings.name
@@ -206,20 +252,24 @@ where
     /// A merged run that fails runs each request alone, so each gets its own
     /// outcome. The merged run reads no cancel flag: one caller leaving does
     /// not stop the others.
-    fn run_merged(&self, model: &Qwen35Model<R>, jobs: Vec<Job>) {
+    fn run_merged(&mut self, model: &Qwen35Model<R>, jobs: Vec<Job>) {
         if jobs.len() >= 2 {
             let requests = jobs.iter().map(|job| job.request.clone()).collect();
             let outcome = merge_requests(requests)
                 .map_err(run_failure)
                 .and_then(|merged| {
-                    let result = self.run(model, &merged.request, None)?;
-                    split_result(result, &merged.parts).map_err(run_failure)
+                    let answered = self.run(model, &merged.request, None)?;
+                    split_result(answered.result, &merged.parts).map_err(run_failure)
                 });
             match outcome {
                 Ok(results) if results.len() == jobs.len() => {
                     self.shared.stats.merged(jobs.len());
                     for (job, result) in jobs.into_iter().zip(results) {
-                        self.finish(job, Ok(result));
+                        let answered = Answered {
+                            result,
+                            cached_input_tokens: 0,
+                        };
+                        self.finish(job, Ok(answered));
                     }
                     return;
                 }
@@ -244,48 +294,47 @@ where
         }
     }
 
-    /// The prefix state a plan runs over. Every request prefills its own
-    /// prefix: this is where a cross-request prefix cache plugs in.
-    fn prefix_state(
-        &self,
-        model: &Qwen35Model<R>,
-        plan: &DecisionPlan,
-        cfg: &RunnerConfig,
-    ) -> Result<Option<PrefixState<R>>, DecisionFailure> {
-        if plan.prefix.is_empty() {
-            return Ok(None);
-        }
-        cfg.check_cancel(|| "before the prefix".into())
-            .map_err(run_failure)?;
-        prefill_prefix(&self.client, model, plan)
-            .map(Some)
-            .map_err(run_failure)
-    }
-
-    /// One run of `request`. A panic in the run fails the request and
-    /// leaves the worker serving.
+    /// One run of `request`, its prefix state from the cache when the
+    /// cache holds it. A panic in the run fails the request, drops every
+    /// kept state, and leaves the worker serving.
     fn run(
-        &self,
+        &mut self,
         model: &Qwen35Model<R>,
         request: &DecisionRequest<ReadoutItem>,
         cancel: Option<CancelToken>,
-    ) -> Result<DecisionResult, DecisionFailure> {
+    ) -> Result<Answered, DecisionFailure> {
         let cfg = RunnerConfig {
             max_lane_bytes: self.settings.max_lane_bytes,
             cancel,
             ..RunnerConfig::default()
         };
+        let before = self.cache.stats();
+        let plan = &request.plan;
         let attempt = catch_unwind(AssertUnwindSafe(|| {
-            let prefix = self.prefix_state(model, &request.plan, &cfg)?;
-            self.head
-                .run(&self.client, model, request, prefix.as_ref(), &cfg)
-                .map_err(run_failure)
+            let prefix = self
+                .cache
+                .prefix(&self.client, model, plan, &cfg)
+                .map_err(run_failure)?;
+            let state = prefix.as_ref().map(|p| &*p.state);
+            let result = self
+                .head
+                .run(&self.client, model, request, state, &cfg)
+                .map_err(run_failure)?;
+            let hit = prefix.as_ref().is_some_and(|p| p.hit);
+            Ok(Answered {
+                result,
+                cached_input_tokens: if hit { plan.prefix_len() } else { 0 },
+            })
         }));
-        attempt.unwrap_or_else(|_| {
+        let outcome = attempt.unwrap_or_else(|_| {
+            self.cache.release();
             Err(DecisionFailure::Internal(
                 "the decision run panicked; the request was not answered".into(),
             ))
-        })
+        });
+        let name = &self.settings.name;
+        publish(name, &self.shared.stats, &before, &self.cache.stats());
+        outcome
     }
 
     /// Release a job's rows from the queue count.
@@ -298,7 +347,7 @@ where
     }
 
     /// Release a job, record it, and send its outcome.
-    fn finish(&self, job: Job, result: Result<DecisionResult, DecisionFailure>) {
+    fn finish(&self, job: Job, result: Result<Answered, DecisionFailure>) {
         self.release(&job);
         let answered = result.is_ok();
         self.shared.stats.finished(answered);

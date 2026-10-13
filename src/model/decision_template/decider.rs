@@ -226,6 +226,7 @@ impl DeciderRenderer {
                 scoring_rows: span,
             });
         }
+        let head = self.chat.as_ref().map_or(0, |chat| chat.head.len());
         Ok(RenderedDecision {
             family: Family::Decider,
             rows,
@@ -233,6 +234,7 @@ impl DeciderRenderer {
             questions,
             warnings,
             state_tokens: ctx_ids.len(),
+            state_end: head + ctx_ids.len(),
             joint: None,
         })
     }
@@ -388,6 +390,10 @@ mod tests {
             .template("<|start_header_id|>user<|end_header_id|>\n\n")
             .expect("encodes");
         assert!(row.starts_with(&head), "{row:?}");
+        let chat = r.chat.as_ref().expect("the chat layout");
+        assert_eq!(out.state_end, chat.head.len() + out.state_tokens);
+        let question = enc.template("\n\nQuestion").expect("encodes");
+        assert!(row[out.state_end..].starts_with(&question), "{row:?}");
         let first = enc.template("Answer 1: (").expect("encodes");
         let second = enc.template("\nAnswer 2: (").expect("encodes");
         assert!(row.ends_with(&[first, second.clone()].concat()), "{row:?}");

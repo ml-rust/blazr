@@ -109,22 +109,25 @@ async fn decide(state: &AppState, body: &[u8], started: Instant) -> Result<Value
         .await
         .map_err(|e| DecisionFailure::Internal(format!("the prompt render stopped: {e}")))?
         .map_err(render_failure)?;
-    let answers = if rendered.questions.is_empty() {
-        Map::new()
+    let (answers, cached_input_tokens) = if rendered.questions.is_empty() {
+        (Map::new(), 0)
     } else {
         let prepared = service.prepare(&rendered, raw)?;
-        let result = service.submit(prepared)?.wait().await?;
-        match rendered.joint {
-            Some(_) => clef_answers(&rendered, &result),
-            None => answers_json(service.family(), &rendered.questions, &result),
+        let answered = service.submit(prepared)?.wait_answered().await?;
+        let result = &answered.result;
+        let answers = match rendered.joint {
+            Some(_) => clef_answers(&rendered, result),
+            None => answers_json(service.family(), &rendered.questions, result),
         }
-        .map_err(DecisionFailure::Internal)?
+        .map_err(DecisionFailure::Internal)?;
+        (answers, answered.cached_input_tokens)
     };
     let mut warnings = service.warnings().to_vec();
     warnings.extend(rendered.warnings.iter().cloned());
     let mut facts = ResponseFacts {
         model: &name,
         input_tokens: unique_tokens(&rendered.rows),
+        cached_input_tokens,
         latency_ms: started.elapsed().as_secs_f64() * 1000.0,
         calibration: service.calibration(),
         raw,

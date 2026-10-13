@@ -22,6 +22,19 @@ pub fn set_decision_queue_rows(model: &str, rows: usize) {
     metrics::gauge!(names::DECISION_QUEUE_ROWS, "model" => model.to_string()).set(rows as f64);
 }
 
+/// Record what a model's prefix-state cache did since the last record:
+/// `hits`, `misses` and `evictions` added, and the `bytes` it holds now.
+pub fn record_prefix_cache(model: &str, hits: u64, misses: u64, evictions: u64, bytes: usize) {
+    let model = model.to_string();
+    metrics::counter!(names::DECISION_PREFIX_CACHE_HITS_TOTAL, "model" => model.clone())
+        .increment(hits);
+    metrics::counter!(names::DECISION_PREFIX_CACHE_MISSES_TOTAL, "model" => model.clone())
+        .increment(misses);
+    metrics::counter!(names::DECISION_PREFIX_CACHE_EVICTIONS_TOTAL, "model" => model.clone())
+        .increment(evictions);
+    metrics::gauge!(names::DECISION_PREFIX_CACHE_BYTES, "model" => model).set(bytes as f64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +63,18 @@ mod tests {
         );
         let latency = format!("{}_count", names::DECISION_LATENCY);
         assert_eq!(value(latency.as_str(), &[("model", "d")]), Some(2.0));
+    }
+
+    #[test]
+    fn records_the_prefix_cache_by_model() {
+        let recorder = TestRecorder::install();
+        record_prefix_cache("d", 2, 1, 0, 300);
+        record_prefix_cache("d", 1, 0, 1, 100);
+        let value = |name: &str| recorder.value(name, &[("model", "d")]);
+        assert_eq!(value(names::DECISION_PREFIX_CACHE_HITS_TOTAL), Some(3.0));
+        assert_eq!(value(names::DECISION_PREFIX_CACHE_MISSES_TOTAL), Some(1.0));
+        let evictions = names::DECISION_PREFIX_CACHE_EVICTIONS_TOTAL;
+        assert_eq!(value(evictions), Some(1.0));
+        assert_eq!(value(names::DECISION_PREFIX_CACHE_BYTES), Some(100.0));
     }
 }

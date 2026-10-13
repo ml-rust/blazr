@@ -13,9 +13,9 @@ use tokio::sync::oneshot;
 
 use super::error::DecisionFailure;
 use super::limits::DecisionLimits;
-use super::prepare::{prepare, PreparedRequest};
+use super::prepare::{prepare, PrefixRule, PreparedRequest};
 use super::readout::ReadoutHead;
-use super::stats::{DecisionCounts, DecisionStats};
+use super::stats::{DecisionCounts, DecisionStats, PrefixCacheReport};
 use super::worker::{spawn, Job, Shared, WorkerSettings};
 use crate::config::DecisionConfig;
 use crate::loader::decision::{Calibration, DecisionInfo, LoadedRenderer};
@@ -27,17 +27,27 @@ pub struct DecisionService<R: Runtime<DType = DType>> {
     name: String,
     loaded: LoadedRenderer,
     limits: DecisionLimits,
-    shared_min_tokens: usize,
+    prefix: PrefixRule,
     max_queue_rows: usize,
     queue: Sender<Job>,
     shared: Arc<Shared>,
     model: Weak<LoadedModel<R>>,
 }
 
+/// A request's answers, and what its run read from the prefix-state cache.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Answered {
+    /// The answers.
+    pub result: DecisionResult,
+    /// Prompt tokens the run did not run because the worker kept their
+    /// prefix state: the prefix length on a cache hit, else 0.
+    pub cached_input_tokens: usize,
+}
+
 /// A queued request. Dropping it before its answer arrives cancels it: a
 /// queued request is skipped, a running one stops at its next pass.
 pub struct Pending {
-    rx: oneshot::Receiver<Result<DecisionResult, DecisionFailure>>,
+    rx: oneshot::Receiver<Result<Answered, DecisionFailure>>,
     cancel: CancelToken,
 }
 
@@ -48,7 +58,16 @@ impl Pending {
     ///
     /// The run's failure, or [`DecisionFailure::Unavailable`] when the
     /// worker stopped before answering.
-    pub async fn wait(mut self) -> Result<DecisionResult, DecisionFailure> {
+    pub async fn wait(self) -> Result<DecisionResult, DecisionFailure> {
+        self.wait_answered().await.map(|answered| answered.result)
+    }
+
+    /// The answers and the prompt tokens the prefix-state cache saved.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pending::wait`].
+    pub async fn wait_answered(mut self) -> Result<Answered, DecisionFailure> {
         match (&mut self.rx).await {
             Ok(result) => result,
             Err(_) => Err(DecisionFailure::Unavailable(
@@ -96,6 +115,8 @@ impl<R: Runtime<DType = DType>> DecisionService<R> {
             name: name.to_string(),
             max_lane_bytes: cfg.max_lane_bytes(),
             batch_wait: Duration::from_millis(cfg.batch_wait_ms),
+            prefix_cache_bytes: cfg.prefix_cache_mb.saturating_mul(1 << 20),
+            family: loaded.renderer.family(),
         };
         let head = ReadoutHead::load(
             loaded.pointer_head.as_deref(),
@@ -109,7 +130,10 @@ impl<R: Runtime<DType = DType>> DecisionService<R> {
             name: name.to_string(),
             limits: DecisionLimits::new(cfg, loaded.renderer.family()),
             loaded,
-            shared_min_tokens: cfg.shared_min_tokens,
+            prefix: PrefixRule {
+                min_tokens: cfg.shared_min_tokens,
+                at_state: cfg.prefix_cache_mb > 0,
+            },
             max_queue_rows: cfg.max_queue_rows,
             queue,
             shared,
@@ -157,6 +181,11 @@ impl<R: Runtime<DType = DType>> DecisionService<R> {
         self.shared.stats.snapshot()
     }
 
+    /// The worker's prefix-state cache, as `/v1/models` reports it.
+    pub fn prefix_cache(&self) -> PrefixCacheReport {
+        PrefixCacheReport::from(self.stats().prefix_cache)
+    }
+
     /// Whether the worker thread still runs.
     pub fn is_alive(&self) -> bool {
         self.shared.alive.load(Ordering::SeqCst)
@@ -187,11 +216,7 @@ impl<R: Runtime<DType = DType>> DecisionService<R> {
         raw: bool,
     ) -> Result<PreparedRequest, DecisionFailure> {
         self.limits.check(&rendered.rows)?;
-        prepare(
-            rendered,
-            self.temperature_policy(raw),
-            self.shared_min_tokens,
-        )
+        prepare(rendered, self.temperature_policy(raw), self.prefix)
     }
 
     /// Queue `prepared` on the worker.

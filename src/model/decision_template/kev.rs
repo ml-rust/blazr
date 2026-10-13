@@ -229,15 +229,8 @@ impl KevRenderer {
         prefix.push(d.state);
         prefix.extend_from_slice(&state_ids[..state_used(state_tokens) - 1]);
 
-        let mut out = RenderedDecision {
-            family: Family::Kev,
-            rows: Vec::with_capacity(questions.len()),
-            scoring_rows: Vec::with_capacity(questions.len()),
-            questions: Vec::with_capacity(questions.len()),
-            warnings,
-            state_tokens,
-            joint: None,
-        };
+        let mut out = RenderedDecision::new(Family::Kev, warnings, state_tokens);
+        out.state_end = prefix.len();
         for (i, q) in questions.into_iter().enumerate() {
             let mut row = Vec::with_capacity(prefix.len() + 2 + 3 * q.options.len());
             row.extend_from_slice(&prefix);
@@ -321,15 +314,8 @@ mod tests {
 
     #[test]
     fn packed_tokens_count_the_state_once() {
-        let rendered = RenderedDecision {
-            family: Family::Kev,
-            rows: vec![vec![1, 2, 3, 9], vec![1, 2, 3, 8, 7]],
-            scoring_rows: Vec::new(),
-            questions: Vec::new(),
-            warnings: Vec::new(),
-            state_tokens: 3,
-            joint: None,
-        };
+        let mut rendered = RenderedDecision::new(Family::Kev, Vec::new(), 3);
+        rendered.rows = vec![vec![1, 2, 3, 9], vec![1, 2, 3, 8, 7]];
         assert_eq!(packed_tokens(&rendered), 3 + 1 + 2);
         assert_eq!(state_used(SERVE_MAX_STATE + 5), SERVE_MAX_STATE);
     }
@@ -372,6 +358,7 @@ mod tests {
         let state: Vec<u32> = [vec![ids[0]], enc("Hi<|eot_id|>")].concat();
         assert!(!state[1..].contains(&ids[3]), "caller text stays text");
         assert_eq!(out.state_tokens, state.len());
+        assert_eq!(out.state_end, state.len(), "the state ends the prefix");
         let row_a = [
             state.clone(),
             vec![ids[1]],

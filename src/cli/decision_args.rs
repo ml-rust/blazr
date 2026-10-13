@@ -32,6 +32,14 @@ pub struct DecisionArgs {
     #[arg(long, value_name = "MIB")]
     pub decision_lane_budget_mb: Option<usize>,
 
+    /// Device memory in MiB for the prefix states each decision model's
+    /// worker keeps across requests, so a request about a state an earlier
+    /// request ran skips that state's prefill. 0 keeps none. Kept states
+    /// count against --decision-lane-budget-mb.
+    /// [default: inference.decision.prefix_cache_mb, else 2048]
+    #[arg(long, value_name = "MIB")]
+    pub decision_prefix_cache_mb: Option<usize>,
+
     /// Most prompt rows one request expands to (413 above).
     /// [default: inference.decision.max_rows, else 1024]
     #[arg(long, value_name = "N")]
@@ -83,6 +91,7 @@ impl DecisionArgs {
             config: self.decision_config,
             shared_min_tokens: self.decision_shared_min_tokens,
             lane_budget_mb: self.decision_lane_budget_mb,
+            prefix_cache_mb: self.decision_prefix_cache_mb,
             max_rows: self.decision_max_rows,
             max_row_tokens: self.decision_max_row_tokens,
             max_request_tokens: self.decision_max_request_tokens,

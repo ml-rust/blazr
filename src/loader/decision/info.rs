@@ -14,6 +14,7 @@ use super::family_files::{
 };
 use super::kev::{head_temperature, read_kev_adapter};
 use super::sidecar::{context_length, license_and_base, Calibration};
+use crate::engine::decision::PrefixCacheReport;
 use crate::model::decision_template::clef::MAX_LENGTH as CLEF_MAX_LENGTH;
 use crate::model::decision_template::decider::DEFAULT_MAX_STATE_TOKENS;
 use crate::model::decision_template::jebadiah::DEFAULT_MAX_TOKENS;
@@ -119,6 +120,10 @@ pub struct DecisionInfo {
     /// Clef: the dtype the joint-schema head computes in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_dtype: Option<&'static str>,
+    /// The prefix-state cache of the model's decision worker. Absent until
+    /// the worker runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_cache: Option<PrefixCacheReport>,
 }
 
 /// The `/v1/models` report of `source`.
@@ -165,6 +170,7 @@ pub fn decision_info_with_base(
         head_width: None,
         head_hidden_size: None,
         head_dtype: None,
+        prefix_cache: None,
     };
     match source.family {
         Family::Decider => {

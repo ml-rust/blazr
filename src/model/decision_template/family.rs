@@ -28,7 +28,7 @@ use super::kev::KevRenderer;
 use crate::model::chat_template::{ChatTemplate, JinjaTemplate, ModelTemplate};
 
 /// A model family whose prompt blazr renders.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
     /// Jebadiah: AINode's `/v1/systemone` prompt inside the model's chat
     /// template, one row per question, the answer slot the last token.
@@ -196,9 +196,40 @@ pub struct RenderedDecision {
     /// on its own. Kev: the state delimiter and the whole state, before
     /// any cut. Clef: the state encoded on its own, before any cut.
     pub state_tokens: usize,
+    /// The row position where the state ends: every row holds the same ids
+    /// before it, and they depend on the state and the model alone, never
+    /// on a question. A prefix cut here is the same for every request about
+    /// one state. Decider: the chat head and the `Context:` block. Jebadiah:
+    /// the ids every row shares with the chat head and the user message up
+    /// to `QUESTION:`. Kev: the state delimiter and the state. Clef: 0, its
+    /// head reads the whole record.
+    pub state_end: usize,
     /// Joint-schema readout: each field's spans in the one row, the whole
     /// record. `None` for the other readouts.
     pub joint: Option<JointLayout>,
+}
+
+impl RenderedDecision {
+    /// A rendering of `family` with no rows yet and no state boundary.
+    pub fn new(family: Family, warnings: Vec<String>, state_tokens: usize) -> Self {
+        Self {
+            family,
+            rows: Vec::new(),
+            scoring_rows: Vec::new(),
+            questions: Vec::new(),
+            warnings,
+            state_tokens,
+            state_end: 0,
+            joint: None,
+        }
+    }
+}
+
+/// The length of the longest prefix of `ids` that every row starts with.
+pub fn shared_len(ids: &[u32], rows: &[Vec<u32>]) -> usize {
+    rows.iter().fold(ids.len(), |n, row| {
+        ids[..n].iter().zip(row).take_while(|(a, b)| a == b).count()
+    })
 }
 
 /// A loaded renderer of any family.
@@ -297,6 +328,16 @@ pub(crate) fn load_template(dir: &Path) -> Result<JinjaTemplate, DecisionError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_len_stops_at_the_first_row_that_differs() {
+        let rows = vec![vec![1, 2, 3, 4], vec![1, 2, 3, 9, 9]];
+        assert_eq!(shared_len(&[1, 2, 3], &rows), 3);
+        assert_eq!(shared_len(&[1, 2, 7], &rows), 2);
+        assert_eq!(shared_len(&[1, 2, 3, 4, 5], &rows), 3);
+        assert_eq!(shared_len(&[1, 2], &[]), 2);
+        assert_eq!(shared_len(&[1, 2], &[vec![1]]), 1);
+    }
 
     #[test]
     fn detect_names_each_family_and_its_readout() {

@@ -13,6 +13,8 @@ use crate::model::decision_template::Family;
 pub const DEFAULT_SHARED_MIN_TOKENS: usize = 768;
 /// Lane-state budget of one forward pass, in MiB.
 pub const DEFAULT_LANE_BUDGET_MB: usize = 8192;
+/// Device bytes of the prefix states one model's worker keeps, in MiB.
+pub const DEFAULT_PREFIX_CACHE_MB: usize = 2048;
 /// Most prompt rows one request expands to.
 pub const DEFAULT_MAX_ROWS: usize = 1024;
 /// Tokens a row may hold past the family's state cap.
@@ -61,7 +63,11 @@ pub struct DecisionConfig {
     /// merged with other queued requests.
     pub shared_min_tokens: usize,
     /// Lane-state budget of one forward pass in MiB. 0 sets no budget.
+    /// Kept prefix states count against it.
     pub lane_budget_mb: usize,
+    /// Prefix states one model's worker keeps across requests, in MiB of
+    /// device memory. 0 keeps none.
+    pub prefix_cache_mb: usize,
     /// Most prompt rows one request expands to.
     pub max_rows: usize,
     /// Most tokens in one row. Unset: the family's state cap plus 4096.
@@ -92,6 +98,7 @@ impl Default for DecisionConfig {
             config: None,
             shared_min_tokens: DEFAULT_SHARED_MIN_TOKENS,
             lane_budget_mb: DEFAULT_LANE_BUDGET_MB,
+            prefix_cache_mb: DEFAULT_PREFIX_CACHE_MB,
             max_rows: DEFAULT_MAX_ROWS,
             max_row_tokens: None,
             max_request_tokens: DEFAULT_MAX_REQUEST_TOKENS,
@@ -171,6 +178,7 @@ mod tests {
             serde_json::from_str(r#"{"family": "decider", "max_rows": 0, "lane_budget_mb": 0}"#)
                 .expect("parses");
         assert_eq!(cfg.family, Some(DecisionFamily::Decider));
+        assert_eq!(cfg.prefix_cache_mb, DEFAULT_PREFIX_CACHE_MB);
         assert_eq!(cfg.max_lane_bytes(), None);
         let err = cfg.check().expect_err("refused");
         assert!(err.contains("inference.decision.max_rows"), "{err}");

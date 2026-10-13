@@ -29,3 +29,8 @@ pub const DECISION_ROWS_TOTAL: &str = "blazr_decision_rows_total";
 pub const DECISION_PREFILL_TOKENS_TOTAL: &str = "blazr_decision_prefill_tokens_total";
 pub const DECISION_LATENCY: &str = "blazr_decision_latency_seconds";
 pub const DECISION_QUEUE_ROWS: &str = "blazr_decision_queue_rows";
+pub const DECISION_PREFIX_CACHE_HITS_TOTAL: &str = "blazr_decision_prefix_cache_hits_total";
+pub const DECISION_PREFIX_CACHE_MISSES_TOTAL: &str = "blazr_decision_prefix_cache_misses_total";
+pub const DECISION_PREFIX_CACHE_EVICTIONS_TOTAL: &str =
+    "blazr_decision_prefix_cache_evictions_total";
+pub const DECISION_PREFIX_CACHE_BYTES: &str = "blazr_decision_prefix_cache_bytes";

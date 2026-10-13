@@ -68,7 +68,8 @@ struct Served {
 }
 
 /// The Kev directory `dir` served by name from its parent directory, with
-/// `base` as `inference.decision.base`, every weight F32.
+/// `base` as `inference.decision.base`, every weight F32. The prefix-state
+/// cache is off, so one-row requests merge as they would without one.
 fn serve(dir: &Path, base: &Path) -> Served {
     let parent = dir.parent().expect("the Kev directory has a parent");
     let name = dir
@@ -81,6 +82,7 @@ fn serve(dir: &Path, base: &Path) -> Served {
         base: Some(base.display().to_string()),
         max_rows: MAX_ROWS,
         max_queue_rows: MAX_QUEUE_ROWS,
+        prefix_cache_mb: 0,
         start_model: Some(name.clone()),
         ..DecisionConfig::default()
     };

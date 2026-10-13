@@ -317,15 +317,22 @@ pub fn user_message(
     options: &[PromptText],
     labels: &[String],
 ) -> PromptText {
-    let mut text = PromptText::template("STATE:\n");
-    text.push_caller(state)
-        .push_template("\n\nQUESTION: ")
+    let mut text = state_head(state);
+    text.push_template(" ")
         .push_caller(question)
         .push_template("\n\nOPTIONS:");
     for (label, option) in labels.iter().zip(options) {
         text.push_template(format!("\n{label}. ")).push_text(option);
     }
     text.push_template(format!("\n\n{ANSWER_INSTRUCTION}"));
+    text
+}
+
+/// The start every user message about `state` shares, whatever its
+/// question: the state block up to `QUESTION:`.
+pub fn state_head(state: &str) -> PromptText {
+    let mut text = PromptText::template("STATE:\n");
+    text.push_caller(state).push_template("\n\nQUESTION:");
     text
 }
 

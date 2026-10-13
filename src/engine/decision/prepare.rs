@@ -9,6 +9,7 @@
 //! `full_sequence_plan`, a gather per position, and each field reads its
 //! spans of it.
 
+use boostr::inference::decision::request::plan_from_rows_at;
 use boostr::inference::decision::{plan_from_rows, DecisionRequest, RowSlot, TemperaturePolicy};
 use boostr::model::decision::joint_schema::full_sequence_plan;
 
@@ -16,6 +17,19 @@ use super::error::DecisionFailure;
 use super::readout::ReadoutItem;
 use crate::model::decision_template::clef::JointLayout;
 use crate::model::decision_template::{Readout, RenderedDecision};
+
+/// Where a request's shared prefix ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixRule {
+    /// Shortest prefix that runs once. A shorter one runs as part of each
+    /// full row.
+    pub min_tokens: usize,
+    /// Cut the prefix at the family's state boundary
+    /// ([`RenderedDecision::state_end`]), a single row included, so every
+    /// request about one state runs over the same prefix and a prefix cache
+    /// can keep it. Off: the prefix is the longest one the rows share.
+    pub at_state: bool,
+}
 
 /// A request ready to queue.
 #[derive(Debug, Clone, PartialEq)]
@@ -96,9 +110,10 @@ fn prepare_joint(
 }
 
 /// The boostr request of `rendered` at temperatures `temp`. A shared prefix
-/// of `shared_min_tokens` or more runs once; a shorter one runs as part of
-/// each full row. A joint-schema record runs whole, alone, at temperature
-/// 1 whatever `temp` says.
+/// of `prefix.min_tokens` or more runs once, cut at the state boundary when
+/// `prefix.at_state` says so; a shorter one runs as part of each full row.
+/// A joint-schema record runs whole, alone, at temperature 1 whatever
+/// `temp` says.
 ///
 /// # Errors
 ///
@@ -107,7 +122,7 @@ fn prepare_joint(
 pub fn prepare(
     rendered: &RenderedDecision,
     temp: TemperaturePolicy,
-    shared_min_tokens: usize,
+    prefix: PrefixRule,
 ) -> Result<PreparedRequest, DecisionFailure> {
     if rendered.family.readout() == Readout::JointSchema {
         let layout = rendered.joint.as_ref().ok_or_else(|| {
@@ -131,8 +146,13 @@ pub fn prepare(
             slots.extend(ends);
         }
     }
-    let planned = plan_from_rows(rendered.rows.clone(), &slots, shared_min_tokens)
-        .map_err(|e| DecisionFailure::Internal(format!("the rendered rows do not plan: {e}")))?;
+    let state = rendered.state_end;
+    let planned = if prefix.at_state && state > 0 && state >= prefix.min_tokens {
+        plan_from_rows_at(rendered.rows.clone(), &slots, state)
+    } else {
+        plan_from_rows(rendered.rows.clone(), &slots, prefix.min_tokens)
+    }
+    .map_err(|e| DecisionFailure::Internal(format!("the rendered rows do not plan: {e}")))?;
     let mut gathers = planned.slot_gathers.iter().copied();
     let mut items = Vec::with_capacity(rendered.scoring_rows.len());
     for row in &rendered.scoring_rows {
@@ -212,8 +232,42 @@ mod tests {
             rows,
             warnings: Vec::new(),
             state_tokens: 3,
+            state_end: 2,
             joint: None,
         }
+    }
+
+    /// The prefix the rows share, run once from `min` tokens.
+    fn lcp(min: usize) -> PrefixRule {
+        PrefixRule {
+            min_tokens: min,
+            at_state: false,
+        }
+    }
+
+    /// With a prefix cache the prefix ends at the state, whatever the rows
+    /// share past it, and a single row takes it too; a state shorter than
+    /// the minimum keeps the shared-prefix rule.
+    #[test]
+    fn a_cached_prefix_ends_at_the_state() {
+        let r = rendered(vec![vec![1, 2, 3, 4, 5], vec![1, 2, 3, 6, 7]]);
+        let at_state = |min| PrefixRule {
+            min_tokens: min,
+            at_state: true,
+        };
+        let cut = prepare(&r, TemperaturePolicy::Fixed(1.0), at_state(2)).expect("plans");
+        assert_eq!(cut.request.plan.prefix.tokens(), &[1, 2]);
+        assert_eq!(cut.prefill_tokens, 2 + 3 + 3);
+        let shared = prepare(&r, TemperaturePolicy::Fixed(1.0), lcp(2)).expect("plans");
+        assert_eq!(shared.request.plan.prefix_len(), 3);
+        let short = prepare(&r, TemperaturePolicy::Fixed(1.0), at_state(3)).expect("plans");
+        assert_eq!(short.request.plan.prefix_len(), 3, "the state is under 3");
+        let one = rendered(vec![vec![1, 2, 3, 4]]);
+        let alone = prepare(&one, TemperaturePolicy::Fixed(1.0), at_state(1)).expect("plans");
+        assert_eq!(alone.request.plan.prefix.tokens(), &[1, 2]);
+        assert_eq!(alone.request.plan.rows, vec![vec![3, 4]]);
+        let none = prepare(&one, TemperaturePolicy::Fixed(1.0), lcp(1)).expect("plans");
+        assert!(!none.has_prefix());
     }
 
     #[test]
@@ -226,10 +280,10 @@ mod tests {
     #[test]
     fn short_prefixes_run_as_full_rows_and_long_ones_once() {
         let r = rendered(vec![vec![1, 2, 3, 4, 5], vec![1, 2, 3, 6, 7]]);
-        let full = prepare(&r, TemperaturePolicy::Fixed(1.0), 4).expect("plans");
+        let full = prepare(&r, TemperaturePolicy::Fixed(1.0), lcp(4)).expect("plans");
         assert!(!full.has_prefix());
         assert_eq!((full.rows, full.prefill_tokens), (2, 10));
-        let shared = prepare(&r, TemperaturePolicy::Fixed(1.0), 3).expect("plans");
+        let shared = prepare(&r, TemperaturePolicy::Fixed(1.0), lcp(3)).expect("plans");
         assert!(shared.has_prefix());
         assert_eq!(shared.prefill_tokens, 3 + 2 + 2);
         assert_eq!(shared.request.items.len(), 2);
@@ -248,13 +302,13 @@ mod tests {
         }
         r.scoring_rows[0].option_ends = vec![3, 4];
         r.scoring_rows[1].option_ends = vec![4, 5];
-        let full = prepare(&r, TemperaturePolicy::Fixed(2.0), 100).expect("plans");
+        let full = prepare(&r, TemperaturePolicy::Fixed(2.0), lcp(100)).expect("plans");
         let items = &full.request.items;
         assert_eq!(full.request.plan.gathers.len(), 6);
         assert_eq!((items[0].slot, items[0].options.clone()), (0, vec![1, 2]));
         assert_eq!((items[1].slot, items[1].options.clone()), (3, vec![4, 5]));
         assert!(items.iter().all(|i| i.labels.is_empty()));
-        let shared = prepare(&r, TemperaturePolicy::Fixed(2.0), 3).expect("plans");
+        let shared = prepare(&r, TemperaturePolicy::Fixed(2.0), lcp(3)).expect("plans");
         assert!(shared.has_prefix(), "the state runs once");
         assert_eq!(shared.request.plan.prefix_len(), 3);
     }
@@ -272,7 +326,7 @@ mod tests {
         r.family = Family::Clef;
         r.questions[0].meta = item.meta();
         assert!(
-            prepare(&r, TemperaturePolicy::Fixed(2.0), 3).is_err(),
+            prepare(&r, TemperaturePolicy::Fixed(2.0), lcp(3)).is_err(),
             "a record needs its layout"
         );
         r.joint = Some(JointLayout {
@@ -282,7 +336,7 @@ mod tests {
                 legend: Vec::new(),
             }],
         });
-        let p = prepare(&r, TemperaturePolicy::Fixed(2.0), 3).expect("plans");
+        let p = prepare(&r, TemperaturePolicy::Fixed(2.0), lcp(3)).expect("plans");
         assert!(
             p.has_prefix(),
             "the record is the prefix, so it never merges"

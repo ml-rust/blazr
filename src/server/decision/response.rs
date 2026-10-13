@@ -12,6 +12,9 @@ pub struct ResponseFacts<'a> {
     pub model: &'a str,
     /// Prompt tokens, the shared prefix of the rows counted once.
     pub input_tokens: usize,
+    /// Prompt tokens the run did not run: the prefix whose state the
+    /// worker kept from an earlier request. 0 on a miss or with no cache.
+    pub cached_input_tokens: usize,
     /// Milliseconds from the request's arrival to its answers.
     pub latency_ms: f64,
     /// The model's fitted temperatures.
@@ -32,7 +35,9 @@ fn calibration_json(calibration: Option<&Calibration>, raw: bool) -> Value {
     })
 }
 
-/// The response body.
+/// The response body. `usage.cached_tokens` and
+/// `usage.cached_input_tokens` both count the prompt tokens a kept prefix
+/// state saved.
 pub fn response_body(facts: ResponseFacts<'_>, answers: Map<String, Value>) -> Value {
     json!({
         "model": facts.model,
@@ -40,7 +45,8 @@ pub fn response_body(facts: ResponseFacts<'_>, answers: Map<String, Value>) -> V
         "usage": {
             "input_tokens": facts.input_tokens,
             "output_tokens": 0,
-            "cached_tokens": 0
+            "cached_tokens": facts.cached_input_tokens,
+            "cached_input_tokens": facts.cached_input_tokens
         },
         "latency_ms": (facts.latency_ms * 10.0).round() / 10.0,
         "calibration": calibration_json(facts.calibration, facts.raw),
@@ -64,7 +70,8 @@ pub struct KevUsage {
 /// `output_tokens`, and `latency_ms`. A server that cuts long states adds
 /// `usage.state_tokens`, `usage.state_tokens_used` and `truncated`. The
 /// blazr `calibration` and `warnings` follow; Kev's clients ignore fields
-/// they do not model.
+/// they do not model. `usage` holds Kev's fields only, so a kept prefix
+/// state shows in `/v1/models` and the metrics, not here.
 pub fn kev_response_body(
     facts: ResponseFacts<'_>,
     kev: KevUsage,
@@ -108,6 +115,7 @@ mod tests {
         let facts = ResponseFacts {
             model: "m",
             input_tokens: 12,
+            cached_input_tokens: 0,
             latency_ms: 3.12,
             calibration: Some(&calibration),
             raw: false,
@@ -117,7 +125,8 @@ mod tests {
         assert_eq!(
             body,
             json!({"model": "m", "answers": {},
-                "usage": {"input_tokens": 12, "output_tokens": 0, "cached_tokens": 0},
+                "usage": {"input_tokens": 12, "output_tokens": 0, "cached_tokens": 0,
+                    "cached_input_tokens": 0},
                 "latency_ms": 3.1,
                 "calibration": {"applied": true, "temperatures": {"choice": 1.1},
                     "source": "temperatures.json"},
@@ -134,7 +143,7 @@ mod tests {
         let none = response_body(
             ResponseFacts {
                 calibration: None,
-                ..facts
+                ..facts.clone()
             },
             Map::new(),
         );
@@ -142,6 +151,16 @@ mod tests {
             none["calibration"],
             json!({"applied": false, "temperatures": null, "source": null})
         );
+        let hit = response_body(
+            ResponseFacts {
+                cached_input_tokens: 9,
+                ..facts
+            },
+            Map::new(),
+        );
+        let usage = json!({"input_tokens": 12, "output_tokens": 0, "cached_tokens": 9,
+            "cached_input_tokens": 9});
+        assert_eq!(hit["usage"], usage);
     }
 
     #[test]
@@ -149,6 +168,7 @@ mod tests {
         let facts = ResponseFacts {
             model: "kev-4b",
             input_tokens: 119,
+            cached_input_tokens: 80,
             latency_ms: 12.34,
             calibration: None,
             raw: false,

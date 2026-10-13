@@ -31,8 +31,24 @@ pub struct Served {
 /// Serve the model at `path` (a checkpoint directory or a `.gguf`) as the
 /// start model of a scheduler over its parent directory. `config` is the
 /// sidecar for a model that ships none beside it. `batch_wait_ms` is how
-/// long the worker waits for more requests to merge.
+/// long the worker waits for more requests to merge. The prefix-state
+/// cache is off, so each request runs its own prefix and merges as it
+/// would without one.
 pub fn serve(path: &Path, config: Option<PathBuf>, batch_wait_ms: u64) -> Served {
+    let decision = DecisionConfig {
+        config,
+        max_rows: MAX_ROWS,
+        max_queue_rows: MAX_QUEUE_ROWS,
+        batch_wait_ms,
+        prefix_cache_mb: 0,
+        ..DecisionConfig::default()
+    };
+    serve_config(path, decision)
+}
+
+/// Serve the model at `path` as [`serve`] does, with the decision settings
+/// `decision`. `start_model` is set to the model's name.
+pub fn serve_config(path: &Path, decision: DecisionConfig) -> Served {
     let parent = path
         .parent()
         .unwrap_or_else(|| panic!("{} has no parent directory", path.display()));
@@ -44,12 +60,8 @@ pub fn serve(path: &Path, config: Option<PathBuf>, batch_wait_ms: u64) -> Served
     let device = blazr::runtime::open_device(0)
         .unwrap_or_else(|e| panic!("opening the server runtime's device 0: {e}"));
     let decision = DecisionConfig {
-        config,
-        max_rows: MAX_ROWS,
-        max_queue_rows: MAX_QUEUE_ROWS,
-        batch_wait_ms,
         start_model: Some(name.clone()),
-        ..DecisionConfig::default()
+        ..decision
     };
     let scheduler = Scheduler::<ServerRuntime>::new(parent.to_path_buf(), device)
         .with_dtype(Some(DtypeRequest {

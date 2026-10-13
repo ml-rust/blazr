@@ -155,8 +155,8 @@ where
 
     /// The `/v1/models` report of the model `name` at `path`, from its
     /// sidecars and GGUF header, without loading weights. A model whose
-    /// service runs reports what its load checked. `None` for a model that
-    /// is not a decision model.
+    /// service runs reports what its load checked and its prefix-state
+    /// cache. `None` for a model that is not a decision model.
     ///
     /// # Errors
     ///
@@ -167,7 +167,9 @@ where
         path: &Path,
     ) -> Result<Option<Arc<DecisionInfo>>, String> {
         if let Some(service) = self.decisions.running(name) {
-            return Ok(Some(Arc::new(service.info().clone())));
+            let mut info = service.info().clone();
+            info.prefix_cache = Some(service.prefix_cache());
+            return Ok(Some(Arc::new(info)));
         }
         let kev = self.kev_dir(name);
         let path = kev.as_deref().unwrap_or(path);

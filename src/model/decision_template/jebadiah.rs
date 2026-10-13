@@ -19,12 +19,13 @@ use boostr::inference::decision::{QuestionKind, QuestionMeta, RowSlot};
 use serde_json::{Map, Value};
 
 use super::ainode::{
-    ainode_labels, check_options, criteria_pairs, option_text, question_kind, translate_one,
-    user_message, Kind, Translated, MAX_CRITERIA, PROMPT_SOURCE_SHA256, SYSTEM_PROMPT,
+    ainode_labels, check_options, criteria_pairs, option_text, question_kind, state_head,
+    translate_one, user_message, Kind, Translated, MAX_CRITERIA, PROMPT_SOURCE_SHA256,
+    SYSTEM_PROMPT,
 };
 use super::encode::{ChatFrame, DecisionEncoder, PromptText};
 use super::family::{
-    load_template, load_tokenizer, read_json, DecisionError, DecisionQuestion, Family,
+    load_template, load_tokenizer, read_json, shared_len, DecisionError, DecisionQuestion, Family,
     RenderedDecision, ScoringRow,
 };
 use super::jev::JevRequest;
@@ -181,16 +182,11 @@ impl JebadiahRenderer {
         }
         let state = serialize_state(request.state.as_ref());
         let state_tokens = self.encoder.encode(&PromptText::caller(&state))?.len();
+        let mut head = PromptText::template(&self.frame.head);
+        head.push_text(&state_head(&state));
+        let head_ids = self.encoder.encode(&head)?;
 
-        let mut out = RenderedDecision {
-            family: Family::Jebadiah,
-            rows: Vec::with_capacity(translated.len()),
-            scoring_rows: Vec::with_capacity(translated.len()),
-            questions: Vec::with_capacity(translated.len()),
-            warnings,
-            state_tokens,
-            joint: None,
-        };
+        let mut out = RenderedDecision::new(Family::Jebadiah, warnings, state_tokens);
         for (i, (q, (t, keys))) in request.questions.iter().zip(translated).enumerate() {
             let legend = match t.kind {
                 Kind::Score => t.names.clone(),
@@ -234,6 +230,7 @@ impl JebadiahRenderer {
             });
             out.rows.push(row.ids);
         }
+        out.state_end = shared_len(&head_ids, &out.rows);
         Ok(out)
     }
 

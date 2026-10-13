@@ -36,7 +36,7 @@ use blazr::boostr::model::decision::{FieldKind, HeadDtype, JointSchemaHead};
 use blazr::boostr::model::{GdnConfig, ModelClient};
 use blazr::boostr::{CpuDevice, CpuRuntime, DType, Runtime, Tensor};
 use blazr::config::DecisionConfig;
-use blazr::engine::decision::{prepare, ReadoutHead};
+use blazr::engine::decision::{prepare, PrefixRule, ReadoutHead};
 use blazr::model::decision_template::clef_text::render;
 use blazr::model::decision_template::{DecisionRenderer, Family, JevRequest, RenderedDecision};
 use blazr::server::decision::clef_answers;
@@ -283,11 +283,15 @@ fn head_only_answers_match_reference() {
         .unwrap_or_else(|e| panic!("the head loads from {}: {e}", dir.display()));
     let readout = ReadoutHead::JointSchema(Box::new(head));
     let r = renderer(&dir);
-    let shared = DecisionConfig::default().shared_min_tokens;
+    let defaults = DecisionConfig::default();
+    let rule = PrefixRule {
+        min_tokens: defaults.shared_min_tokens,
+        at_state: defaults.prefix_cache_mb > 0,
+    };
     for fx in &fixtures {
         let what = fx.label();
         let rendered = render_fixture(&r, fx);
-        let prepared = prepare(&rendered, TemperaturePolicy::Fixed(1.0), shared)
+        let prepared = prepare(&rendered, TemperaturePolicy::Fixed(1.0), rule)
             .unwrap_or_else(|e| panic!("{what}: prepare: {e}"));
         assert!(prepared.has_prefix(), "{what}: a record runs alone");
         let backbone = FixtureBackbone::new(fx, &device);

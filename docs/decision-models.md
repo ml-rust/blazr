@@ -217,8 +217,8 @@ curl -s http://localhost:8080/v1/models
 
 | Family or area | Status |
 | -------------- | ------ |
-| `jebadiah`, `decider` | Route tests run the real 4B model on CPU in F32 and from GGUF on CPU. GGUF Q4_K_M on CUDA is tested. SafeTensors on CUDA and GGUF Q8_0 on CUDA are not. |
-| `kev` | Fixture tests check rows, positions, and answers without weights. A route test runs a real adapter and base on CPU in F32. CUDA is not tested. |
+| `jebadiah`, `decider` | Route tests run the real 4B model on CPU in F32 and from GGUF on CPU. GGUF Q8_0 and Q4_K_M on CUDA are tested. SafeTensors in BF16 on CUDA needs about 10 GB of free VRAM for the 4B models and is not claimed. |
+| `kev` | Fixture tests check rows, positions, and answers without weights. A route test runs a real adapter and base on CPU in F32. The head and adapter also match the reference on CUDA in BF16, with probabilities within 1e-2. A full route on CUDA is not tested. |
 | `clef` (Clef-Flash) | Fixture tests check records, spans, and the head on CPU. The head alone also matches its reference on CUDA. A route test runs the full model on CPU in BF16 when `BLAZR_CLEF_FULL=1` is set. The full model on CUDA is not tested. |
 | Clef 27B | Not tested. Not claimed. |
 | Prefix-state cache | Real-model route tests run with the cache on for `jebadiah`, `decider`, and `kev` on CPU. `clef` does not use it. |

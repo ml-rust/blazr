@@ -11,6 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::state::AppState;
+use super::variant::lookup_error_response;
 use crate::server::generation::{
     encode_with_allowed_special, error_response, policy_error_response,
 };
@@ -22,13 +23,7 @@ pub async fn tokenize(
 ) -> Response {
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
+        Err(e) => return lookup_error_response(&e),
     };
 
     // Untrusted text with no chat template around it: nothing in it becomes a
@@ -54,13 +49,7 @@ pub async fn detokenize(
 ) -> Response {
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
+        Err(e) => return lookup_error_response(&e),
     };
 
     let token_ids: Vec<u32> = request.tokens.iter().map(|&t| t as u32).collect();

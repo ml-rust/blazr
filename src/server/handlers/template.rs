@@ -11,6 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::state::AppState;
+use super::variant::lookup_error_response;
 use crate::model::chat_template::{ChatMessage, RenderOptions};
 use crate::server::generation::error_response;
 use crate::server::tools::{request_msg_to_chat_msg, ChatRequestMessage, Tool};
@@ -22,13 +23,7 @@ pub async fn apply_template(
 ) -> Response {
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
+        Err(e) => return lookup_error_response(&e),
     };
 
     let template = match request.template.as_deref() {

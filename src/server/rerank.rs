@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::embeddings::hidden_states;
 use super::generation::{error_response, policy_error_response};
-use super::handlers::AppState;
+use super::handlers::{lookup_error_response, AppState};
 use crate::engine::pooling::pool_mean;
 
 /// Rerank request (Cohere/Jina compatible)
@@ -89,13 +89,7 @@ pub async fn rerank(
 ) -> Response {
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
+        Err(e) => return lookup_error_response(&e),
     };
 
     if request.documents.is_empty() {

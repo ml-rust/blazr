@@ -242,12 +242,10 @@ where
         let Some((path, source)) = located else {
             return Err(self.missing_weights(name).await);
         };
-        let executor = self.get_executor(name).await.map_err(|e| match e
-            .downcast::<crate::engine::LoraError>()
-        {
-            Ok(lora) => DecisionFailure::from(lora),
-            Err(e) => DecisionFailure::Internal(format!("model '{name}' did not load: {e:#}")),
-        })?;
+        let executor = self
+            .get_executor(name)
+            .await
+            .map_err(|e| DecisionFailure::of_lookup(name, e))?;
         let model = executor.model_arc();
         if let Some(service) = self.decisions.current(name, model) {
             return Ok(service);

@@ -22,7 +22,7 @@ use super::generation::{
     stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
     HasSamplingFields,
 };
-use super::handlers::AppState;
+use super::handlers::{classify_lookup, AppState};
 use super::metrics;
 use super::reasoning::ReasoningParser;
 use super::scheduled::generate_text_routed;
@@ -53,13 +53,7 @@ pub async fn messages(
     let load_start = Instant::now();
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return anthropic_error(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "not_found_error",
-            );
-        }
+        Err(e) => return anthropic_lookup_error(&e),
     };
     let _load_duration_ms = load_start.elapsed().as_millis() as u64;
 
@@ -246,13 +240,7 @@ pub async fn count_tokens(
 ) -> Response {
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return anthropic_error(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "not_found_error",
-            );
-        }
+        Err(e) => return anthropic_lookup_error(&e),
     };
 
     // The prompt as the messages endpoint assembles it, except that counting
@@ -286,6 +274,28 @@ fn anthropic_prompt_error(err: crate::model::chat_template::ChatPromptError) -> 
     )
 }
 
+/// The Anthropic error response of a failed executor lookup: the status
+/// and message of [`classify_lookup`], under the Anthropic error type of
+/// that status.
+fn anthropic_lookup_error(error: &anyhow::Error) -> Response {
+    let failure = classify_lookup(error);
+    anthropic_error(
+        failure.status,
+        &failure.message,
+        anthropic_error_type(failure.status),
+    )
+}
+
+/// The Anthropic error `type` of an HTTP status.
+fn anthropic_error_type(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::NOT_FOUND => "not_found_error",
+        StatusCode::SERVICE_UNAVAILABLE => "overloaded_error",
+        s if s.is_client_error() => "invalid_request_error",
+        _ => "api_error",
+    }
+}
+
 /// Anthropic-style error response
 fn anthropic_error(status: StatusCode, message: &str, error_type: &str) -> Response {
     (
@@ -299,4 +309,54 @@ fn anthropic_error(status: StatusCode, message: &str, error_type: &str) -> Respo
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::ModelNotFound;
+
+    async fn body_of(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        serde_json::from_slice(&bytes).expect("body is JSON")
+    }
+
+    #[tokio::test]
+    async fn lookup_errors_keep_the_anthropic_envelope() {
+        let missing = anthropic_lookup_error(&ModelNotFound::new("x").into());
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_of(missing).await,
+            serde_json::json!({"type": "error", "error": {
+                "type": "not_found_error",
+                "message": "Model not found: x",
+            }})
+        );
+
+        let load = anthropic_lookup_error(&anyhow::anyhow!("weights do not read"));
+        assert_eq!(load.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_of(load).await,
+            serde_json::json!({"type": "error", "error": {
+                "type": "api_error",
+                "message": "weights do not read",
+            }})
+        );
+    }
+
+    #[test]
+    fn each_status_has_its_anthropic_type() {
+        let cases = [
+            (StatusCode::BAD_REQUEST, "invalid_request_error"),
+            (StatusCode::NOT_FOUND, "not_found_error"),
+            (StatusCode::UNPROCESSABLE_ENTITY, "invalid_request_error"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "api_error"),
+            (StatusCode::SERVICE_UNAVAILABLE, "overloaded_error"),
+        ];
+        for (status, kind) in cases {
+            assert_eq!(anthropic_error_type(status), kind);
+        }
+    }
 }

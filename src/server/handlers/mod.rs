@@ -1,8 +1,7 @@
 //! HTTP request handlers
 //!
 //! Core handlers: health, models, tokenize/detokenize, slots. Auxiliary
-//! (vision/ASR/TTS) model bookkeeping lives in `auxiliary`. Completion and
-//! chat handlers are in separate top-level server modules.
+//! (vision/ASR/TTS) model bookkeeping lives in `auxiliary`.
 
 mod auxiliary;
 mod health;
@@ -26,4 +25,6 @@ pub use state::TtsBundle;
 pub use state::{AppState, ServerDevice, ServerRuntime, VisionEmbedder};
 pub use template::apply_template;
 pub use tokenize::{detokenize, tokenize};
-pub use variant::{lookup_error_response, lora_error_response, select_executor};
+pub use variant::{
+    classify_lookup, lookup_error_response, lora_error_response, select_executor, LookupFailure,
+};

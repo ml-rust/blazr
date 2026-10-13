@@ -61,10 +61,50 @@ impl From<crate::engine::LoraError> for DecisionFailure {
     }
 }
 
+/// An unknown model on `/v1/systemone` is a 404.
+impl From<crate::engine::ModelNotFound> for DecisionFailure {
+    fn from(error: crate::engine::ModelNotFound) -> Self {
+        Self::ModelNotFound(error.to_string())
+    }
+}
+
+impl DecisionFailure {
+    /// The failure of an executor lookup of the model `name`: a
+    /// [`LoraError`](crate::engine::LoraError) or
+    /// [`ModelNotFound`](crate::engine::ModelNotFound) by its kind, any
+    /// other error a load that failed (500).
+    pub fn of_lookup(name: &str, error: anyhow::Error) -> Self {
+        let error = match error.downcast::<crate::engine::LoraError>() {
+            Ok(lora) => return Self::from(lora),
+            Err(error) => error,
+        };
+        match error.downcast::<crate::engine::ModelNotFound>() {
+            Ok(missing) => Self::from(missing),
+            Err(error) => Self::Internal(format!("model '{name}' did not load: {error:#}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::LoraError;
+    use crate::engine::{LoraError, ModelNotFound};
+
+    #[test]
+    fn lookups_take_the_route_statuses() {
+        let missing = DecisionFailure::of_lookup("m", ModelNotFound::new("m").into());
+        assert_eq!(
+            missing,
+            DecisionFailure::ModelNotFound("Model not found: m".into())
+        );
+        let lora = DecisionFailure::of_lookup("m", LoraError::Invalid("bad".into()).into());
+        assert_eq!(lora, DecisionFailure::InvalidRequest("bad".into()));
+        let load = DecisionFailure::of_lookup("m", anyhow::anyhow!("weights do not read"));
+        assert_eq!(
+            load,
+            DecisionFailure::Internal("model 'm' did not load: weights do not read".into())
+        );
+    }
 
     #[test]
     fn lora_failures_take_the_route_statuses() {

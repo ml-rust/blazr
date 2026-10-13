@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::encoding::encode_f32_base64;
 use super::generation::{error_response, policy_error_response};
-use super::handlers::AppState;
-use super::handlers::ServerRuntime;
+use super::handlers::{lookup_error_response, AppState, ServerRuntime};
 use super::multimodal::{decode_image, ContentPart};
 use crate::engine::pooling::{l2_normalize, pool_cls, pool_last, pool_mean};
 use crate::engine::Executor;
@@ -152,13 +151,7 @@ pub async fn embeddings(
 ) -> Response {
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
+        Err(e) => return lookup_error_response(&e),
     };
 
     // Validate pooling strategy

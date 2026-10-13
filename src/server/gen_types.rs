@@ -101,12 +101,24 @@ pub async fn apply_keep_alive(state: &AppState, model_name: &str, keep_alive: &O
 
 /// Build a standard OpenAI error response
 pub fn error_response(status: StatusCode, message: &str, error_type: &str) -> Response {
+    error_response_with_code(status, message, error_type, None)
+}
+
+/// Build an OpenAI error response that also carries the machine-readable
+/// `code`, such as `model_not_found`. A `None` code is left out.
+pub fn error_response_with_code(
+    status: StatusCode,
+    message: &str,
+    error_type: &str,
+    code: Option<&str>,
+) -> Response {
     (
         status,
         axum::Json(ErrorResponse {
             error: ErrorDetail {
                 message: message.to_string(),
                 r#type: error_type.to_string(),
+                code: code.map(str::to_string),
             },
         }),
     )
@@ -220,6 +232,8 @@ pub struct ErrorResponse {
 pub struct ErrorDetail {
     pub message: String,
     pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[cfg(test)]

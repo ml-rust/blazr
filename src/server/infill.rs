@@ -21,7 +21,7 @@ use super::generation::{
     record_generation_metrics, stream_with_stop_sequences, validate_generation_params,
     HasSamplingFields, SamplingParams, Usage,
 };
-use super::handlers::AppState;
+use super::handlers::{lookup_error_response, AppState};
 use super::metrics;
 use super::scheduled::generate_text_routed;
 use super::streaming::{create_completion_stream, StreamToken};
@@ -87,13 +87,7 @@ pub async fn infill(
     let load_start = Instant::now();
     let executor = match state.scheduler.get_executor(&request.model).await {
         Ok(e) => e,
-        Err(e) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model not found: {}", e),
-                "invalid_request_error",
-            );
-        }
+        Err(e) => return lookup_error_response(&e),
     };
     let load_duration_ms = load_start.elapsed().as_millis() as u64;
 

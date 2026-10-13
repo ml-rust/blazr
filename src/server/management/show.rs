@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::common::ModelDetails;
-use crate::server::handlers::AppState;
+use crate::server::handlers::{classify_lookup, AppState};
 
 /// POST /api/show — Show model details
 pub async fn show_model(
@@ -21,9 +21,10 @@ pub async fn show_model(
     let executor = match state.scheduler.get_executor(&request.name).await {
         Ok(e) => e,
         Err(e) => {
+            let failure = classify_lookup(&e);
             return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("model not found: {}", e) })),
+                failure.status,
+                Json(serde_json::json!({ "error": failure.message })),
             )
                 .into_response();
         }

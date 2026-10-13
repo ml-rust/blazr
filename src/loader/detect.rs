@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
+/// The Hugging Face index of a sharded SafeTensors checkpoint.
+const SHARD_INDEX: &str = "model.safetensors.index.json";
+
 /// Detected model format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelFormat {
@@ -87,6 +90,18 @@ fn detect_model_in_directory(dir: &Path) -> Result<ModelSource> {
         }
     }
 
+    // Shards that `model.safetensors.index.json` names, whatever their file
+    // names, such as `model.safetensors-00001-of-00002.safetensors`.
+    if dir.join(SHARD_INDEX).is_file() {
+        if let Some(first_shard) = find_first_in_dir(dir, "*.safetensors") {
+            return Ok(ModelSource {
+                weights_path: first_shard,
+                config_path: find_config_in_dir(dir),
+                format: ModelFormat::SafeTensors,
+            });
+        }
+    }
+
     // Look for GGUF files
     if let Some(gguf_file) = find_gguf_in_dir(dir) {
         return Ok(ModelSource {
@@ -138,7 +153,12 @@ fn find_first_shard(dir: &Path) -> Option<PathBuf> {
 
 /// Find a GGUF file in a directory
 fn find_gguf_in_dir(dir: &Path) -> Option<PathBuf> {
-    let pattern = dir.join("*.gguf");
+    find_first_in_dir(dir, "*.gguf")
+}
+
+/// The first file in `dir` matching `pattern`, in name order.
+fn find_first_in_dir(dir: &Path, pattern: &str) -> Option<PathBuf> {
+    let pattern = dir.join(pattern);
     glob::glob(pattern.to_str()?)
         .ok()?
         .filter_map(|r| r.ok())
@@ -256,6 +276,28 @@ mod tests {
         assert!(result.is_err());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Shards named after `model.safetensors`, as
+    /// `Qwen3_5ForConditionalGeneration` checkpoints ship them.
+    #[test]
+    fn indexed_shards_are_safetensors() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir
+            .path()
+            .join("model.safetensors-00001-of-00002.safetensors");
+        let second = dir
+            .path()
+            .join("model.safetensors-00002-of-00002.safetensors");
+        fs::write(&second, b"dummy").unwrap();
+        fs::write(&first, b"dummy").unwrap();
+        fs::write(dir.path().join(SHARD_INDEX), b"{}").unwrap();
+        fs::write(dir.path().join("config.json"), b"{}").unwrap();
+
+        let source = detect_model_source(dir.path()).unwrap();
+        assert_eq!(source.format, ModelFormat::SafeTensors);
+        assert_eq!(source.weights_path, first);
+        assert!(source.config_path.is_some());
     }
 
     #[test]

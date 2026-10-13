@@ -60,6 +60,18 @@ pub struct DecisionArgs {
     /// bundled renderer. [default: inference.decision.allow_contract_mismatch]
     #[arg(long)]
     pub allow_contract_mismatch: bool,
+
+    /// Base model a Kev adapter applies to: a path, or a model name in the
+    /// model directory. Same scope as --decision-family.
+    /// [default: inference.decision.base, else the adapter's base_model_name_or_path]
+    #[arg(long, value_name = "PATH|NAME")]
+    pub decision_base: Option<String>,
+
+    /// Kev: read the first 65536 tokens of a longer state instead of
+    /// answering 422; every response then says whether it did.
+    /// [default: inference.decision.truncate_states]
+    #[arg(long)]
+    pub decision_truncate_states: bool,
 }
 
 impl DecisionArgs {
@@ -76,6 +88,8 @@ impl DecisionArgs {
             max_queue_rows: self.decision_max_queue_rows,
             batch_wait_ms: self.decision_batch_wait_ms,
             allow_contract_mismatch: self.allow_contract_mismatch,
+            base: self.decision_base,
+            truncate_states: self.decision_truncate_states,
         }
     }
 }

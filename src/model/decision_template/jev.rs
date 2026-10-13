@@ -1,14 +1,14 @@
-//! The Jev request both families take:
+//! The Jev request every family takes:
 //! `{state, questions: {id: {type, instructions, criteria}}, model?, calibration?}`
 //! plus each family's own fields.
 //!
 //! Questions keep the order the caller wrote them; blazr's `serde_json` is
 //! built with `preserve_order`, and a repeated key keeps its first position
 //! with its last value, as Python's `json.loads` does. Each question stays a
-//! JSON value: the two families read its fields differently (the decider
-//! takes `options` for `criteria`, `question` for `instructions`, any JSON
-//! value as text, and `choice` as the default type), so each family's
-//! renderer reads them.
+//! JSON value: the families read its fields differently (the decider takes
+//! `options` for `criteria`, `question` for `instructions`, any JSON value
+//! as text, and `choice` as the default type; Kev flattens any JSON value
+//! to text), so each family's renderer reads them.
 
 use serde_json::{Map, Value};
 
@@ -112,13 +112,13 @@ impl JevRequest {
         };
         request.model = match present(body, "model") {
             None => None,
-            Some(Value::String(s)) if family == Family::Decider || !py_strip(s).is_empty() => {
+            Some(Value::String(s)) if family != Family::Jebadiah || !py_strip(s).is_empty() => {
                 Some(py_strip(s).to_string())
             }
             Some(_) => {
                 return Err(bad(match family {
                     Family::Jebadiah => "'model' must be a non-empty string when given",
-                    Family::Decider => "'model' must be a string when given",
+                    Family::Decider | Family::Kev => "'model' must be a string when given",
                 }))
             }
         };
@@ -152,6 +152,11 @@ impl JevRequest {
                     Some(_) => return Err(bad("'layout' must be a string when given")),
                 };
             }
+            Family::Kev => {
+                if !body.contains_key("state") {
+                    return Err(bad("'state' is required (it may be null)"));
+                }
+            }
         }
         Ok(request)
     }
@@ -167,8 +172,8 @@ impl JevRequest {
 
 fn parse_questions(raw: Option<&Value>, family: Family) -> Result<Vec<JevQuestion>, DecisionError> {
     let map = match (raw, family) {
-        (Some(Value::Object(map)), Family::Jebadiah) if !map.is_empty() => map,
-        (_, Family::Jebadiah) => {
+        (Some(Value::Object(map)), Family::Jebadiah | Family::Kev) if !map.is_empty() => map,
+        (_, Family::Jebadiah | Family::Kev) => {
             return Err(bad(
                 "'questions' must be a non-empty object of {id: question}",
             ))
@@ -270,6 +275,31 @@ mod tests {
             ),
             bad("'independent' must be true or false when given")
         );
+    }
+
+    #[test]
+    fn kev_wording() {
+        let err = |body: Value| JevRequest::parse(&body, Family::Kev).expect_err("refused");
+        assert_eq!(
+            err(json!({"state": "s", "questions": {}})),
+            bad("'questions' must be a non-empty object of {id: question}")
+        );
+        assert_eq!(
+            err(json!({"questions": {"q": {}}})),
+            bad("'state' is required (it may be null)")
+        );
+        assert_eq!(
+            err(json!({"state": 1, "questions": {"q": {}}, "model": 2})),
+            bad("'model' must be a string when given")
+        );
+        let ok = JevRequest::parse(
+            &json!({"state": null, "model": "", "questions": {" ": {}}, "max_tokens": 0}),
+            Family::Kev,
+        )
+        .expect("Kev takes any string id and model, and ignores other fields");
+        assert_eq!(ok.state, Some(Value::Null));
+        assert_eq!(ok.model.as_deref(), Some(""));
+        assert_eq!(ok.max_tokens, None);
     }
 
     #[test]

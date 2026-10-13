@@ -82,10 +82,29 @@ where
                 variant.adapter, variant.base, variant.base
             )));
         }
+        let id = spec.variant_id(base);
+        let (info, _) = self.build_variant(id, base, spec, true).await?;
+        Ok(info)
+    }
+
+    /// Register `spec` on `base` as the variant `id`, build it, and return
+    /// it with the executor that serves `id`. `replace` false keeps a
+    /// variant of the same id that was loaded meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::register_variant`], `base` being a variant aside.
+    pub(crate) async fn build_variant(
+        &self,
+        id: String,
+        base: &str,
+        spec: AdapterSpec,
+        replace: bool,
+    ) -> Result<(VariantInfo, Arc<Executor<R>>), LoraError> {
         let base_executor = self.base_executor(base).await?;
         let derived = base_executor.derive_variant(&spec)?;
         let info = VariantInfo {
-            id: spec.variant_id(base),
+            id,
             base: base.to_string(),
             adapter: spec.name,
             path: spec.path,
@@ -93,11 +112,12 @@ where
             adapted_modules: derived.adapted_modules,
         };
         self.lora.insert(info.clone());
-        self.insert_variant(&info.id, base, Arc::new(derived.executor), true)
+        let executor = self
+            .insert_variant(&info.id, base, Arc::new(derived.executor), replace)
             .await;
         metrics::counter!(VARIANT_BUILDS).increment(1);
         tracing::info!(variant = %info.id, path = %info.path.display(), "LoRA variant registered");
-        Ok(info)
+        Ok((info, executor))
     }
 
     /// Unregister the variant `id` and drop its executor. `None` when no

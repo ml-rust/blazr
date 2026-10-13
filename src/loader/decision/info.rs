@@ -2,6 +2,7 @@
 //! and GGUF header without loading weights or a tokenizer.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -10,9 +11,12 @@ use super::detect::DecisionSource;
 use super::family_files::{
     contract_failures, decider_config, empty_config, jebadiah_contract, model_template,
 };
+use super::kev::{head_temperature, read_kev_adapter};
 use super::sidecar::{context_length, license_and_base, Calibration};
 use crate::model::decision_template::decider::DEFAULT_MAX_STATE_TOKENS;
 use crate::model::decision_template::jebadiah::DEFAULT_MAX_TOKENS;
+use crate::model::decision_template::kev::{SERVE_MAX_ROW, SERVE_MAX_STATE};
+use crate::model::decision_template::kev_text::MAX_OPTIONS;
 use crate::model::decision_template::labels::DECIDER_MAX_OPTIONS;
 use crate::model::decision_template::{DeciderConfig, Family, Layout};
 
@@ -61,9 +65,10 @@ impl CalibrationInfo {
 /// The `decision` object of a `/v1/models` entry.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DecisionInfo {
-    /// `jebadiah` or `decider`.
+    /// `jebadiah`, `decider` or `kev`.
     pub family: &'static str,
-    /// How answers are read: one label token per option.
+    /// How answers are read: `label_token`, one label token per option, or
+    /// `pointer`, Kev's decide-token query against each option's key.
     pub readout: &'static str,
     /// What named the family.
     pub detected_by: String,
@@ -78,6 +83,7 @@ pub struct DecisionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_state_tokens: Option<usize>,
     /// Jebadiah: the prompt-token cap of one row when the request names none.
+    /// Kev: the token cap of one row, the state and one question's branch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_prompt_tokens: Option<usize>,
     /// The positions the model addresses.
@@ -88,8 +94,18 @@ pub struct DecisionInfo {
     pub calibration: CalibrationInfo,
     /// The license the model card or GGUF header names.
     pub license: Option<String>,
-    /// The base model the model card or GGUF header names.
+    /// The base model the model card or GGUF header names; for Kev, else
+    /// the adapter's `base_model_name_or_path`.
     pub base_model: Option<String>,
+    /// Kev: the base checkpoint the adapter applies to, when it resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_path: Option<String>,
+    /// Kev: the LoRA adapter's rank.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter_rank: Option<usize>,
+    /// Kev: the one temperature `head.pt` was fitted with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
 }
 
 /// The `/v1/models` report of `source`.
@@ -99,12 +115,26 @@ pub struct DecisionInfo {
 /// When a sidecar exists and does not parse, or its layout or temperatures
 /// are invalid, `blazr_calibration.json` included.
 pub fn decision_info(source: &DecisionSource) -> Result<DecisionInfo, String> {
+    decision_info_with_base(source, None)
+}
+
+/// [`decision_info`], with the base checkpoint a Kev model applies to:
+/// its context length and path. Other families take no base.
+///
+/// # Errors
+///
+/// As [`decision_info`], and for Kev when `adapter_config.json` or
+/// `head.pt` does not read.
+pub fn decision_info_with_base(
+    source: &DecisionSource,
+    base: Option<&Path>,
+) -> Result<DecisionInfo, String> {
     let card_dir = source.model_dir.as_deref().unwrap_or(&source.sidecar_dir);
     let facts = source.gguf_facts.as_ref();
     let (license, base_model) = license_and_base(Some(card_dir), None);
     let mut info = DecisionInfo {
         family: source.family.name(),
-        readout: "label_token",
+        readout: source.family.readout().name(),
         detected_by: source.detected_by.clone(),
         layout: "plain",
         max_options: None,
@@ -116,6 +146,9 @@ pub fn decision_info(source: &DecisionSource) -> Result<DecisionInfo, String> {
         calibration: CalibrationInfo::of(None),
         license: license.or_else(|| facts.and_then(|f| f.license.clone())),
         base_model: base_model.or_else(|| facts.and_then(|f| f.base_model.clone())),
+        base_path: None,
+        adapter_rank: None,
+        temperature: None,
     };
     match source.family {
         Family::Decider => {
@@ -144,6 +177,19 @@ pub fn decision_info(source: &DecisionSource) -> Result<DecisionInfo, String> {
                     verified: problems.is_empty(),
                     problems,
                 });
+            }
+        }
+        Family::Kev => {
+            let adapter = read_kev_adapter(card_dir)?;
+            info.max_options = Some(MAX_OPTIONS);
+            info.max_state_tokens = Some(SERVE_MAX_STATE);
+            info.max_prompt_tokens = Some(SERVE_MAX_ROW);
+            info.adapter_rank = Some(adapter.rank);
+            info.temperature = head_temperature(card_dir)?;
+            info.base_model = info.base_model.or(Some(adapter.base));
+            if let Some(base) = base {
+                info.base_path = Some(base.display().to_string());
+                info.context_length = context_length(Some(base), None).or(info.context_length);
             }
         }
     }

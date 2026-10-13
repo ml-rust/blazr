@@ -19,6 +19,9 @@ pub struct DecisionFlags {
     pub batch_wait_ms: Option<u64>,
     /// `--allow-contract-mismatch`: true sets it, false keeps the file value.
     pub allow_contract_mismatch: bool,
+    pub base: Option<String>,
+    /// `--decision-truncate-states`: true sets it, false keeps the file value.
+    pub truncate_states: bool,
 }
 
 /// The decision settings: each flag, else `inference.decision`, else the
@@ -47,6 +50,8 @@ pub fn resolve_decision(
     cfg.max_queue_rows = flags.max_queue_rows.unwrap_or(cfg.max_queue_rows);
     cfg.batch_wait_ms = flags.batch_wait_ms.unwrap_or(cfg.batch_wait_ms);
     cfg.allow_contract_mismatch |= flags.allow_contract_mismatch;
+    cfg.base = flags.base.or(cfg.base);
+    cfg.truncate_states |= flags.truncate_states;
     cfg.start_model = start_model;
     cfg.check()?;
     Ok(cfg)
@@ -85,6 +90,21 @@ mod tests {
 
         let cfg = resolve_decision(DecisionFlags::default(), &file(""), None).expect("resolves");
         assert_eq!(cfg, DecisionConfig::default());
+    }
+
+    #[test]
+    fn kev_base_and_truncation() {
+        let from_file =
+            file("inference:\n  decision:\n    base: qwen3.5-4b-base\n    truncate_states: true\n");
+        let cfg = resolve_decision(DecisionFlags::default(), &from_file, None).expect("resolves");
+        assert_eq!(cfg.base.as_deref(), Some("qwen3.5-4b-base"));
+        assert!(cfg.truncate_states);
+        let flags = DecisionFlags {
+            base: Some("/models/base".into()),
+            ..Default::default()
+        };
+        let cfg = resolve_decision(flags, &from_file, None).expect("resolves");
+        assert_eq!(cfg.base.as_deref(), Some("/models/base"));
     }
 
     #[test]

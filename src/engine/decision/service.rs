@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 use super::error::DecisionFailure;
 use super::limits::DecisionLimits;
 use super::prepare::{prepare, PreparedRequest};
+use super::readout::ReadoutHead;
 use super::stats::{DecisionCounts, DecisionStats};
 use super::worker::{spawn, Job, Shared, WorkerSettings};
 use crate::config::DecisionConfig;
@@ -65,10 +66,12 @@ impl Drop for Pending {
 
 impl<R: Runtime<DType = DType>> DecisionService<R> {
     /// Start the worker of `model` on `device` and serve `loaded` as `name`.
+    /// A Kev model's pointer head loads here, on `device`.
     ///
     /// # Errors
     ///
-    /// [`DecisionFailure::Internal`] when the worker thread does not start.
+    /// [`DecisionFailure::Internal`] when the worker thread does not start
+    /// or the pointer head does not load or fit the model.
     pub fn start(
         name: &str,
         loaded: LoadedRenderer,
@@ -81,6 +84,7 @@ impl<R: Runtime<DType = DType>> DecisionService<R> {
         R::Client: ModelClient<R>,
         R::Device: Send + 'static,
         LoadedModel<R>: Send + Sync + 'static,
+        ReadoutHead<R>: Send + 'static,
     {
         let shared = Arc::new(Shared {
             queued_rows: Default::default(),
@@ -92,8 +96,9 @@ impl<R: Runtime<DType = DType>> DecisionService<R> {
             max_lane_bytes: cfg.max_lane_bytes(),
             batch_wait: Duration::from_millis(cfg.batch_wait_ms),
         };
+        let head = ReadoutHead::load(loaded.pointer_head.as_deref(), model, &device)?;
         let weak = Arc::downgrade(model);
-        let queue = spawn(settings, weak.clone(), device, Arc::clone(&shared))?;
+        let queue = spawn(settings, weak.clone(), head, device, Arc::clone(&shared))?;
         Ok(Self {
             name: name.to_string(),
             limits: DecisionLimits::new(cfg, loaded.renderer.family()),

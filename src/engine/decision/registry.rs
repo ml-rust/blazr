@@ -15,14 +15,17 @@ use boostr::{
 };
 
 use super::error::DecisionFailure;
+use super::readout::ReadoutHead;
 use super::service::DecisionService;
 use super::stats::DecisionCounts;
 use crate::config::DecisionConfig;
 use crate::engine::Scheduler;
 use crate::loader::decision::sidecar::{DECIDER_CONFIG, JEBADIAH_CARD, PROMPT_CONTRACT};
 use crate::loader::decision::{
-    decision_info, detect_decision_with, load_renderer, read_gguf_facts, DecisionInfo, GgufFacts,
+    decision_info_with_base, detect_decision_with, load_renderer, read_gguf_facts, DecisionInfo,
+    GgufFacts,
 };
+use crate::model::decision_template::Family;
 
 /// The decision settings of a LoRA variant of `base` with its adapter at
 /// `adapter`. `--decision-family` and `--decision-config` apply to the
@@ -142,6 +145,7 @@ where
         + boostr::quant::QuantMatmulOps<R>,
     R::Device: Send + 'static,
     LoadedModel<R>: Send + Sync + 'static,
+    ReadoutHead<R>: Send + 'static,
 {
     /// The model `/v1/systemone` answers with when a request names none:
     /// the start model.
@@ -165,11 +169,20 @@ where
         if let Some(service) = self.decisions.running(name) {
             return Ok(Some(Arc::new(service.info().clone())));
         }
+        let kev = self.kev_dir(name);
+        let path = kev.as_deref().unwrap_or(path);
         let settings = self.decision_settings(name);
         let source = detect_decision_with(path, name, &settings, |file| {
             self.decisions.gguf_facts(file)
         })?;
-        source.map(|s| decision_info(&s).map(Arc::new)).transpose()
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let base = match &kev {
+            Some(dir) if source.family == Family::Kev => self.kev_base_path(name, dir),
+            _ => None,
+        };
+        decision_info_with_base(&source, base.as_deref()).map(|info| Some(Arc::new(info)))
     }
 
     /// The decision settings detection runs with for `name`: the server's,
@@ -212,7 +225,9 @@ where
     /// The decision service of the model `name`, loading the model and
     /// starting its worker when needed. The weights are the ones every
     /// other route of the model runs on. A LoRA variant id serves on the
-    /// variant's model, detected on its base's weights.
+    /// variant's model, detected on its base's weights. A Kev directory,
+    /// or a variant whose adapter is one, serves as a Kev model on its
+    /// base with its adapter attached and its pointer head.
     ///
     /// # Errors
     ///
@@ -226,7 +241,10 @@ where
         &self,
         name: &str,
     ) -> Result<Arc<DecisionService<R>>, DecisionFailure> {
-        let path = self.decision_weights(name).await?;
+        let path = match self.kev_dir(name) {
+            Some(dir) => dir,
+            None => self.decision_weights(name).await?,
+        };
         let settings = self.decision_settings(name);
         let source = detect_decision_with(&path, name, &settings, |file| {
             self.decisions.gguf_facts(file)
@@ -252,11 +270,15 @@ where
         if !matches!(&**model, LoadedModel::Qwen35(_)) {
             return Err(DecisionFailure::NotDecisionModel(format!(
                 "model '{name}' is named a {} decision model, but its weights are not a qwen35 \
-                 text model; decision models read label tokens off a qwen35 backbone",
+                 text model; decision models read a qwen35 backbone",
                 source.family.name()
             )));
         }
-        let loaded = load_renderer(&source, self.decision_config.allow_contract_mismatch)
+        let base = match source.family {
+            Family::Kev => self.kev_base_path(name, &path),
+            Family::Jebadiah | Family::Decider => None,
+        };
+        let loaded = load_renderer(&source, &self.decision_config, base.as_deref())
             .map_err(|e| DecisionFailure::Internal(format!("model '{name}': {e}")))?;
         let service = DecisionService::start(
             name,

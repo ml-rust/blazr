@@ -71,6 +71,12 @@ pub struct DecisionConfig {
     pub batch_wait_ms: u64,
     /// Serve a Jebadiah model whose prompt contract does not match.
     pub allow_contract_mismatch: bool,
+    /// The base a Kev adapter applies to: a path or a model name, over the
+    /// adapter's own `base_model_name_or_path`. Same scope as `family`.
+    pub base: Option<String>,
+    /// Kev: read the first 65536 tokens of a longer state instead of
+    /// refusing the request; every response then says whether it did.
+    pub truncate_states: bool,
     /// The start model. Set from `--model`, never from the file.
     #[serde(skip)]
     pub start_model: Option<String>,
@@ -89,17 +95,26 @@ impl Default for DecisionConfig {
             max_queue_rows: DEFAULT_MAX_QUEUE_ROWS,
             batch_wait_ms: 0,
             allow_contract_mismatch: false,
+            base: None,
+            truncate_states: false,
             start_model: None,
         }
     }
 }
 
 impl DecisionConfig {
-    /// Whether `family` and `config` apply to the model `name`.
+    /// Whether `family`, `config` and `base` apply to the model `name`.
     pub fn overrides_apply_to(&self, name: &str) -> bool {
         self.start_model
             .as_deref()
             .is_none_or(|start| start == name)
+    }
+
+    /// The configured Kev base for the model `name`.
+    pub fn base_for(&self, name: &str) -> Option<&str> {
+        self.base
+            .as_deref()
+            .filter(|_| self.overrides_apply_to(name))
     }
 
     /// The lane-state budget in bytes. `None` when `lane_budget_mb` is 0.
@@ -165,5 +180,8 @@ mod tests {
         cfg.start_model = Some("decider-4b".into());
         assert!(cfg.overrides_apply_to("decider-4b"));
         assert!(!cfg.overrides_apply_to("other"));
+        cfg.base = Some("qwen".into());
+        assert_eq!(cfg.base_for("decider-4b"), Some("qwen"));
+        assert_eq!(cfg.base_for("other"), None);
     }
 }

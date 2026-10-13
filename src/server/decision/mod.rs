@@ -4,9 +4,11 @@
 pub mod answer;
 pub mod error;
 pub mod handler;
+pub mod kev_answer;
 pub mod response;
 
 pub use answer::{answers_json, py_round};
 pub use error::failure_response;
 pub use handler::systemone;
-pub use response::{response_body, ResponseFacts};
+pub use kev_answer::kev_answer;
+pub use response::{kev_response_body, response_body, KevUsage, ResponseFacts};

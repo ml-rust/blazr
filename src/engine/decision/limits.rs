@@ -5,6 +5,7 @@ use super::error::DecisionFailure;
 use crate::config::DecisionConfig;
 use crate::model::decision_template::decider::DEFAULT_MAX_STATE_TOKENS;
 use crate::model::decision_template::jebadiah::DEFAULT_MAX_TOKENS;
+use crate::model::decision_template::kev::SERVE_MAX_ROW;
 use crate::model::decision_template::Family;
 
 /// The limits of one request.
@@ -21,15 +22,17 @@ pub struct DecisionLimits {
 impl DecisionLimits {
     /// The limits `cfg` sets for `family`. The row cap defaults to the
     /// family's state cap (decider `Context:` block, Jebadiah prompt) plus
-    /// 4096.
+    /// 4096; for Kev, to Kev's own row limit, which its renderer enforces
+    /// with Kev's message.
     pub fn new(cfg: &DecisionConfig, family: Family) -> Self {
-        let state_cap = match family {
-            Family::Decider => DEFAULT_MAX_STATE_TOKENS,
-            Family::Jebadiah => DEFAULT_MAX_TOKENS,
+        let max_row_tokens = match family {
+            Family::Decider => cfg.row_token_cap(DEFAULT_MAX_STATE_TOKENS),
+            Family::Jebadiah => cfg.row_token_cap(DEFAULT_MAX_TOKENS),
+            Family::Kev => cfg.max_row_tokens.unwrap_or(SERVE_MAX_ROW),
         };
         Self {
             max_rows: cfg.max_rows,
-            max_row_tokens: cfg.row_token_cap(state_cap),
+            max_row_tokens,
             max_request_tokens: cfg.max_request_tokens,
         }
     }
@@ -99,5 +102,16 @@ mod tests {
         assert!(failure(&[vec![1], vec![2], vec![3]]).contains("max_rows"));
         assert!(failure(&[vec![1, 2, 3, 4]]).contains("max_row_tokens"));
         assert!(failure(&[vec![1, 2, 3], vec![4, 5, 6]]).contains("max_request_tokens"));
+    }
+
+    #[test]
+    fn kev_rows_take_kevs_row_limit_unless_configured() {
+        let kev = DecisionLimits::new(&DecisionConfig::default(), Family::Kev);
+        assert_eq!(kev.max_row_tokens, 65536 + 8192);
+        let cfg = DecisionConfig {
+            max_row_tokens: Some(100),
+            ..DecisionConfig::default()
+        };
+        assert_eq!(DecisionLimits::new(&cfg, Family::Kev).max_row_tokens, 100);
     }
 }

@@ -252,11 +252,13 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `decision.shared_min_tokens`         | integer  | `768`               | Shortest shared prefix one request runs once. Shorter prefixes run as full rows merged with other requests.                  |
 | `decision.lane_budget_mb`            | integer  | `8192`              | Lane-state budget of one decision forward pass in MiB. `0` sets none.                                                        |
 | `decision.max_rows`                  | integer  | `1024`              | Most prompt rows one request expands to. More answers `413`.                                                                 |
-| `decision.max_row_tokens`            | integer  | state cap + `4096`  | Most tokens in one row. More answers `413`.                                                                                  |
+| `decision.max_row_tokens`            | integer  | state cap + `4096`  | Most tokens in one row. More answers `413`. Kev's default is its own row limit, `73728`.                                     |
 | `decision.max_request_tokens`        | integer  | `1048576`           | Most tokens over all rows of one request. More answers `413`.                                                                |
 | `decision.max_queue_rows`            | integer  | `4096`              | Most rows queued or running per model. More answers `503`.                                                                   |
 | `decision.batch_wait_ms`             | integer  | `0`                 | Milliseconds the decision worker waits after a request for more to merge.                                                    |
 | `decision.allow_contract_mismatch`   | boolean  | `false`             | Serve a Jebadiah model whose prompt contract does not match the bundled renderer.                                            |
+| `decision.base`                      | string   | adapter's base      | Base a Kev adapter applies to: a path, or a model name in the model directory. Same scope as `family`.                       |
+| `decision.truncate_states`           | boolean  | `false`             | Kev: read the first 65,536 tokens of a longer state instead of answering `422`. Responses then say `truncated`.             |
 | `lora`                               | string array | `[]`            | `serve` only, from `config.yaml`: PEFT LoRA adapters of the start model, each `<dir>[=<name>]`. Each one is served as the variant `<model>:<name>`. `--lora` replaces the list. See [LoRA adapters](api.md#lora-adapters). |
 
 Blazr applies no range check to these values in the config code.
@@ -397,6 +399,8 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 | `--decision-max-queue-rows <N>`       | `inference.decision.max_queue_rows`, else `4096` | Most rows queued or running per model                                                             |
 | `--decision-batch-wait-ms <MS>`       | `inference.decision.batch_wait_ms`, else `0` | Wait after a request for more to merge                                                                 |
 | `--allow-contract-mismatch`           | `inference.decision.allow_contract_mismatch` | Serve a Jebadiah model whose prompt contract does not match                                            |
+| `--decision-base <PATH\|NAME>`         | `inference.decision.base`, else the adapter's `base_model_name_or_path` | Base a Kev adapter applies to                                               |
+| `--decision-truncate-states`          | `inference.decision.truncate_states` | Kev: read the first 65,536 state tokens instead of answering `422`                                             |
 | `--lora <DIR[=NAME]>`                 | `inference.lora`      | PEFT LoRA adapter of the start model, served as the variant `<model>:<name>`. The name defaults to the directory name. Repeatable. Given flags replace `inference.lora`. Needs `--model` or `default_model`. Refused with `--data-parallel` above `1`. qwen35 models only. See [LoRA adapters](api.md#lora-adapters). |
 
 ### run and generate

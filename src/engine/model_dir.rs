@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::loader::decision::is_kev_dir;
+
 /// Information about an available model
 #[derive(Debug, Clone)]
 pub struct AvailableModelInfo {
@@ -34,8 +36,9 @@ pub fn find_model_path(model_dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 /// Every model in `model_dir`: a directory holding `model.safetensors`,
-/// `config.json` or a `.gguf`, or a `.safetensors` or `.gguf` file. A
-/// missing directory holds none.
+/// `config.json` or a `.gguf`, a Kev directory (an adapter and a pointer
+/// head over a base it does not hold), or a `.safetensors` or `.gguf`
+/// file. A missing directory holds none.
 ///
 /// # Errors
 ///
@@ -53,6 +56,7 @@ pub fn list_available(model_dir: &Path) -> std::io::Result<Vec<AvailableModelInf
             path.join("model.safetensors").exists()
                 || path.join("config.json").exists()
                 || holds_gguf(&path)
+                || is_kev_dir(&path)
         } else {
             path.extension()
                 .is_some_and(|e| e == "safetensors" || e == "gguf")
@@ -88,6 +92,8 @@ fn detect_format(path: &Path) -> String {
         "SafeTensors"
     } else if holds_gguf(path) {
         "GGUF"
+    } else if is_kev_dir(path) {
+        "Kev"
     } else {
         "Unknown"
     }

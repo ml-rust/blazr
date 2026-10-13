@@ -219,6 +219,7 @@ impl JebadiahRenderer {
                 },
                 labels: row.labels,
                 question: i,
+                option_ends: Vec::new(),
             });
             out.questions.push(DecisionQuestion {
                 id: q.id.clone(),

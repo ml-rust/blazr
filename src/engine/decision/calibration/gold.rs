@@ -102,6 +102,7 @@ fn score_by_name(
             None => (question.legend.clone(), name),
         },
         Family::Jebadiah => (question.legend.clone(), py_strip(name)),
+        Family::Kev => (question.legend.clone(), name),
     };
     spelled.iter().position(|l| l == wanted).ok_or_else(|| {
         format!(

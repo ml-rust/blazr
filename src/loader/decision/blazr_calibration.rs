@@ -1,8 +1,8 @@
 //! `blazr_calibration.json`: the temperatures `blazr decision calibrate`
 //! fitted on a user's labelled data. It sits in the sidecar directory and
 //! sets each answer type it holds over the vendor's temperature
-//! (`decider_config.json` or `temperatures.json`); a type it lacks keeps the
-//! vendor's. Vendor files are never written.
+//! (`decider_config.json`, `temperatures.json` or Kev's `head.pt`); a type
+//! it lacks keeps the vendor's. Vendor files are never written.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::detect::DecisionSource;
 use super::family_files::decider_config;
+use super::kev::kev_calibration;
 use super::sidecar::{
     decider_temperatures, jebadiah_temperatures, read_json_opt, Calibration, TYPES,
 };
@@ -181,12 +182,14 @@ pub fn prefer_calibration_file(
 }
 
 /// The temperatures the vendor ships for `source`: the decider config's,
-/// or Jebadiah's `temperatures.json`. `None` when there are none.
+/// Jebadiah's `temperatures.json`, or the one temperature of Kev's
+/// `head.pt` for every type. `None` when there are none.
 ///
 /// # Errors
 ///
-/// When the decider config exists and does not parse, or a temperature in
-/// it is invalid.
+/// When the decider config exists and does not parse, a temperature in it
+/// is invalid, or Kev's `head.pt` does not open or holds an invalid
+/// temperature.
 pub fn vendor_calibration(source: &DecisionSource) -> Result<Option<Calibration>, String> {
     match source.family {
         Family::Decider => match decider_config(source)? {
@@ -194,6 +197,7 @@ pub fn vendor_calibration(source: &DecisionSource) -> Result<Option<Calibration>
             None => Ok(None),
         },
         Family::Jebadiah => Ok(jebadiah_temperatures(&source.sidecar_dir)),
+        Family::Kev => kev_calibration(&source.sidecar_dir),
     }
 }
 

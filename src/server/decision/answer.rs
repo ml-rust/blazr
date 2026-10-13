@@ -8,6 +8,7 @@
 //! - Jebadiah (`decision_entry`, then AINode's `answer_from_decision`): the
 //!   distribution to 6 digits first, and everything else from the rounded
 //!   values; the Score `confidence` chance-corrected.
+//! - Kev (`to_answers`): see [`super::kev_answer`].
 
 use boostr::inference::decision::confidence::first_argmax;
 use boostr::inference::decision::{
@@ -15,6 +16,7 @@ use boostr::inference::decision::{
 };
 use serde_json::{Map, Value};
 
+use super::kev_answer::kev_answer;
 use crate::model::decision_template::{DecisionQuestion, Family};
 
 /// Python's `round(x, digits)`: the correctly rounded decimal, ties to
@@ -23,20 +25,23 @@ pub fn py_round(x: f64, digits: usize) -> f64 {
     format!("{x:.digits$}").parse().unwrap_or(x)
 }
 
-fn object(pairs: Vec<(&str, Value)>) -> Value {
+pub(super) fn object(pairs: Vec<(&str, Value)>) -> Value {
     Value::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
-fn keyed(keys: impl Iterator<Item = String>, values: impl Iterator<Item = f64>) -> Value {
+pub(super) fn keyed(
+    keys: impl Iterator<Item = String>,
+    values: impl Iterator<Item = f64>,
+) -> Value {
     Value::Object(keys.zip(values.map(Value::from)).collect())
 }
 
-fn level_keys(n: usize) -> impl Iterator<Item = String> {
+pub(super) fn level_keys(n: usize) -> impl Iterator<Item = String> {
     (0..n).map(|i| i.to_string())
 }
 
 /// The `legend` of a Score question: level index to level name.
-fn legend(q: &DecisionQuestion) -> Value {
+pub(super) fn legend(q: &DecisionQuestion) -> Value {
     Value::Object(
         q.legend
             .iter()
@@ -46,7 +51,7 @@ fn legend(q: &DecisionQuestion) -> Value {
     )
 }
 
-fn name(q: &DecisionQuestion, index: usize) -> Result<Value, String> {
+pub(super) fn name(q: &DecisionQuestion, index: usize) -> Result<Value, String> {
     q.names
         .get(index)
         .map(|n| Value::from(n.as_str()))
@@ -203,6 +208,7 @@ pub fn answers_json(
             let value = match family {
                 Family::Decider => decider(q, a)?,
                 Family::Jebadiah => jebadiah(q, a)?,
+                Family::Kev => kev_answer(q, a)?,
             };
             Ok((q.id.clone(), value))
         })

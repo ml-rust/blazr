@@ -211,7 +211,8 @@ where
     /// Get an executor for a model, loading it if necessary.
     ///
     /// A registered LoRA variant id, `<model>:<adapter>`, builds the variant
-    /// from its base, loading the base first when needed.
+    /// from its base, loading the base first when needed. A Kev directory
+    /// builds as the variant of its base under its own name.
     ///
     /// # Errors
     ///
@@ -224,6 +225,9 @@ where
         }
         if let Some(info) = self.lora.get(model_name) {
             return Ok(self.load_variant(&info).await?);
+        }
+        if let Some(executor) = self.load_kev(model_name).await? {
+            return Ok(executor);
         }
         if let Some(error) = self.unknown_variant(model_name).await {
             return Err(error.into());

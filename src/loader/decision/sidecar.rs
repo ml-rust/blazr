@@ -23,8 +23,14 @@ pub const JEBADIAH_CARD: &str = "jebadiah.json";
 pub const TEMPERATURES: &str = "temperatures.json";
 
 /// Every vendor sidecar `blazr decision calibrate` never writes.
-pub const VENDOR_SIDECARS: [&str; 4] =
-    [DECIDER_CONFIG, PROMPT_CONTRACT, JEBADIAH_CARD, TEMPERATURES];
+pub const VENDOR_SIDECARS: [&str; 6] = [
+    DECIDER_CONFIG,
+    PROMPT_CONTRACT,
+    JEBADIAH_CARD,
+    TEMPERATURES,
+    super::kev::HEAD_FILE,
+    super::kev::ADAPTER_CONFIG,
+];
 
 /// The answer types a temperature applies to.
 pub const TYPES: [&str; 3] = ["choice", "noul", "score"];
@@ -59,12 +65,19 @@ impl Calibration {
     }
 
     /// One temperature per answer type. A type the file leaves out takes 1.
+    /// When every type takes the same temperature, as Kev's `head.pt`
+    /// sets it, the policy is that one fixed temperature.
     pub fn policy(&self) -> TemperaturePolicy {
         let t = |kind: &str| self.temperatures.get(kind).copied().unwrap_or(1.0);
-        TemperaturePolicy::ByKind {
-            choice: t("choice"),
-            noul: t("noul"),
-            score: t("score"),
+        let (choice, noul, score) = (t("choice"), t("noul"), t("score"));
+        if choice == noul && noul == score {
+            TemperaturePolicy::Fixed(choice)
+        } else {
+            TemperaturePolicy::ByKind {
+                choice,
+                noul,
+                score,
+            }
         }
     }
 }
@@ -268,6 +281,15 @@ mod tests {
         ] {
             assert!(decider_temperatures(&bad, DECIDER_CONFIG).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn one_temperature_for_every_type_is_a_fixed_policy() {
+        let one = Calibration::from_file(
+            "head.pt",
+            TYPES.iter().map(|k| (k.to_string(), 2.4)).collect(),
+        );
+        assert_eq!(one.policy(), TemperaturePolicy::Fixed(2.4));
     }
 
     #[test]

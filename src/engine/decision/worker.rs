@@ -1,7 +1,8 @@
 //! The decision worker: one blocking thread per decision model, fed by a
 //! queue. It takes every waiting request at once, runs the requests with no
 //! shared prefix as one merged run, runs each request with a shared prefix
-//! alone over that prefix, and sends each request its answers.
+//! alone over that prefix, and sends each request its answers. The model's
+//! readout head, label-token or pointer, scores every run.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -11,15 +12,15 @@ use std::time::{Duration, Instant};
 
 use boostr::inference::decision::run::prefill_prefix;
 use boostr::inference::decision::{
-    merge_requests, run_decision, split_result, AnswerOptions, CancelToken, DecisionPlan,
-    DecisionRequest, DecisionResult, PrefixState, RunnerConfig,
+    merge_requests, split_result, CancelToken, DecisionPlan, DecisionRequest, DecisionResult,
+    PrefixState, RunnerConfig,
 };
-use boostr::model::decision::{LabelTokenHead, LabelTokenItem};
 use boostr::model::{LoadedModel, ModelClient, Qwen35Model};
 use boostr::{DType, Runtime};
 use tokio::sync::oneshot;
 
 use super::error::DecisionFailure;
+use super::readout::{ReadoutHead, ReadoutItem};
 use super::stats::DecisionStats;
 use crate::telemetry::decision::{record_decision, set_decision_queue_rows};
 
@@ -28,7 +29,7 @@ pub(super) type Reply = oneshot::Sender<Result<DecisionResult, DecisionFailure>>
 
 /// One queued request.
 pub(super) struct Job {
-    pub request: DecisionRequest<LabelTokenItem>,
+    pub request: DecisionRequest<ReadoutItem>,
     pub rows: usize,
     pub prefill_tokens: usize,
     pub cancel: CancelToken,
@@ -75,12 +76,13 @@ impl Drop for AliveGuard {
 struct Worker<R: Runtime<DType = DType>> {
     settings: WorkerSettings,
     model: Weak<LoadedModel<R>>,
+    head: ReadoutHead<R>,
     client: R::Client,
     shared: Arc<Shared>,
 }
 
-/// Start the worker thread of `model` on `device`. The thread runs until
-/// every sender of the returned queue drops.
+/// Start the worker thread of `model` on `device`, scoring with `head`.
+/// The thread runs until every sender of the returned queue drops.
 ///
 /// # Errors
 ///
@@ -89,6 +91,7 @@ struct Worker<R: Runtime<DType = DType>> {
 pub(super) fn spawn<R>(
     settings: WorkerSettings,
     model: Weak<LoadedModel<R>>,
+    head: ReadoutHead<R>,
     device: R::Device,
     shared: Arc<Shared>,
 ) -> Result<Sender<Job>, DecisionFailure>
@@ -97,6 +100,7 @@ where
     R::Client: ModelClient<R>,
     R::Device: Send + 'static,
     LoadedModel<R>: Send + Sync + 'static,
+    ReadoutHead<R>: Send + 'static,
 {
     let (tx, rx) = std::sync::mpsc::channel::<Job>();
     shared.alive.store(true, Ordering::SeqCst);
@@ -109,6 +113,7 @@ where
             Worker {
                 settings,
                 model,
+                head,
                 client,
                 shared,
             }
@@ -261,7 +266,7 @@ where
     fn run(
         &self,
         model: &Qwen35Model<R>,
-        request: &DecisionRequest<LabelTokenItem>,
+        request: &DecisionRequest<ReadoutItem>,
         cancel: Option<CancelToken>,
     ) -> Result<DecisionResult, DecisionFailure> {
         let cfg = RunnerConfig {
@@ -271,19 +276,9 @@ where
         };
         let attempt = catch_unwind(AssertUnwindSafe(|| {
             let prefix = self.prefix_state(model, &request.plan, &cfg)?;
-            run_decision(
-                &self.client,
-                model,
-                &LabelTokenHead,
-                &request.plan,
-                prefix.as_ref(),
-                &request.items,
-                &request.meta,
-                &request.temp,
-                &AnswerOptions::default(),
-                &cfg,
-            )
-            .map_err(run_failure)
+            self.head
+                .run(&self.client, model, request, prefix.as_ref(), &cfg)
+                .map_err(run_failure)
         }));
         attempt.unwrap_or_else(|_| {
             Err(DecisionFailure::Internal(

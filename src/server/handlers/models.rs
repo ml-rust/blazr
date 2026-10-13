@@ -88,7 +88,13 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
         Ok((text_models, variants)) => {
             let auxiliary = state.auxiliary_models().await;
             let mut names: Vec<String> = text_models.iter().map(|(name, _)| name.clone()).collect();
-            names.extend(variants.iter().map(|(entry, _)| entry.id.clone()));
+            // A Kev model is a directory of the model directory and the
+            // variant of its base under the same name: listed once.
+            for (entry, _) in &variants {
+                if !names.contains(&entry.id) {
+                    names.push(entry.id.clone());
+                }
+            }
             let ids = merged_model_ids(names, &auxiliary);
             let response = ModelsResponse {
                 object: "list".to_string(),

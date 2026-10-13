@@ -1,7 +1,10 @@
 //! Whether a model is a System One decision model, its family, and where
 //! its sidecar files are.
 //!
-//! Resolution order: `inference.decision.family` (`--decision-family`), the
+//! A Kev directory (`head.pt`, `adapter_config.json` and
+//! `adapter_model.safetensors`, no base weights) is a Kev model whatever
+//! else is configured. For any other model the resolution order is
+//! `inference.decision.family` (`--decision-family`), the
 //! `inference.decision.config` sidecar's file name (`--decision-config`),
 //! a sidecar in the model directory or beside the `.gguf`
 //! (`decider_config.json`: decider; `prompt_contract.json` or
@@ -13,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use boostr::format::{Gguf, GgufMetadata};
 
+use super::kev::{is_kev_dir, kev_source};
 use super::sidecar::{
     context_length, license_and_base, DECIDER_CONFIG, JEBADIAH_CARD, PROMPT_CONTRACT,
 };
@@ -140,6 +144,9 @@ pub fn detect_decision_with(
     cfg: &DecisionConfig,
     read_gguf: impl FnOnce(&Path) -> Result<GgufFacts, String>,
 ) -> Result<Option<DecisionSource>, String> {
+    if is_kev_dir(path) {
+        return Ok(Some(kev_source(path)));
+    }
     let forced = cfg.overrides_apply_to(name);
     let flag_family = cfg.family.filter(|_| forced).map(|f| f.family());
     let config_file = cfg.config.clone().filter(|_| forced);
@@ -273,5 +280,23 @@ mod tests {
             ..Default::default()
         };
         assert!(detect_decision(empty.path(), "m", &cfg).is_err());
+    }
+
+    #[test]
+    fn a_kev_directory_is_kev_whatever_is_configured() {
+        let kev = crate::loader::decision::kev::tests::kev_dir("Qwen/Qwen3.5-4B-Base");
+        assert_eq!(
+            family(kev.path(), &DecisionConfig::default()),
+            Some(Family::Kev)
+        );
+        let forced = DecisionConfig {
+            family: Some(DecisionFamily::Jebadiah),
+            ..Default::default()
+        };
+        let source = detect_decision(kev.path(), "m", &forced)
+            .expect("detects")
+            .expect("a decision model");
+        assert_eq!(source.family, Family::Kev);
+        assert_eq!(source.model_dir.as_deref(), Some(kev.path()));
     }
 }

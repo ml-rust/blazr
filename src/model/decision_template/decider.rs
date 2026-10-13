@@ -197,6 +197,7 @@ impl DeciderRenderer {
                     slot: *slot,
                     labels: self.labels.ids(row.options.len()),
                     question: entry.question,
+                    option_ends: Vec::new(),
                 });
             }
             let (kind, options) = match (entry.isolated, rq.kind) {

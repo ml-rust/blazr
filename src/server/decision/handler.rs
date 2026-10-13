@@ -19,9 +19,11 @@ use serde_json::{Map, Value};
 
 use super::answer::answers_json;
 use super::error::failure_response;
-use super::response::{response_body, ResponseFacts};
+use super::response::{kev_response_body, response_body, KevUsage, ResponseFacts};
 use crate::engine::decision::{unique_tokens, DecisionFailure};
-use crate::model::decision_template::{Calibration, DecisionError, JevRequest};
+use crate::model::chat_template::jinja_json::python_json;
+use crate::model::decision_template::kev::{packed_tokens, state_used};
+use crate::model::decision_template::{Calibration, DecisionError, DecisionRenderer, JevRequest};
 use crate::server::handlers::AppState;
 
 /// `POST /v1/systemone`.
@@ -116,7 +118,7 @@ async fn decide(state: &AppState, body: &[u8], started: Instant) -> Result<Value
     };
     let mut warnings = service.warnings().to_vec();
     warnings.extend(rendered.warnings.iter().cloned());
-    let facts = ResponseFacts {
+    let mut facts = ResponseFacts {
         model: &name,
         input_tokens: unique_tokens(&rendered.rows),
         latency_ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -124,6 +126,19 @@ async fn decide(state: &AppState, body: &[u8], started: Instant) -> Result<Value
         raw,
         warnings,
     };
+    if let DecisionRenderer::Kev(kev) = service.renderer() {
+        // Kev's `output_tokens`: its answers as `json.dumps` writes them.
+        let dumped = python_json(&Value::Object(answers.clone()), None, None, true, false);
+        let usage = KevUsage {
+            output_tokens: kev.count_tokens(&dumped).map_err(render_failure)?,
+            truncation: kev.truncates_states().then(|| {
+                let state = rendered.state_tokens;
+                (state, state_used(state))
+            }),
+        };
+        facts.input_tokens = packed_tokens(&rendered);
+        return Ok(kev_response_body(facts, usage, answers));
+    }
     Ok(response_body(facts, answers))
 }
 

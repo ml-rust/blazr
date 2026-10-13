@@ -783,7 +783,7 @@ curl http://localhost:8080/apply-template \
 
 ### POST /v1/systemone
 
-Answers typed questions about one state with a System One decision model: Jebadiah or the Mapika decider. The model reads one label token per option and generates nothing. Its other routes keep working on the same weights.
+Answers typed questions about one state with a System One decision model: Jebadiah, the Mapika decider, or Kev. Jebadiah and the decider read one label token per option. Kev reads a pointer head: the decide token's query against each option's closing-token key. No model generates. Its other routes keep working on the same weights.
 
 ```json
 {
@@ -824,7 +824,52 @@ An isolated decider Score answer adds `level_fit` and `fit_mass`. The response a
 | `503`  | `model_unavailable`    | The model unloaded or its worker stopped. Send the request again |
 | `500`  | `internal_error`       | The model did not load, its sidecars did not read, or the run failed |
 
-The family comes from `--decision-family`, then a sidecar (`decider_config.json`: decider; `prompt_contract.json` or `jebadiah.json`: Jebadiah) in the model directory or beside the `.gguf`, then a GGUF `general.basename` of `decider` or `jebadiah` tagged `system-one` or `decision-model`. A `.gguf` with no sidecar takes one from `--decision-config`. Without it, answers are uncalibrated and `warnings` says so.
+The family comes from `--decision-family`, then a sidecar (`decider_config.json`: decider; `prompt_contract.json` or `jebadiah.json`: Jebadiah) in the model directory or beside the `.gguf`, then a GGUF `general.basename` of `decider` or `jebadiah` tagged `system-one` or `decision-model`. A `.gguf` with no sidecar takes one from `--decision-config`. Without it, answers are uncalibrated and `warnings` says so. A Kev directory is always Kev: see [Kev models](#kev-models).
+
+#### Kev models
+
+A Kev directory holds a PEFT LoRA adapter (`adapter_config.json`, `adapter_model.safetensors`) and a pointer head (`head.pt`), and no base weights. Put it in the model directory and request it by its directory name, such as `kev-4b`.
+
+- Base: `--decision-base <path|name>` (`inference.decision.base`), else the adapter's `base_model_name_or_path`. That name is looked up in the model directory by its last path part, in any case (`Qwen/Qwen3.5-4B-Base` finds `qwen3.5-4b-base`), then in Hugging Face hub layout (`models--Qwen--Qwen3.5-4B-Base/snapshots/<rev>`) in the model directory and in `$HF_HUB_CACHE` and `$HF_HOME/hub`, the snapshot of Kev's recorded `base_revision` first. Nothing downloads. No base found is a `404` that names `--decision-base`.
+- Loading: the base loads once under its own name, and the Kev model is the LoRA variant of it under the Kev name, the adapter attached unmerged. Requests for the base by name keep the plain weights. `GET /v1/lora` lists the Kev model.
+- Prompt: the base's `tokenizer.json` encodes it, as Kev does. Each question runs as its own row: the state, then the question's branch. Caller text never forms a delimiter token.
+- Limits: at most 255 Choice options or Score levels. A state over 65,536 tokens (its delimiter included) is a `422`, unless `--decision-truncate-states` (`inference.decision.truncate_states`) reads its first 65,536 tokens. A row over 73,728 tokens is a `422`.
+- Temperature: `head.pt`'s one fitted temperature for every type. `blazr_calibration.json` replaces it per type.
+- `/v1/chat/completions` on the Kev name runs the base with the adapter attached. The output is base-model text: Kev never trained a generation head.
+
+Answers follow `kev/api.py`, every value rounded to 4 digits:
+
+| Type     | Fields                                                                                                   |
+| -------- | -------------------------------------------------------------------------------------------------------- |
+| `noul`   | `noul`: P(yes)                                                                                            |
+| `choice` | `choice` (first most likely key), `confidence` (chance-corrected), `probabilities`                       |
+| `score`  | `score` (expected level index), `legend`, `probabilities` by level index, `confidence` (level distance) |
+
+A Score question with one level answers `score` 0 and `confidence` 1.
+
+```json
+{
+  "model": "kev-4b",
+  "answers": {
+    "route": {"type": "choice", "choice": "billing", "confidence": 0.8649,
+              "probabilities": {"billing": 0.8987, "support": 0.0376, "sales": 0.0624, "security": 0.0013}},
+    "blocked": {"type": "noul", "noul": 0.9684},
+    "urgency": {"type": "score", "score": 3.2632,
+                "legend": {"0": "not urgent at all", "1": "low", "2": "medium", "3": "high", "4": "critical, act now"},
+                "probabilities": {"0": 0.014, "1": 0.018, "2": 0.1519, "3": 0.3229, "4": 0.4932},
+                "confidence": 0.386}
+  },
+  "usage": {"input_tokens": 177, "output_tokens": 223},
+  "latency_ms": "<milliseconds>",
+  "calibration": {"applied": true, "source": "head.pt",
+                  "temperatures": {"choice": 2.406050072164233, "noul": 2.406050072164233, "score": 2.406050072164233}},
+  "warnings": []
+}
+```
+
+- `usage.input_tokens`: the state once, then every question's branch. `usage.output_tokens`: the tokens of the answers serialized as Python's `json.dumps` writes them.
+- With `--decision-truncate-states`, `usage` adds `state_tokens` and `state_tokens_used`, and the response adds `truncated`.
+- `latency_ms` is a number: milliseconds from the request's arrival to its answers. `calibration` and `warnings` are blazr's fields. Kev's clients ignore them.
 
 #### Fitted temperatures
 
@@ -860,7 +905,7 @@ A type with fewer than `--min-rows` answers is not fitted. Score pools listed an
 
 ### GET /v1/models
 
-Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family`, `readout`, `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider) or `max_prompt_tokens` (Jebadiah), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
+Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A Kev model is listed once, with its `lora` object once it loaded. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family` (`jebadiah`, `decider` or `kev`), `readout` (`label_token` or `pointer`), `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider, Kev) and `max_prompt_tokens` (Jebadiah; Kev's row limit), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. Kev adds `base_path`, `adapter_rank` and `temperature`. When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
 
 ```bash
 curl http://localhost:8080/v1/models

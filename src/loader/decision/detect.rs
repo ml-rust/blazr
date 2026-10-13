@@ -6,16 +6,18 @@
 //! else is configured. For any other model the resolution order is
 //! `inference.decision.family` (`--decision-family`), the
 //! `inference.decision.config` sidecar's file name (`--decision-config`),
-//! a sidecar in the model directory or beside the `.gguf`
-//! (`decider_config.json`: decider; `prompt_contract.json` or
-//! `jebadiah.json`: Jebadiah), then a GGUF header whose `general.basename`
-//! is `decider` or `jebadiah` and whose `general.tags` hold `system-one` or
-//! `decision-model`.
+//! the joint-schema head in the model directory or beside the `.gguf`
+//! (`joint_head_config.json` and `joint_head.safetensors`: Clef), a
+//! sidecar there (`decider_config.json`: decider; `prompt_contract.json`
+//! or `jebadiah.json`: Jebadiah), then a GGUF header whose
+//! `general.basename` is `decider` or `jebadiah` and whose `general.tags`
+//! hold `system-one` or `decision-model`.
 
 use std::path::{Path, PathBuf};
 
 use boostr::format::{Gguf, GgufMetadata};
 
+use super::clef::{has_joint_head, HEAD_CONFIG, HEAD_WEIGHTS};
 use super::kev::{is_kev_dir, kev_source};
 use super::sidecar::{
     context_length, license_and_base, DECIDER_CONFIG, JEBADIAH_CARD, PROMPT_CONTRACT,
@@ -102,6 +104,7 @@ fn sidecar_family(file: &Path) -> Option<Family> {
     match file.file_name()?.to_str()? {
         DECIDER_CONFIG => Some(Family::Decider),
         PROMPT_CONTRACT | JEBADIAH_CARD => Some(Family::Jebadiah),
+        HEAD_CONFIG => Some(Family::Clef),
         _ => None,
     }
 }
@@ -178,11 +181,14 @@ pub fn detect_decision_with(
         let family = sidecar_family(file).ok_or_else(|| {
             format!(
                 "{}: the family of this sidecar is unknown. Name it {DECIDER_CONFIG}, \
-                 {PROMPT_CONTRACT} or {JEBADIAH_CARD}, or set --decision-family",
+                 {PROMPT_CONTRACT}, {JEBADIAH_CARD} or {HEAD_CONFIG}, or set \
+                 --decision-family",
                 file.display()
             )
         })?;
         Some((family, file.display().to_string()))
+    } else if has_joint_head(&sidecar_dir) {
+        Some((Family::Clef, format!("{HEAD_CONFIG} and {HEAD_WEIGHTS}")))
     } else {
         [DECIDER_CONFIG, PROMPT_CONTRACT, JEBADIAH_CARD]
             .iter()
@@ -280,6 +286,34 @@ mod tests {
             ..Default::default()
         };
         assert!(detect_decision(empty.path(), "m", &cfg).is_err());
+    }
+
+    /// A checkpoint with the joint-schema head beside its weights is Clef;
+    /// the head config alone names no family.
+    #[test]
+    fn the_joint_head_names_clef() {
+        let cfg = DecisionConfig::default();
+        let dir = model_dir(Some(HEAD_CONFIG));
+        assert_eq!(family(dir.path(), &cfg), None);
+        std::fs::write(dir.path().join(HEAD_WEIGHTS), b"").expect("write");
+        let source = detect_decision(dir.path(), "m", &cfg)
+            .expect("detects")
+            .expect("a decision model");
+        assert_eq!(source.family, Family::Clef);
+        assert_eq!(source.sidecar_dir, dir.path());
+        assert!(source.detected_by.contains(HEAD_WEIGHTS));
+
+        let plain = model_dir(None);
+        let forced = DecisionConfig {
+            family: Some(DecisionFamily::Clef),
+            ..Default::default()
+        };
+        assert_eq!(family(plain.path(), &forced), Some(Family::Clef));
+        let named = DecisionConfig {
+            config: Some(dir.path().join(HEAD_CONFIG)),
+            ..Default::default()
+        };
+        assert_eq!(family(plain.path(), &named), Some(Family::Clef));
     }
 
     #[test]

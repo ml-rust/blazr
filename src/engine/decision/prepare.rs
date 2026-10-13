@@ -4,12 +4,17 @@
 //!
 //! Under the label-token readout a scoring row reads one gather, its
 //! answer slot. Under the pointer readout it reads its decide slot and
-//! each option's closing token, every one a gather of the plan.
+//! each option's closing token, every one a gather of the plan. Under the
+//! joint-schema readout the one row is the whole record: its plan is
+//! `full_sequence_plan`, a gather per position, and each field reads its
+//! spans of it.
 
 use boostr::inference::decision::{plan_from_rows, DecisionRequest, RowSlot, TemperaturePolicy};
+use boostr::model::decision::joint_schema::full_sequence_plan;
 
 use super::error::DecisionFailure;
 use super::readout::ReadoutItem;
+use crate::model::decision_template::clef::JointLayout;
 use crate::model::decision_template::{Readout, RenderedDecision};
 
 /// A request ready to queue.
@@ -46,19 +51,72 @@ pub fn unique_tokens(rows: &[Vec<u32>]) -> usize {
     common + rows.iter().map(|r| r.len() - common).sum::<usize>()
 }
 
+/// The boostr request of a joint-schema record: its one row read whole,
+/// one item per field, at temperature 1, the head's plain softmax.
+fn prepare_joint(
+    rendered: &RenderedDecision,
+    layout: &JointLayout,
+) -> Result<PreparedRequest, DecisionFailure> {
+    let [record] = rendered.rows.as_slice() else {
+        return Err(DecisionFailure::Internal(format!(
+            "a joint-schema record renders one row, got {}",
+            rendered.rows.len()
+        )));
+    };
+    if layout.fields.len() != rendered.questions.len() {
+        return Err(DecisionFailure::Internal(format!(
+            "the record has {} fields for {} questions",
+            layout.fields.len(),
+            rendered.questions.len()
+        )));
+    }
+    let plan = full_sequence_plan(record)
+        .map_err(|e| DecisionFailure::Internal(format!("the record does not plan: {e}")))?;
+    let last = record.len().saturating_sub(1);
+    let items = layout
+        .fields
+        .iter()
+        .map(|field| ReadoutItem {
+            slot: last,
+            labels: Vec::new(),
+            options: Vec::new(),
+            joint: Some(field.item.clone()),
+        })
+        .collect();
+    Ok(PreparedRequest {
+        rows: 1,
+        prefill_tokens: record.len(),
+        request: DecisionRequest {
+            plan,
+            items,
+            meta: rendered.questions.iter().map(|q| q.meta.clone()).collect(),
+            temp: TemperaturePolicy::Fixed(1.0),
+        },
+    })
+}
+
 /// The boostr request of `rendered` at temperatures `temp`. A shared prefix
 /// of `shared_min_tokens` or more runs once; a shorter one runs as part of
-/// each full row.
+/// each full row. A joint-schema record runs whole, alone, at temperature
+/// 1 whatever `temp` says.
 ///
 /// # Errors
 ///
-/// [`DecisionFailure::Internal`] when the rendered rows do not plan, which
-/// a renderer never produces.
+/// [`DecisionFailure::Internal`] when the rendered rows do not plan, or a
+/// joint-schema record lacks its layout, which a renderer never produces.
 pub fn prepare(
     rendered: &RenderedDecision,
     temp: TemperaturePolicy,
     shared_min_tokens: usize,
 ) -> Result<PreparedRequest, DecisionFailure> {
+    if rendered.family.readout() == Readout::JointSchema {
+        let layout = rendered.joint.as_ref().ok_or_else(|| {
+            DecisionFailure::Internal(
+                "a joint-schema record was rendered without its fields".into(),
+            )
+        })?;
+        return prepare_joint(rendered, layout);
+    }
     let pointer = rendered.family.readout() == Readout::Pointer;
     // Each scoring row's slots: its answer slot, then under the pointer
     // readout its option ends.
@@ -92,12 +150,14 @@ pub fn prepare(
                 slot,
                 labels: Vec::new(),
                 options,
+                joint: None,
             }
         } else {
             ReadoutItem {
                 slot,
                 labels: row.labels.clone(),
                 options: Vec::new(),
+                joint: None,
             }
         };
         items.push(item);
@@ -152,6 +212,7 @@ mod tests {
             rows,
             warnings: Vec::new(),
             state_tokens: 3,
+            joint: None,
         }
     }
 
@@ -196,5 +257,42 @@ mod tests {
         let shared = prepare(&r, TemperaturePolicy::Fixed(2.0), 3).expect("plans");
         assert!(shared.has_prefix(), "the state runs once");
         assert_eq!(shared.request.plan.prefix_len(), 3);
+    }
+
+    /// A joint-schema record runs whole and alone: every position a
+    /// gather, one item per field carrying its spans, temperature 1.
+    #[test]
+    fn a_joint_record_reads_every_position() {
+        use crate::model::decision_template::clef::JointField;
+        use boostr::model::decision::{FieldKind, JointSchemaItem};
+        let record: Vec<u32> = (10..22).collect();
+        let item = JointSchemaItem::from_tokens(FieldKind::Noul, 2..4, &[5..7, 8..10], &record)
+            .expect("an item");
+        let mut r = rendered(vec![record.clone()]);
+        r.family = Family::Clef;
+        r.questions[0].meta = item.meta();
+        assert!(
+            prepare(&r, TemperaturePolicy::Fixed(2.0), 3).is_err(),
+            "a record needs its layout"
+        );
+        r.joint = Some(JointLayout {
+            fields: vec![JointField {
+                item: item.clone(),
+                wire_order: vec![0, 1],
+                legend: Vec::new(),
+            }],
+        });
+        let p = prepare(&r, TemperaturePolicy::Fixed(2.0), 3).expect("plans");
+        assert!(
+            p.has_prefix(),
+            "the record is the prefix, so it never merges"
+        );
+        assert_eq!((p.rows, p.prefill_tokens), (1, record.len()));
+        assert!(p.request.plan.rows.is_empty());
+        assert_eq!(p.request.plan.gathers.len(), record.len());
+        assert_eq!(p.request.items.len(), 1);
+        assert_eq!(p.request.items[0].joint.as_ref(), Some(&item));
+        assert_eq!(p.request.items[0].slot, record.len() - 1);
+        assert_eq!(p.request.temp, TemperaturePolicy::Fixed(1.0));
     }
 }

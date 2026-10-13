@@ -23,13 +23,15 @@ pub const JEBADIAH_CARD: &str = "jebadiah.json";
 pub const TEMPERATURES: &str = "temperatures.json";
 
 /// Every vendor sidecar `blazr decision calibrate` never writes.
-pub const VENDOR_SIDECARS: [&str; 6] = [
+pub const VENDOR_SIDECARS: [&str; 8] = [
     DECIDER_CONFIG,
     PROMPT_CONTRACT,
     JEBADIAH_CARD,
     TEMPERATURES,
     super::kev::HEAD_FILE,
     super::kev::ADAPTER_CONFIG,
+    super::clef::HEAD_CONFIG,
+    super::clef::HEAD_WEIGHTS,
 ];
 
 /// The answer types a temperature applies to.

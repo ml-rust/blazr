@@ -1,8 +1,9 @@
-//! System One decision models: family detection, sidecar files, Kev
-//! directories, the user's fitted temperatures, the `/v1/models` report,
-//! and the renderer a model's files build.
+//! System One decision models: family detection, sidecar files, Kev and
+//! Clef directories, the user's fitted temperatures, the `/v1/models`
+//! report, and the renderer a model's files build.
 
 pub mod blazr_calibration;
+pub mod clef;
 pub mod detect;
 pub mod family_files;
 pub mod info;

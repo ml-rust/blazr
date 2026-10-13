@@ -2,12 +2,14 @@
 //! model family's own wire shape.
 
 pub mod answer;
+pub mod clef_answer;
 pub mod error;
 pub mod handler;
 pub mod kev_answer;
 pub mod response;
 
 pub use answer::{answers_json, py_round};
+pub use clef_answer::clef_answers;
 pub use error::failure_response;
 pub use handler::systemone;
 pub use kev_answer::kev_answer;

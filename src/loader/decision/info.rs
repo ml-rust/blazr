@@ -7,12 +7,14 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::blazr_calibration::served_calibration;
+use super::clef::{read_head_config, HEAD_DTYPE};
 use super::detect::DecisionSource;
 use super::family_files::{
     contract_failures, decider_config, empty_config, jebadiah_contract, model_template,
 };
 use super::kev::{head_temperature, read_kev_adapter};
 use super::sidecar::{context_length, license_and_base, Calibration};
+use crate::model::decision_template::clef::MAX_LENGTH as CLEF_MAX_LENGTH;
 use crate::model::decision_template::decider::DEFAULT_MAX_STATE_TOKENS;
 use crate::model::decision_template::jebadiah::DEFAULT_MAX_TOKENS;
 use crate::model::decision_template::kev::{SERVE_MAX_ROW, SERVE_MAX_STATE};
@@ -65,10 +67,11 @@ impl CalibrationInfo {
 /// The `decision` object of a `/v1/models` entry.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DecisionInfo {
-    /// `jebadiah`, `decider` or `kev`.
+    /// `jebadiah`, `decider`, `kev` or `clef`.
     pub family: &'static str,
-    /// How answers are read: `label_token`, one label token per option, or
-    /// `pointer`, Kev's decide-token query against each option's key.
+    /// How answers are read: `label_token`, one label token per option;
+    /// `pointer`, Kev's decide-token query against each option's key; or
+    /// `joint_schema`, Clef's head over every row of the record.
     pub readout: &'static str,
     /// What named the family.
     pub detected_by: String,
@@ -84,6 +87,7 @@ pub struct DecisionInfo {
     pub max_state_tokens: Option<usize>,
     /// Jebadiah: the prompt-token cap of one row when the request names none.
     /// Kev: the token cap of one row, the state and one question's branch.
+    /// Clef: the token cap of the whole record; a longer state is cut.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_prompt_tokens: Option<usize>,
     /// The positions the model addresses.
@@ -106,6 +110,15 @@ pub struct DecisionInfo {
     /// Kev: the one temperature `head.pt` was fitted with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Clef: the width of the joint-schema head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_width: Option<usize>,
+    /// Clef: the backbone hidden size the head reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_hidden_size: Option<usize>,
+    /// Clef: the dtype the joint-schema head computes in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_dtype: Option<&'static str>,
 }
 
 /// The `/v1/models` report of `source`.
@@ -149,6 +162,9 @@ pub fn decision_info_with_base(
         base_path: None,
         adapter_rank: None,
         temperature: None,
+        head_width: None,
+        head_hidden_size: None,
+        head_dtype: None,
     };
     match source.family {
         Family::Decider => {
@@ -191,6 +207,13 @@ pub fn decision_info_with_base(
                 info.base_path = Some(base.display().to_string());
                 info.context_length = context_length(Some(base), None).or(info.context_length);
             }
+        }
+        Family::Clef => {
+            let head = read_head_config(&source.sidecar_dir)?;
+            info.max_prompt_tokens = Some(CLEF_MAX_LENGTH);
+            info.head_width = Some(head.width);
+            info.head_hidden_size = Some(head.hidden_size);
+            info.head_dtype = Some(HEAD_DTYPE);
         }
     }
     info.calibration = CalibrationInfo::of(served_calibration(source)?.as_ref());
@@ -281,6 +304,26 @@ mod tests {
             e.contains(BLAZR_CALIBRATION) && e.contains("temperatures"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn clef_info_reads_the_head_config() {
+        use crate::loader::decision::clef::{HEAD_CONFIG, HEAD_WEIGHTS};
+        let dir = tempfile::tempdir().expect("temp dir");
+        let head = r#"{"hidden_size": 4096, "width": 1024, "routing_layers": 2,
+            "layers": 4, "heads": 16, "feedforward": 4096}"#;
+        std::fs::write(dir.path().join(HEAD_CONFIG), head).expect("write");
+        std::fs::write(dir.path().join(HEAD_WEIGHTS), b"").expect("write");
+        let info = decision_info(&source(dir.path(), Family::Clef)).expect("info");
+        let json = serde_json::to_value(&info).expect("serializes");
+        assert_eq!(json["family"], "clef");
+        assert_eq!(json["readout"], "joint_schema");
+        assert_eq!(json["head_width"], 1024);
+        assert_eq!(json["head_hidden_size"], 4096);
+        assert_eq!(json["head_dtype"], "f32");
+        assert_eq!(json["max_prompt_tokens"], 16384);
+        assert_eq!(json["calibration"]["source"], serde_json::Value::Null);
+        assert!(json.get("temperature").is_none());
     }
 
     #[test]

@@ -233,6 +233,7 @@ impl DeciderRenderer {
             questions,
             warnings,
             state_tokens: ctx_ids.len(),
+            joint: None,
         })
     }
 

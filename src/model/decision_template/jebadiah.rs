@@ -189,6 +189,7 @@ impl JebadiahRenderer {
             questions: Vec::with_capacity(translated.len()),
             warnings,
             state_tokens,
+            joint: None,
         };
         for (i, (q, (t, keys))) in request.questions.iter().zip(translated).enumerate() {
             let legend = match t.kind {

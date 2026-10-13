@@ -17,13 +17,8 @@
 use boostr::inference::decision::{choice_confidence, score_confidence, Answer, ScoreConfidence};
 use serde_json::Value;
 
-use super::answer::{keyed, legend, level_keys, name, object, py_round};
+use super::answer::{keyed, legend, level_keys, name, object, py_round, round4 as round_prob};
 use crate::model::decision_template::DecisionQuestion;
-
-/// Kev's `round_prob`.
-fn round_prob(x: f64) -> Value {
-    Value::from(py_round(x, 4))
-}
 
 /// Kev's `_normalize`: each entry over the sum, a zero sum read as uniform.
 fn normalize(p: &[f64]) -> Vec<f64> {

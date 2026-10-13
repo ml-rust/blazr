@@ -18,6 +18,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
 
 use super::answer::answers_json;
+use super::clef_answer::clef_answers;
 use super::error::failure_response;
 use super::response::{kev_response_body, response_body, KevUsage, ResponseFacts};
 use crate::engine::decision::{unique_tokens, DecisionFailure};
@@ -113,8 +114,11 @@ async fn decide(state: &AppState, body: &[u8], started: Instant) -> Result<Value
     } else {
         let prepared = service.prepare(&rendered, raw)?;
         let result = service.submit(prepared)?.wait().await?;
-        answers_json(service.family(), &rendered.questions, &result)
-            .map_err(DecisionFailure::Internal)?
+        match rendered.joint {
+            Some(_) => clef_answers(&rendered, &result),
+            None => answers_json(service.family(), &rendered.questions, &result),
+        }
+        .map_err(DecisionFailure::Internal)?
     };
     let mut warnings = service.warnings().to_vec();
     warnings.extend(rendered.warnings.iter().cloned());

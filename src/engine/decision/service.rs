@@ -66,12 +66,13 @@ impl Drop for Pending {
 
 impl<R: Runtime<DType = DType>> DecisionService<R> {
     /// Start the worker of `model` on `device` and serve `loaded` as `name`.
-    /// A Kev model's pointer head loads here, on `device`.
+    /// A Kev model's pointer head and a Clef model's joint-schema head load
+    /// here, on `device`.
     ///
     /// # Errors
     ///
     /// [`DecisionFailure::Internal`] when the worker thread does not start
-    /// or the pointer head does not load or fit the model.
+    /// or the head does not load or fit the model.
     pub fn start(
         name: &str,
         loaded: LoadedRenderer,
@@ -96,7 +97,12 @@ impl<R: Runtime<DType = DType>> DecisionService<R> {
             max_lane_bytes: cfg.max_lane_bytes(),
             batch_wait: Duration::from_millis(cfg.batch_wait_ms),
         };
-        let head = ReadoutHead::load(loaded.pointer_head.as_deref(), model, &device)?;
+        let head = ReadoutHead::load(
+            loaded.pointer_head.as_deref(),
+            loaded.joint_head.as_deref(),
+            model,
+            &device,
+        )?;
         let weak = Arc::downgrade(model);
         let queue = spawn(settings, weak.clone(), head, device, Arc::clone(&shared))?;
         Ok(Self {

@@ -247,12 +247,12 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `mmproj`                             | path     | unset               | Qwen3-VL mmproj GGUF for image inputs                                                                                        |
 | `image_min_tokens`                   | integer  | unset               | Fewest output tokens per image. Unset keeps the mmproj value.                                                                |
 | `image_max_tokens`                   | integer  | unset               | Most output tokens per image. Unset keeps the mmproj value.                                                                  |
-| `decision.family`                    | string   | detected            | `jebadiah` or `decider` for the start model, else every model, over sidecar and GGUF detection.                              |
-| `decision.config`                    | path     | unset               | Sidecar (`decider_config.json`, `prompt_contract.json`, `jebadiah.json`) for a model that ships none. Same scope as `family`. |
+| `decision.family`                    | string   | detected            | `jebadiah`, `decider` or `clef` for the start model, else every model, over sidecar, head and GGUF detection.                |
+| `decision.config`                    | path     | unset               | Sidecar (`decider_config.json`, `prompt_contract.json`, `jebadiah.json`, or Clef's `joint_head_config.json` with `joint_head.safetensors` beside it) for a model that ships none. Same scope as `family`. |
 | `decision.shared_min_tokens`         | integer  | `768`               | Shortest shared prefix one request runs once. Shorter prefixes run as full rows merged with other requests.                  |
 | `decision.lane_budget_mb`            | integer  | `8192`              | Lane-state budget of one decision forward pass in MiB. `0` sets none.                                                        |
 | `decision.max_rows`                  | integer  | `1024`              | Most prompt rows one request expands to. More answers `413`.                                                                 |
-| `decision.max_row_tokens`            | integer  | state cap + `4096`  | Most tokens in one row. More answers `413`. Kev's default is its own row limit, `73728`.                                     |
+| `decision.max_row_tokens`            | integer  | state cap + `4096`  | Most tokens in one row. More answers `413`. Kev's default is its own row limit, `73728`. Clef's is its record limit, `16384`. |
 | `decision.max_request_tokens`        | integer  | `1048576`           | Most tokens over all rows of one request. More answers `413`.                                                                |
 | `decision.max_queue_rows`            | integer  | `4096`              | Most rows queued or running per model. More answers `503`.                                                                   |
 | `decision.batch_wait_ms`             | integer  | `0`                 | Milliseconds the decision worker waits after a request for more to merge.                                                    |
@@ -389,8 +389,8 @@ When the model is omitted, `run`, `generate`, `chat`, `bench`, and `serve` use `
 | `--mmproj <PATH>`                     | mmproj value          | Qwen3-VL mmproj GGUF for image inputs                                                                                        |
 | `--image-min-tokens <N>`              | mmproj value          | Fewest output tokens per image                                                                                               |
 | `--image-max-tokens <N>`              | mmproj value          | Most output tokens per image                                                                                                 |
-| `--decision-family <jebadiah\|decider>` | `inference.decision.family`, else detected | Family of the start model on `/v1/systemone`                                                         |
-| `--decision-config <FILE>`            | `inference.decision.config` | Sidecar of a model that ships none, such as a bare `.gguf`                                                             |
+| `--decision-family <jebadiah\|decider\|clef>` | `inference.decision.family`, else detected | Family of the start model on `/v1/systemone`                                                   |
+| `--decision-config <FILE>`            | `inference.decision.config` | Sidecar of a model that ships none, such as a bare `.gguf`, or a Clef head's `joint_head_config.json`                  |
 | `--decision-shared-min-tokens <N>`    | `inference.decision.shared_min_tokens`, else `768` | Shortest shared prefix one request runs once                                                    |
 | `--decision-lane-budget-mb <MIB>`     | `inference.decision.lane_budget_mb`, else `8192` | Lane-state budget of one decision forward pass                                                    |
 | `--decision-max-rows <N>`             | `inference.decision.max_rows`, else `1024` | Most prompt rows per request                                                                             |
@@ -501,7 +501,7 @@ Rules that apply to `run` and `generate`:
 | `--dry-run`           | off                                        | Prints the fit and writes nothing                                         |
 | `--decision-*`        | as `serve`                                 | Family, sidecar and worker limits, as [serve](#serve) takes them          |
 
-The model loads on the build's runtime and the `device` key's GPU. A label file of records only loads no weights.
+The model loads on the build's runtime and the `device` key's GPU. A label file of records only loads no weights. A Clef model is refused: its head serves no temperature.
 
 ### swarm and disagg (distributed feature)
 

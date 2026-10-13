@@ -236,6 +236,7 @@ impl KevRenderer {
             questions: Vec::with_capacity(questions.len()),
             warnings,
             state_tokens,
+            joint: None,
         };
         for (i, q) in questions.into_iter().enumerate() {
             let mut row = Vec::with_capacity(prefix.len() + 2 + 3 * q.options.len());
@@ -327,6 +328,7 @@ mod tests {
             questions: Vec::new(),
             warnings: Vec::new(),
             state_tokens: 3,
+            joint: None,
         };
         assert_eq!(packed_tokens(&rendered), 3 + 1 + 2);
         assert_eq!(state_used(SERVE_MAX_STATE + 5), SERVE_MAX_STATE);

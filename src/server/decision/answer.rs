@@ -9,6 +9,8 @@
 //!   distribution to 6 digits first, and everything else from the rounded
 //!   values; the Score `confidence` chance-corrected.
 //! - Kev (`to_answers`): see [`super::kev_answer`].
+//! - Clef (`systemone_answer`): see [`super::clef_answer`], which also
+//!   reads the record's field layout.
 
 use boostr::inference::decision::confidence::first_argmax;
 use boostr::inference::decision::{
@@ -23,6 +25,11 @@ use crate::model::decision_template::{DecisionQuestion, Family};
 /// even, read back as the nearest double.
 pub fn py_round(x: f64, digits: usize) -> f64 {
     format!("{x:.digits$}").parse().unwrap_or(x)
+}
+
+/// `x` rounded to 4 digits, as a JSON number.
+pub(super) fn round4(x: f64) -> Value {
+    Value::from(py_round(x, 4))
 }
 
 pub(super) fn object(pairs: Vec<(&str, Value)>) -> Value {
@@ -67,7 +74,7 @@ fn renormalized(probs: &[f64]) -> Vec<f64> {
 
 /// The decider's answer to `q`.
 fn decider(q: &DecisionQuestion, answer: &Answer) -> Result<Value, String> {
-    let r4 = |x: f64| Value::from(py_round(x, 4));
+    let r4 = round4;
     let summary = |p: &[f64]| {
         let j = first_argmax(p);
         (j, r4(p[j]), r4(certainty(p)))
@@ -209,6 +216,13 @@ pub fn answers_json(
                 Family::Decider => decider(q, a)?,
                 Family::Jebadiah => jebadiah(q, a)?,
                 Family::Kev => kev_answer(q, a)?,
+                Family::Clef => {
+                    return Err(format!(
+                        "question '{}': a Clef answer reads the request's option order; \
+                         format it with clef_answers",
+                        q.id
+                    ))
+                }
             };
             Ok((q.id.clone(), value))
         })

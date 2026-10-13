@@ -31,6 +31,8 @@ pub enum DecisionFamily {
     Jebadiah,
     /// Mapika decider: the plain `Context:` / `Question:` layout.
     Decider,
+    /// Clef: the joint-schema head beside a Qwen3.5 checkpoint.
+    Clef,
 }
 
 impl DecisionFamily {
@@ -39,6 +41,7 @@ impl DecisionFamily {
         match self {
             Self::Jebadiah => Family::Jebadiah,
             Self::Decider => Family::Decider,
+            Self::Clef => Family::Clef,
         }
     }
 }

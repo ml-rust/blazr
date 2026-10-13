@@ -2,7 +2,8 @@
 //! queue. It takes every waiting request at once, runs the requests with no
 //! shared prefix as one merged run, runs each request with a shared prefix
 //! alone over that prefix, and sends each request its answers. The model's
-//! readout head, label-token or pointer, scores every run.
+//! readout head, label-token, pointer or joint-schema, scores every run. A
+//! joint-schema record is its plan's prefix, so it always runs alone.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

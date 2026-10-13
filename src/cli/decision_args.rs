@@ -14,8 +14,9 @@ pub struct DecisionArgs {
     pub decision_family: Option<DecisionFamily>,
 
     /// Sidecar file for a model that ships none beside it, such as a bare
-    /// `.gguf`: `decider_config.json`, `prompt_contract.json` or
-    /// `jebadiah.json`. Same scope as --decision-family.
+    /// `.gguf`: `decider_config.json`, `prompt_contract.json`,
+    /// `jebadiah.json`, or Clef's `joint_head_config.json` (its
+    /// `joint_head.safetensors` beside it). Same scope as --decision-family.
     /// [default: inference.decision.config]
     #[arg(long, value_name = "FILE")]
     pub decision_config: Option<std::path::PathBuf>,

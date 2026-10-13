@@ -6,13 +6,15 @@
 //! the decider config, the prompt contract and the temperatures, each type
 //! taken from `blazr_calibration.json` when that file sets it. A Kev model
 //! encodes with its base's `tokenizer.json`, as Kev does, and reads its
-//! temperature from `head.pt`.
+//! temperature from `head.pt`. A Clef model writes its prompt without the
+//! chat template and reads no temperature.
 
 use std::path::{Path, PathBuf};
 
 use boostr::format::{extract_gguf_vocab, Gguf};
 
 use super::blazr_calibration::served_calibration;
+use super::clef::{has_joint_head, HEAD_CONFIG, HEAD_WEIGHTS};
 use super::detect::DecisionSource;
 use super::family_files::{
     contract_failures, decider_config, empty_config, jebadiah_contract, model_template,
@@ -22,6 +24,7 @@ use super::kev::HEAD_FILE;
 use super::sidecar::{Calibration, DECIDER_CONFIG};
 use crate::config::DecisionConfig;
 use crate::model::chat_template::{JinjaTemplate, ModelTemplate};
+use crate::model::decision_template::clef::ClefRenderer;
 use crate::model::decision_template::family::load_tokenizer;
 use crate::model::decision_template::{
     DeciderConfig, DeciderRenderer, DecisionRenderer, Family, JebadiahRenderer, KevRenderer, Layout,
@@ -32,9 +35,13 @@ use crate::model::decision_template::{
 pub struct LoadedRenderer {
     /// The family's renderer over the model's tokenizer.
     pub renderer: DecisionRenderer,
-    /// Kev: the `head.pt` the pointer readout loads. `None` for the
-    /// label-token families.
+    /// Kev: the `head.pt` the pointer readout loads. `None` for the other
+    /// families.
     pub pointer_head: Option<PathBuf>,
+    /// Clef: the directory holding `joint_head_config.json` and
+    /// `joint_head.safetensors`, which the joint-schema readout loads.
+    /// `None` for the other families.
+    pub joint_head: Option<PathBuf>,
     /// The fitted temperatures. `None` serves raw.
     pub calibration: Option<Calibration>,
     /// What every response of this model carries in `warnings`.
@@ -112,6 +119,7 @@ pub fn load_renderer(
     let mut info = decision_info_with_base(source, base)?;
     let mut warnings = Vec::new();
     let mut pointer_head = None;
+    let mut joint_head = None;
     let renderer = match source.family {
         Family::Jebadiah => {
             let tokenizer = tokenizer(source)?;
@@ -175,25 +183,42 @@ pub fn load_renderer(
             pointer_head = Some(dir.join(HEAD_FILE));
             DecisionRenderer::Kev(kev_renderer(dir, base, cfg, &mut warnings)?)
         }
+        Family::Clef => {
+            let dir = &source.sidecar_dir;
+            if !has_joint_head(dir) {
+                return Err(format!(
+                    "{} lacks {HEAD_CONFIG} or {HEAD_WEIGHTS}: a Clef model reads its \
+                     answers with the joint-schema head they hold",
+                    dir.display()
+                ));
+            }
+            joint_head = Some(dir.clone());
+            let renderer = ClefRenderer::new(tokenizer(source)?).map_err(|e| e.to_string())?;
+            DecisionRenderer::Clef(renderer)
+        }
     };
     let calibration = served_calibration(source)?;
     if calibration.is_none() {
-        warnings.push(match source.family {
-            Family::Kev => format!(
+        let uncalibrated = match source.family {
+            Family::Kev => Some(format!(
                 "{HEAD_FILE} sets no temperature, so every answer is uncalibrated \
                  (temperature 1). Fit one with blazr decision calibrate"
-            ),
-            Family::Jebadiah | Family::Decider => {
+            )),
+            Family::Jebadiah | Family::Decider => Some(
                 "the model ships no fitted temperatures, so every answer is uncalibrated \
                  (temperature 1). Pass --decision-config with the model's sidecar, or fit \
                  them with blazr decision calibrate"
-                    .to_string()
-            }
-        });
+                    .to_string(),
+            ),
+            // The head's probabilities are a plain softmax of its logits.
+            Family::Clef => None,
+        };
+        warnings.extend(uncalibrated);
     }
     Ok(LoadedRenderer {
         renderer,
         pointer_head,
+        joint_head,
         calibration,
         warnings,
         info,

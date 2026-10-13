@@ -253,8 +253,9 @@ where
         .ok_or_else(|| {
             DecisionFailure::NotDecisionModel(format!(
                 "model '{name}' is not a System One decision model: it ships no \
-                 decider_config.json, prompt_contract.json or jebadiah.json, its GGUF header \
-                 names no decision model, and no --decision-family applies to it"
+                 decider_config.json, prompt_contract.json, jebadiah.json or joint-schema head \
+                 (joint_head_config.json with joint_head.safetensors), its GGUF header names \
+                 no decision model, and no --decision-family applies to it"
             ))
         })?;
         let executor = self.get_executor(name).await.map_err(|e| match e
@@ -276,7 +277,7 @@ where
         }
         let base = match source.family {
             Family::Kev => self.kev_base_path(name, &path),
-            Family::Jebadiah | Family::Decider => None,
+            Family::Jebadiah | Family::Decider | Family::Clef => None,
         };
         let loaded = load_renderer(&source, &self.decision_config, base.as_deref())
             .map_err(|e| DecisionFailure::Internal(format!("model '{name}': {e}")))?;

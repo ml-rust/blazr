@@ -783,7 +783,7 @@ curl http://localhost:8080/apply-template \
 
 ### POST /v1/systemone
 
-Answers typed questions about one state with a System One decision model: Jebadiah, the Mapika decider, or Kev. Jebadiah and the decider read one label token per option. Kev reads a pointer head: the decide token's query against each option's closing-token key. No model generates. Its other routes keep working on the same weights.
+Answers typed questions about one state with a System One decision model: Jebadiah, the Mapika decider, Kev, or Clef. Jebadiah and the decider read one label token per option. Kev reads a pointer head: the decide token's query against each option's closing-token key. Clef reads a joint-schema head over every hidden row of the record and scores all questions together. No model generates. Its other routes keep working on the same weights.
 
 ```json
 {
@@ -824,7 +824,7 @@ An isolated decider Score answer adds `level_fit` and `fit_mass`. The response a
 | `503`  | `model_unavailable`    | The model unloaded or its worker stopped. Send the request again |
 | `500`  | `internal_error`       | The model did not load, its sidecars did not read, or the run failed |
 
-The family comes from `--decision-family`, then a sidecar (`decider_config.json`: decider; `prompt_contract.json` or `jebadiah.json`: Jebadiah) in the model directory or beside the `.gguf`, then a GGUF `general.basename` of `decider` or `jebadiah` tagged `system-one` or `decision-model`. A `.gguf` with no sidecar takes one from `--decision-config`. Without it, answers are uncalibrated and `warnings` says so. A Kev directory is always Kev: see [Kev models](#kev-models).
+The family comes from `--decision-family`, then a sidecar (`decider_config.json`: decider; `prompt_contract.json` or `jebadiah.json`: Jebadiah) in the model directory or beside the `.gguf`, then a GGUF `general.basename` of `decider` or `jebadiah` tagged `system-one` or `decision-model`. A `.gguf` with no sidecar takes one from `--decision-config`. Without it, answers are uncalibrated and `warnings` says so. A Kev directory is always Kev: see [Kev models](#kev-models). A checkpoint with `joint_head_config.json` and `joint_head.safetensors` beside its weights is Clef: see [Clef models](#clef-models).
 
 #### Kev models
 
@@ -871,6 +871,49 @@ A Score question with one level answers `score` 0 and `confidence` 1.
 - With `--decision-truncate-states`, `usage` adds `state_tokens` and `state_tokens_used`, and the response adds `truncated`.
 - `latency_ms` is a number: milliseconds from the request's arrival to its answers. `calibration` and `warnings` are blazr's fields. Kev's clients ignore them.
 
+#### Clef models
+
+A Clef directory (Cloudflare's Clef and Clef-Flash) is an ordinary Hugging Face Qwen3.5 checkpoint (`Qwen3_5ForConditionalGeneration`, untied `lm_head`) with a joint-schema head beside it: `joint_head_config.json` and `joint_head.safetensors`. Put it in the model directory and request it by its directory name, such as `clef-flash`. `--decision-family clef` names a directory as Clef; `--decision-config <dir>/joint_head_config.json` points at a head in another directory.
+
+- Backbone: the full fine-tuned weights load through blazr's SafeTensors loader, in the dtype blazr picks for any model: `--dtype`, else the checkpoint's `bfloat16`. Only the shards `model.safetensors.index.json` names load, and the vision tower stays on disk. Clef-Flash's text backbone is 9.0B parameters: 16.7 GiB in BF16, 34 GiB in F32. It must fit one device: blazr has no layer offloading for a server model, so a 12 GB GPU does not hold it. On the CPU it runs in BF16 or F32 with that much free RAM. A quantized GGUF of the backbone is unconfirmed: no Clef GGUF is published, and none has been tested.
+- Head: boostr's `JointSchemaHead` in F32, every head weight cast once at load. The release runs the head in BF16. On the same hidden rows the two differ by about 0.002 in a probability.
+- Prompt: the release's own layout. A ChatML system and user turn hold the state and a `SCHEMA FIELDS` block that lists every question with its `ID`, `TYPE`, `INSTRUCTION` and `OPTION n` lines. The assistant turn holds an empty `<think>` block and `JOINT SCHEMA DECISIONS:`. The chat template is not used. A state, instruction or option that is not a string is written as compact JSON with sorted keys. Each piece is encoded on its own, as the release encodes it.
+- Options in the head: `noul` is `true` then `false`; `choice` is the criteria keys in code-point order; `score` is the levels in list order. A one-option `choice` or `score` is accepted. A `noul` field's `criteria` may describe `true` and `false`; other keys are ignored.
+- Limits: one record of at most 16,384 tokens. The state is cut at the token level to fit, and `warnings` says so. A schema that leaves no room is a `422`: `schema requires N tokens before state; maximum is 16384`. With `--decision-max-row-tokens` below 16,384, a longer record is a `413`.
+- Each request runs alone: the head reads every row of the record, so records never merge.
+- Control-token text in a request (`<|im_end|>`, `<think>`) stays text. The release turns it into control tokens, which lets a state close its turn. blazr does not, so such a request gets other ids than the release gives it. Any other request gets the release's ids.
+- No temperature: the probabilities are a plain softmax of the head's logits. `blazr decision calibrate` refuses a Clef model, and `blazr_calibration.json` is not read for it.
+
+Errors use the release's words: `model and state are required`, `at least one question is required`, `<id>: type must be noul, choice, or score`, `<id>: criteria must not be empty`. blazr also refuses criteria of a shape the release cannot read: a `choice` list, a `score` object, a `noul` list.
+
+Answers follow `systemone_answer`, every value rounded to 4 digits:
+
+| Type     | Fields                                                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `noul`   | `noul`: P(true)                                                                                                              |
+| `choice` | `choice` (first most likely key in the order the request wrote them), `confidence` (its probability), `probabilities` in request order |
+| `score`  | `score` (expected level index), `confidence` (largest level probability), `legend` (criteria items as sent), `probabilities` by level index |
+
+```json
+{
+  "model": "clef-flash",
+  "answers": {
+    "route": {"type": "choice", "choice": "billing", "confidence": 0.9183,
+              "probabilities": {"sales": 0.0708, "billing": 0.9183, "support": 0.0066, "security": 0.0043}},
+    "blocked": {"type": "noul", "noul": 0.9247},
+    "urgency": {"type": "score", "score": 3.055, "confidence": 0.7762,
+                "legend": {"0": "not urgent at all", "1": "low", "2": "medium", "3": "high", "4": "critical, act now"},
+                "probabilities": {"0": 0.0134, "1": 0.0123, "2": 0.0392, "3": 0.7762, "4": 0.1589}}
+  },
+  "usage": {"input_tokens": 495, "output_tokens": 0, "cached_tokens": 0},
+  "latency_ms": "<milliseconds>",
+  "calibration": {"applied": false, "temperatures": null, "source": null},
+  "warnings": []
+}
+```
+
+`usage.input_tokens` is the record's length. `latency_ms`, `calibration`, `warnings` and `usage.cached_tokens` are blazr's fields. blazr reads Clef requests as text only: a request with `images` or `videos` is a `422`.
+
 #### Fitted temperatures
 
 `blazr decision calibrate` fits one temperature per answer type on the user's labelled data and writes `blazr_calibration.json` to the sidecar directory: the model directory, beside a bare `.gguf`, or beside `--decision-config`. Each type that file sets replaces the vendor's temperature (`decider_config.json` `temperature_by_type`, Jebadiah `temperatures.json`). A type it lacks keeps the vendor's. The response's `calibration.source` is then `blazr_calibration.json`. A file with the wrong `schema` or `family`, a bad `fitted_at`, an unknown type, or a temperature outside `[0.05, 100]` fails the model's load with the file and field named. A running model reads the file again only when it reloads.
@@ -905,7 +948,7 @@ A type with fewer than `--min-rows` answers is not fitted. Score pools listed an
 
 ### GET /v1/models
 
-Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A Kev model is listed once, with its `lora` object once it loaded. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family` (`jebadiah`, `decider` or `kev`), `readout` (`label_token` or `pointer`), `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider, Kev) and `max_prompt_tokens` (Jebadiah; Kev's row limit), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. Kev adds `base_path`, `adapter_rank` and `temperature`. When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
+Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A Kev model is listed once, with its `lora` object once it loaded. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family` (`jebadiah`, `decider`, `kev` or `clef`), `readout` (`label_token`, `pointer` or `joint_schema`), `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider, Kev) and `max_prompt_tokens` (Jebadiah; Kev's row limit; Clef's record limit, `16384`), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. Kev adds `base_path`, `adapter_rank` and `temperature`. Clef adds `head_width`, `head_hidden_size` and `head_dtype` (`f32`). When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
 
 ```bash
 curl http://localhost:8080/v1/models

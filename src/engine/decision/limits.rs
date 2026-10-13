@@ -3,6 +3,7 @@
 
 use super::error::DecisionFailure;
 use crate::config::DecisionConfig;
+use crate::model::decision_template::clef::MAX_LENGTH as CLEF_MAX_LENGTH;
 use crate::model::decision_template::decider::DEFAULT_MAX_STATE_TOKENS;
 use crate::model::decision_template::jebadiah::DEFAULT_MAX_TOKENS;
 use crate::model::decision_template::kev::SERVE_MAX_ROW;
@@ -23,12 +24,15 @@ impl DecisionLimits {
     /// The limits `cfg` sets for `family`. The row cap defaults to the
     /// family's state cap (decider `Context:` block, Jebadiah prompt) plus
     /// 4096; for Kev, to Kev's own row limit, which its renderer enforces
-    /// with Kev's message.
+    /// with Kev's message; for Clef, to the record limit its renderer cuts
+    /// the state to. A Clef record is one row, so `max_request_tokens`
+    /// bounds it too.
     pub fn new(cfg: &DecisionConfig, family: Family) -> Self {
         let max_row_tokens = match family {
             Family::Decider => cfg.row_token_cap(DEFAULT_MAX_STATE_TOKENS),
             Family::Jebadiah => cfg.row_token_cap(DEFAULT_MAX_TOKENS),
             Family::Kev => cfg.max_row_tokens.unwrap_or(SERVE_MAX_ROW),
+            Family::Clef => cfg.max_row_tokens.unwrap_or(CLEF_MAX_LENGTH),
         };
         Self {
             max_rows: cfg.max_rows,
@@ -113,5 +117,16 @@ mod tests {
             ..DecisionConfig::default()
         };
         assert_eq!(DecisionLimits::new(&cfg, Family::Kev).max_row_tokens, 100);
+    }
+
+    #[test]
+    fn a_clef_record_takes_the_record_limit_unless_configured() {
+        let clef = DecisionLimits::new(&DecisionConfig::default(), Family::Clef);
+        assert_eq!(clef.max_row_tokens, 16384);
+        let cfg = DecisionConfig {
+            max_row_tokens: Some(512),
+            ..DecisionConfig::default()
+        };
+        assert_eq!(DecisionLimits::new(&cfg, Family::Clef).max_row_tokens, 512);
     }
 }

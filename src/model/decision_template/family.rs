@@ -7,16 +7,20 @@
 //! scoring rows' positions go to `plan_from_rows`. Under the label-token
 //! readout each scoring row becomes a `LabelTokenItem` over its slot's
 //! gather; under the pointer readout a `PointerItem` over its decide
-//! slot's and option ends' gathers. Each [`DecisionQuestion::meta`] is the
-//! `QuestionMeta` the answer stage reads.
+//! slot's and option ends' gathers. Under the joint-schema readout the one
+//! row is the whole record, read by `full_sequence_plan`, and
+//! [`RenderedDecision::joint`] holds each field's `JointSchemaItem`. Each
+//! [`DecisionQuestion::meta`] is the `QuestionMeta` the answer stage reads.
 
 use std::fmt;
 use std::ops::Range;
 use std::path::Path;
 
 use boostr::inference::decision::{QuestionMeta, RowSlot};
+use boostr::model::decision::joint_schema::config::{CONFIG_FILE, WEIGHTS_FILE};
 use serde_json::Value;
 
+use super::clef::{ClefRenderer, JointLayout};
 use super::decider::DeciderRenderer;
 use super::jebadiah::JebadiahRenderer;
 use super::jev::JevRequest;
@@ -36,6 +40,10 @@ pub enum Family {
     /// state and each question's branch between Qwen's delimiter tokens,
     /// one row per question.
     Kev,
+    /// Clef: a full Qwen3.5 checkpoint and a joint-schema head
+    /// (`joint_head.safetensors`) that scores every field of one record at
+    /// once from all its hidden rows.
+    Clef,
 }
 
 /// How a family reads its answers off the hidden rows.
@@ -45,6 +53,9 @@ pub enum Readout {
     LabelToken,
     /// The decide token's query against each option's closing-token key.
     Pointer,
+    /// Every hidden row of the record and each option's output rows, all
+    /// fields scored jointly.
+    JointSchema,
 }
 
 impl Readout {
@@ -53,20 +64,24 @@ impl Readout {
         match self {
             Readout::LabelToken => "label_token",
             Readout::Pointer => "pointer",
+            Readout::JointSchema => "joint_schema",
         }
     }
 }
 
 impl Family {
-    /// The family of the model directory at `dir`: `head.pt` with
-    /// `adapter_config.json` names Kev, `decider_config.json` a decider,
+    /// The family of the model directory at `dir`: `joint_head_config.json`
+    /// with `joint_head.safetensors` names Clef, `head.pt` with
+    /// `adapter_config.json` Kev, `decider_config.json` a decider,
     /// `prompt_contract.json` a Jebadiah model.
     ///
     /// # Errors
     ///
     /// [`DecisionError::Model`] when the directory has none of these files.
     pub fn detect(dir: &Path) -> Result<Self, DecisionError> {
-        if dir.join("head.pt").is_file() && dir.join("adapter_config.json").is_file() {
+        if dir.join(CONFIG_FILE).is_file() && dir.join(WEIGHTS_FILE).is_file() {
+            Ok(Family::Clef)
+        } else if dir.join("head.pt").is_file() && dir.join("adapter_config.json").is_file() {
             Ok(Family::Kev)
         } else if dir.join("decider_config.json").is_file() {
             Ok(Family::Decider)
@@ -74,9 +89,10 @@ impl Family {
             Ok(Family::Jebadiah)
         } else {
             Err(DecisionError::Model(format!(
-                "{} has none of head.pt with adapter_config.json (Kev), decider_config.json \
-                 (decider) or prompt_contract.json (Jebadiah); blazr renders decision prompts \
-                 for those three families only",
+                "{} has none of {CONFIG_FILE} with {WEIGHTS_FILE} (Clef), head.pt with \
+                 adapter_config.json (Kev), decider_config.json (decider) or \
+                 prompt_contract.json (Jebadiah); blazr renders decision prompts for those \
+                 four families only",
                 dir.display()
             )))
         }
@@ -88,6 +104,7 @@ impl Family {
             Family::Jebadiah => "jebadiah",
             Family::Decider => "decider",
             Family::Kev => "kev",
+            Family::Clef => "clef",
         }
     }
 
@@ -96,6 +113,7 @@ impl Family {
         match self {
             Family::Jebadiah | Family::Decider => Readout::LabelToken,
             Family::Kev => Readout::Pointer,
+            Family::Clef => Readout::JointSchema,
         }
     }
 }
@@ -176,8 +194,11 @@ pub struct RenderedDecision {
     /// Tokens the state takes. Decider: the `Context:\n` block every row
     /// starts with, after the state cap. Jebadiah: the state text encoded
     /// on its own. Kev: the state delimiter and the whole state, before
-    /// any cut.
+    /// any cut. Clef: the state encoded on its own, before any cut.
     pub state_tokens: usize,
+    /// Joint-schema readout: each field's spans in the one row, the whole
+    /// record. `None` for the other readouts.
+    pub joint: Option<JointLayout>,
 }
 
 /// A loaded renderer of any family.
@@ -189,6 +210,8 @@ pub enum DecisionRenderer {
     Decider(DeciderRenderer),
     /// A Kev model.
     Kev(KevRenderer),
+    /// A Clef model.
+    Clef(ClefRenderer),
 }
 
 impl DecisionRenderer {
@@ -203,6 +226,7 @@ impl DecisionRenderer {
             Family::Jebadiah => DecisionRenderer::Jebadiah(JebadiahRenderer::load(dir)?),
             Family::Decider => DecisionRenderer::Decider(DeciderRenderer::load(dir)?),
             Family::Kev => DecisionRenderer::Kev(KevRenderer::load(dir)?),
+            Family::Clef => DecisionRenderer::Clef(ClefRenderer::load(dir)?),
         })
     }
 
@@ -212,6 +236,7 @@ impl DecisionRenderer {
             DecisionRenderer::Jebadiah(_) => Family::Jebadiah,
             DecisionRenderer::Decider(_) => Family::Decider,
             DecisionRenderer::Kev(_) => Family::Kev,
+            DecisionRenderer::Clef(_) => Family::Clef,
         }
     }
 
@@ -226,6 +251,7 @@ impl DecisionRenderer {
             DecisionRenderer::Jebadiah(r) => r.render(request),
             DecisionRenderer::Decider(r) => r.render(request),
             DecisionRenderer::Kev(r) => r.render(request),
+            DecisionRenderer::Clef(r) => r.render(request),
         }
     }
 }
@@ -295,5 +321,16 @@ mod tests {
         for family in [Family::Jebadiah, Family::Decider] {
             assert_eq!(family.readout().name(), "label_token");
         }
+
+        std::fs::write(dir.path().join(CONFIG_FILE), "{}").expect("write");
+        assert_eq!(
+            Family::detect(dir.path()),
+            Ok(Family::Kev),
+            "the head config alone names no family"
+        );
+        std::fs::write(dir.path().join(WEIGHTS_FILE), b"").expect("write");
+        assert_eq!(Family::detect(dir.path()), Ok(Family::Clef));
+        assert_eq!(Family::Clef.name(), "clef");
+        assert_eq!(Family::Clef.readout().name(), "joint_schema");
     }
 }

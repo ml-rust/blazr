@@ -26,6 +26,7 @@ use crate::loader::decision::{
     detect_decision, read_calibration_file, write_calibration_file, Calibration, CalibrationFile,
     DecisionSource, TypeFit, BLAZR_CALIBRATION,
 };
+use crate::model::decision_template::Family;
 use crate::runtime::{open_device, ServerRuntime};
 
 /// Run a `blazr decision` command.
@@ -139,8 +140,9 @@ fn decision_source(
         .ok_or_else(|| {
             anyhow!(
                 "model '{model}' is not a System One decision model: it ships no \
-                 decider_config.json, prompt_contract.json or jebadiah.json, its GGUF header \
-                 names no decision model, and no --decision-family applies to it"
+                 decider_config.json, prompt_contract.json, jebadiah.json or joint-schema \
+                 head, its GGUF header names no decision model, and no --decision-family \
+                 applies to it"
             )
         })
 }
@@ -166,6 +168,13 @@ async fn calibrate(args: CalibrateArgs) -> Result<()> {
         .with_dtype(resolve::resolve_dtype(None, &file))
         .with_decision(cfg.clone());
     let source = decision_source(&scheduler, &args.model, &cfg)?;
+    if source.family == Family::Clef {
+        bail!(
+            "model '{}' is a Clef model: its joint-schema head answers with a plain softmax of \
+             its logits and serves no temperature, so there is nothing to calibrate",
+            args.model
+        );
+    }
     let existing = source.sidecar_dir.join(BLAZR_CALIBRATION);
     if let Err(e) = read_calibration_file(&source.sidecar_dir, source.family) {
         bail!(

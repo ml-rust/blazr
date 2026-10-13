@@ -198,17 +198,23 @@ pub fn vendor_calibration(source: &DecisionSource) -> Result<Option<Calibration>
         },
         Family::Jebadiah => Ok(jebadiah_temperatures(&source.sidecar_dir)),
         Family::Kev => kev_calibration(&source.sidecar_dir),
+        Family::Clef => Ok(None),
     }
 }
 
 /// The temperatures `source` serves with: the vendor's, each type
 /// `blazr_calibration.json` in the sidecar directory sets taken from it.
+/// A Clef model serves none: its head's probabilities are a plain softmax
+/// of its logits, and `blazr decision calibrate` refuses it.
 ///
 /// # Errors
 ///
 /// As [`vendor_calibration`] and [`read_calibration_file`]: a bad file
 /// stops the load, never falls back.
 pub fn served_calibration(source: &DecisionSource) -> Result<Option<Calibration>, String> {
+    if source.family == Family::Clef {
+        return Ok(None);
+    }
     let vendor = vendor_calibration(source)?;
     let file = read_calibration_file(&source.sidecar_dir, source.family)?;
     Ok(prefer_calibration_file(vendor, file.as_ref()))

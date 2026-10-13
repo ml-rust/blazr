@@ -3,6 +3,8 @@
 //! runner reads.
 
 pub mod ainode;
+pub mod clef;
+pub mod clef_text;
 pub mod decider;
 pub mod decider_layout;
 pub mod encode;

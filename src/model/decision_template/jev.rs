@@ -8,12 +8,13 @@
 //! JSON value: the families read its fields differently (the decider takes
 //! `options` for `criteria`, `question` for `instructions`, any JSON value
 //! as text, and `choice` as the default type; Kev flattens any JSON value
-//! to text), so each family's renderer reads them.
+//! to text; Clef writes it as compact JSON), so each family's renderer
+//! reads them.
 
 use serde_json::{Map, Value};
 
 use super::family::{DecisionError, Family};
-use super::py_text::{py_repr, py_strip};
+use super::py_text::{py_repr, py_strip, py_truthy};
 
 /// Whether the model's fitted temperatures apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,10 +119,16 @@ impl JevRequest {
             Some(_) => {
                 return Err(bad(match family {
                     Family::Jebadiah => "'model' must be a non-empty string when given",
-                    Family::Decider | Family::Kev => "'model' must be a string when given",
+                    Family::Decider | Family::Kev | Family::Clef => {
+                        "'model' must be a string when given"
+                    }
                 }))
             }
         };
+        // Clef's `systemone` checks the state before the questions.
+        if family == Family::Clef && !body.contains_key("state") {
+            return Err(bad("model and state are required"));
+        }
         request.questions = parse_questions(body.get("questions"), family)?;
         request.calibration = match body.get("calibration") {
             None | Some(Value::Null) => Calibration::Fitted,
@@ -157,6 +164,16 @@ impl JevRequest {
                     return Err(bad("'state' is required (it may be null)"));
                 }
             }
+            Family::Clef => {
+                if let Some(field) = ["images", "videos"]
+                    .into_iter()
+                    .find(|f| body.get(*f).is_some_and(py_truthy))
+                {
+                    return Err(bad(format!(
+                        "'{field}' is not served: blazr reads Clef requests as text only"
+                    )));
+                }
+            }
         }
         Ok(request)
     }
@@ -180,6 +197,8 @@ fn parse_questions(raw: Option<&Value>, family: Family) -> Result<Vec<JevQuestio
         }
         (Some(Value::Object(map)), Family::Decider) => map,
         (_, Family::Decider) => return Err(bad("'questions' must be an object of {id: question}")),
+        (Some(Value::Object(map)), Family::Clef) if !map.is_empty() => map,
+        (_, Family::Clef) => return Err(bad("at least one question is required")),
     };
     let mut questions = Vec::with_capacity(map.len());
     for (id, spec) in map {
@@ -300,6 +319,34 @@ mod tests {
         assert_eq!(ok.state, Some(Value::Null));
         assert_eq!(ok.model.as_deref(), Some(""));
         assert_eq!(ok.max_tokens, None);
+    }
+
+    #[test]
+    fn clef_wording() {
+        let err = |body: Value| JevRequest::parse(&body, Family::Clef).expect_err("refused");
+        assert_eq!(
+            err(json!({"questions": {}})),
+            bad("model and state are required"),
+            "the state is checked first"
+        );
+        assert_eq!(
+            err(json!({"state": "s", "questions": {}})),
+            bad("at least one question is required")
+        );
+        assert_eq!(
+            err(json!({"state": "s", "questions": [1]})),
+            bad("at least one question is required")
+        );
+        assert_eq!(
+            err(json!({"state": "s", "questions": {"q": {}}, "images": ["x.png"]})),
+            bad("'images' is not served: blazr reads Clef requests as text only")
+        );
+        let ok = JevRequest::parse(
+            &json!({"state": null, "questions": {"q": {}}, "videos": []}),
+            Family::Clef,
+        )
+        .expect("a null state is a state, and no video is no media");
+        assert_eq!(ok.state, Some(Value::Null));
     }
 
     #[test]

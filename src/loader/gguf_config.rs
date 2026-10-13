@@ -52,7 +52,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &mut Gguf) -> Result<BlazrConfig> 
     // qwen35 (Bonsai 2): GDN + gated attention hybrid. boostr owns the key
     // table, so the generic attention/ssm blocks below never see it.
     if arch == "qwen35" {
-        let model_config = boostr::model::qwen35_config_from_gguf(metadata)
+        let model_config = boostr::model::qwen35_config_from_gguf(gguf)
             .map_err(|e| anyhow!("Failed to build qwen35 config from GGUF metadata: {}", e))?;
         return Ok(BlazrConfig::from_universal_with_dtype(model_config, "f32"));
     }

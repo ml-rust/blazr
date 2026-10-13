@@ -20,6 +20,8 @@ use super::error::LoraError;
 use super::registry::VariantInfo;
 use super::select::{not_registered, select_model};
 use super::spec::{split_variant, AdapterSpec};
+use crate::engine::load::blocking::BlockingStopped;
+use crate::engine::load::registered::Models;
 use crate::engine::scheduler::ModelEntry;
 use crate::engine::{Executor, Scheduler};
 
@@ -89,11 +91,14 @@ where
 
     /// Register `spec` on `base` as the variant `id`, build it, and return
     /// it with the executor that serves `id`. `replace` false keeps a
-    /// variant of the same id that was loaded meanwhile.
+    /// variant of the same id that is loaded. One build of `id` runs at a
+    /// time, off the async executor. A build registers its variant even
+    /// when the caller stops waiting.
     ///
     /// # Errors
     ///
     /// As [`Self::register_variant`], `base` being a variant aside.
+    /// [`LoraError::Unsupported`] when `id` names `base` itself.
     pub(crate) async fn build_variant(
         &self,
         id: String,
@@ -101,28 +106,59 @@ where
         spec: AdapterSpec,
         replace: bool,
     ) -> Result<(VariantInfo, Arc<Executor<R>>), LoraError> {
+        if id == base {
+            return Err(LoraError::Unsupported(format!(
+                "model {base:?} cannot be a LoRA variant of itself"
+            )));
+        }
+        let gate = self.gates.acquire(&id).await;
+        if !replace {
+            if let Some(info) = self.lora.get(&id) {
+                if let Some(executor) = self.touch(&id).await {
+                    return Ok((info, executor));
+                }
+            }
+        }
         let base_executor = self.base_executor(base).await?;
-        let derived = base_executor.derive_variant(&spec)?;
-        let info = VariantInfo {
-            id,
-            base: base.to_string(),
-            adapter: spec.name,
-            path: spec.path,
-            rank: derived.rank,
-            adapted_modules: derived.adapted_modules,
-        };
-        self.lora.insert(info.clone());
-        let executor = self
-            .insert_variant(&info.id, base, Arc::new(derived.executor), replace)
-            .await;
-        metrics::counter!(VARIANT_BUILDS).increment(1);
-        tracing::info!(variant = %info.id, path = %info.path.display(), "LoRA variant registered");
-        Ok((info, executor))
+        let lora = Arc::clone(&self.lora);
+        let base = base.to_string();
+        let adapter = spec.name.clone();
+        self.run_registered(
+            gate,
+            move || {
+                let derived = base_executor.derive_variant(&spec)?;
+                Ok((derived, spec))
+            },
+            move |(derived, spec), models| {
+                let info = VariantInfo {
+                    id,
+                    base,
+                    adapter: spec.name,
+                    path: spec.path,
+                    rank: derived.rank,
+                    adapted_modules: derived.adapted_modules,
+                };
+                lora.insert(info.clone());
+                let executor = Arc::new(derived.executor);
+                let executor = keep_variant(models, &info.id, &info.base, executor, replace);
+                metrics::counter!(VARIANT_BUILDS).increment(1);
+                tracing::info!(
+                    variant = %info.id,
+                    path = %info.path.display(),
+                    "LoRA variant registered"
+                );
+                (info, executor)
+            },
+            |e| stopped(&adapter, e),
+        )
+        .await
     }
 
     /// Unregister the variant `id` and drop its executor. `None` when no
-    /// such variant is registered.
+    /// such variant is registered. A build of `id` in flight registers
+    /// first, and this then removes it.
     pub async fn remove_variant(&self, id: &str) -> Option<VariantInfo> {
+        let _gate = self.gates.acquire(id).await;
         let info = self.lora.remove(id)?;
         self.models.write().await.remove(id);
         tracing::info!(variant = id, "LoRA variant removed");
@@ -166,21 +202,32 @@ where
 
     /// Build the registered variant `info` from its base, loading the base
     /// when needed: after an eviction or an unload of the variant or its
-    /// base.
+    /// base. One build of a variant runs at a time, off the async executor.
     pub(crate) async fn load_variant(
         &self,
         info: &VariantInfo,
     ) -> Result<Arc<Executor<R>>, LoraError> {
-        let base = self.base_executor(&info.base).await?;
+        let gate = self.gates.acquire(&info.id).await;
+        if let Some(executor) = self.touch(&info.id).await {
+            return Ok(executor);
+        }
+        let base_executor = self.base_executor(&info.base).await?;
         let spec = AdapterSpec {
             name: info.adapter.clone(),
             path: info.path.clone(),
         };
-        let derived = base.derive_variant(&spec)?;
-        metrics::counter!(VARIANT_BUILDS).increment(1);
-        Ok(self
-            .insert_variant(&info.id, &info.base, Arc::new(derived.executor), false)
-            .await)
+        let id = info.id.clone();
+        let base = info.base.clone();
+        self.run_registered(
+            gate,
+            move || base_executor.derive_variant(&spec),
+            move |derived, models| {
+                metrics::counter!(VARIANT_BUILDS).increment(1);
+                keep_variant(models, &id, &base, Arc::new(derived.executor), false)
+            },
+            |e| stopped(&info.adapter, e),
+        )
+        .await
     }
 
     /// The error for `name` when it has the shape `<model>:<adapter>`, is
@@ -196,42 +243,48 @@ where
             || self.is_loaded(base).await;
         known.then(|| not_registered(base, adapter))
     }
+}
 
-    /// Keep `executor` loaded as the variant `id` of `base`, and return the
-    /// executor that serves `id`. With `replace` false, a variant loaded
-    /// meanwhile stays and is returned. When `base` is no longer loaded,
-    /// nothing is kept, since a variant never outlives its base: the
-    /// executor serves the request that built it and drops.
-    async fn insert_variant(
-        &self,
-        id: &str,
-        base: &str,
-        executor: Arc<Executor<R>>,
-        replace: bool,
-    ) -> Arc<Executor<R>> {
-        let mut models = self.models.write().await;
-        let Some(base_entry) = models.get(base) else {
-            return executor;
-        };
-        let path = base_entry.path.clone();
-        let keep_alive = base_entry.keep_alive;
-        if !replace {
-            if let Some(existing) = models.get(id) {
-                return Arc::clone(&existing.executor);
-            }
+/// The error of a build of the LoRA adapter `adapter` that stopped.
+fn stopped(adapter: &str, e: BlockingStopped) -> LoraError {
+    LoraError::BaseLoad(format!(
+        "the build of LoRA adapter {adapter:?} stopped: {e}"
+    ))
+}
+
+/// Keep `executor` loaded in `models` as the variant `id` of `base`, and
+/// return the executor that serves `id`. With `replace` false, a variant
+/// loaded meanwhile stays and is returned. When `base` is no longer
+/// loaded, nothing is kept, since a variant never outlives its base: the
+/// executor serves the request that built it and drops.
+fn keep_variant<R: Runtime<DType = DType>>(
+    models: &mut Models<R>,
+    id: &str,
+    base: &str,
+    executor: Arc<Executor<R>>,
+    replace: bool,
+) -> Arc<Executor<R>> {
+    let Some(base_entry) = models.get(base) else {
+        return executor;
+    };
+    let path = base_entry.path.clone();
+    let keep_alive = base_entry.keep_alive;
+    if !replace {
+        if let Some(existing) = models.get(id) {
+            return Arc::clone(&existing.executor);
         }
-        models.insert(
-            id.to_string(),
-            ModelEntry {
-                executor: Arc::clone(&executor),
-                last_accessed: Instant::now(),
-                path,
-                keep_alive,
-                variant_of: Some(base.to_string()),
-            },
-        );
-        executor
     }
+    models.insert(
+        id.to_string(),
+        ModelEntry {
+            executor: Arc::clone(&executor),
+            last_accessed: Instant::now(),
+            path,
+            keep_alive,
+            variant_of: Some(base.to_string()),
+        },
+    );
+    executor
 }
 
 #[cfg(test)]
@@ -277,7 +330,12 @@ mod tests {
             .err()
             .expect("refused");
         assert!(err.downcast_ref::<LoraError>().is_none(), "{err:#}");
-        assert!(err.to_string().contains("Model not found"), "{err:#}");
+        assert_eq!(
+            err.downcast_ref::<crate::engine::ModelNotFound>()
+                .map(|e| e.name.as_str()),
+            Some("absent:kev"),
+            "{err:#}"
+        );
     }
 
     /// Windows file names hold no `:`.

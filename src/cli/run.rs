@@ -1,23 +1,17 @@
 //! Interactive generation command
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-#[cfg(feature = "cuda")]
-use boostr::CudaRuntime;
-
+use super::run_load;
 use super::run_repl::{interactive_repl, print_generation_stream};
 use super::RunSettings;
 use crate::config::{DeviceChoice, GenerationConfig};
-use crate::engine::lora::{derive_run_model, run_adapter};
+use crate::engine::load::blocking::run_blocking;
+use crate::engine::lora::run_adapter;
 use crate::engine::vision_tower::{VisionTower, IMAGE_MARKER_TEXT};
 use crate::engine::Executor;
-#[cfg(feature = "cuda")]
-use crate::loader::OffloadingOptions;
-use crate::loader::{self, detect_model_source, ModelFormat};
-use crate::model::chat_template::ChatTemplate;
-use crate::tokenizer::checkpoint_tokenizer;
 use boostr::{CpuRuntime, DType, Runtime};
 
 /// Run interactive generation. `images` are files placed before `prompt`,
@@ -97,158 +91,55 @@ async fn run_cuda(
     cuda_index: usize,
     images: Vec<Vec<u8>>,
 ) -> Result<()> {
-    let gpu_layers = runtime.gpu_layers;
-    let num_ctx = runtime.load.num_ctx;
-    // Initialize device
-    let device = boostr::CudaDevice::new(cuda_index);
-
-    tracing::info!("Loading model: {}", model);
-
-    // Detect format to decide tokenizer strategy
-    let source = detect_model_source(Path::new(&model))?;
-
-    // Load model with appropriate tokenizer based on format
-    let (loaded_model, mut config, tokenizer) = match source.format {
-        ModelFormat::Gguf => {
-            // GGUF: use embedded tokenizer (exact vocabulary from the file)
-            let (m, c, tok) = loader::load_gguf_with_tokenizer_as::<CudaRuntime, _>(
-                &model,
-                &device,
-                runtime.load.dtype.as_ref(),
-            )?;
-            tracing::info!("Using GGUF-embedded tokenizer");
-            (m, c, tok)
-        }
-        ModelFormat::SafeTensors => {
-            if gpu_layers < 0 {
-                let (m, c) = loader::load_model_as::<CudaRuntime, _>(
-                    &model,
-                    &device,
-                    runtime.load.dtype.as_ref(),
-                )?;
-                let tok = checkpoint_tokenizer(Path::new(&model), c.vocab_size())?;
-                (m, c, tok)
-            } else {
-                let options = if gpu_layers > 0 {
-                    OffloadingOptions::default().gpu_layers(gpu_layers as usize)
-                } else {
-                    OffloadingOptions::default()
-                };
-
-                let (m, c, info) = loader::load_model_with_offloading::<CudaRuntime, _>(
-                    &model,
-                    &device,
-                    options,
-                    runtime.load.dtype.as_ref(),
-                )?;
-
-                tracing::info!(
-                    "Model loaded: {} layers on GPU, {} on CPU ({:.2} GB on GPU)",
-                    info.gpu_layers,
-                    info.cpu_layers,
-                    info.gpu_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-                );
-
-                let tok = checkpoint_tokenizer(Path::new(&model), c.vocab_size())?;
-                (m, c, tok)
-            }
-        }
-    };
-
-    let loaded_model =
-        derive_run_model(loaded_model, run_adapter(&runtime.lora)?.as_ref(), &device)?;
-    // The user file's inference keys, then the flags.
-    runtime.apply(&mut config.inference)?;
-    let paged_attention = config.inference.paged_attention;
-    let graphs = config.inference.graphs;
-    if paged_attention {
-        tracing::info!(
-            "Paged attention enabled (block_size={})",
-            config.inference.block_size
-        );
+    let (executor, paged_attention, graphs) = {
+        let model = model.clone();
+        run_blocking(move || {
+            run_load::load_cuda(&model, cuda_index, &runtime, chat_template.as_deref())
+        })
     }
-    if graphs {
-        tracing::info!("CUDA graph mode enabled");
-    }
+    .await
+    .map_err(|e| anyhow!("model {model}: the load stopped: {e}"))??;
 
-    // Pre-load all CUDA PTX modules to avoid JIT compilation on first use
-    {
-        let client = boostr::CudaClient::new(device.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to create CUDA client for preload: {}", e))?;
-        boostr::preload_inference_modules(&client)
-            .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
-        tracing::debug!("Pre-loaded all CUDA PTX modules");
-    }
-
-    // Create executor with num_ctx for KV cache initial capacity
-    let template = ChatTemplate::detect(
-        Path::new(&model),
-        config.model_type(),
-        chat_template.as_deref(),
-    )?;
-    let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
-        .with_chat_template(template)
-        .with_configured_vision_tower()?;
-
-    // Warm up kernels to avoid first-run latency
-    executor.warmup()?;
-    tracing::info!("Model ready");
-
-    // If prompt provided, generate once
-    if let Some(prompt) = prompt {
-        let prompt_tokens = image_prompt_ids(
-            executor.tokenizer(),
-            executor.vision_tower().map(|t| &**t),
-            &prompt,
-            images.len(),
-        )?;
-        // Graph replay reads only the argmax token, so it decodes greedily
-        // and applies no penalties. Any other sampling config runs eagerly.
+    // Graph replay reads only the argmax token, so it decodes greedily and
+    // applies no penalties. Any other sampling config runs eagerly. The
+    // interactive session decodes eagerly.
+    if let (Some(prompt), true) = (&prompt, graphs) {
         let graph_eligible = gen_config.is_greedy() && !gen_config.has_penalties();
-        if graphs && !graph_eligible {
+        if !graph_eligible {
             tracing::warn!(
                 "CUDA graph mode needs temperature 0 and no repeat/frequency/presence \
                  penalty (got temperature={}, repeat_penalty={}); decoding eagerly",
                 gen_config.temperature,
                 gen_config.repeat_penalty
             );
-        }
-        if graphs && graph_eligible {
+        } else {
+            let prompt_tokens = image_prompt_ids(
+                executor.tokenizer(),
+                executor.vision_tower().map(|t| &**t),
+                prompt,
+                images.len(),
+            )?;
             if paged_attention && !images.is_empty() {
                 return Err(anyhow!(
                     "--image needs graph mode without --paged-attention"
                 ));
             }
-            if paged_attention {
+            return if paged_attention {
                 print_generation_stream(
                     executor.generate_with_graphs_paged(&prompt_tokens, &gen_config),
                     "CUDA graph mode (paged)",
                 )
-                .await?;
+                .await
             } else {
                 print_generation_stream(
                     executor.generate_with_graphs_images(&prompt_tokens, &images, &gen_config),
                     "CUDA graph mode",
                 )
-                .await?;
-            }
-        } else {
-            print_generation_stream(
-                executor.generate_with_images(&prompt_tokens, &images, &gen_config),
-                "",
-            )
-            .await?;
+                .await
+            };
         }
-        return Ok(());
     }
-    if !images.is_empty() {
-        return Err(anyhow!(
-            "--image needs --prompt; the interactive session takes text only"
-        ));
-    }
-
-    // Interactive REPL (graph mode uses standard generate in REPL for simplicity)
-    interactive_repl(&executor, &gen_config, &model, graphs).await
+    prompt_or_session(&executor, &model, prompt, &images, &gen_config, graphs).await
 }
 
 /// Generation on a runtime with no paged or graph decode: the CPU or wgpu.
@@ -277,7 +168,6 @@ where
         + boostr::RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
-    let num_ctx = runtime.load.num_ctx;
     if runtime.paged_attention || runtime.graphs {
         tracing::warn!(
             "--paged-attention and --graphs apply on CUDA only. The {} run ignores them",
@@ -285,70 +175,63 @@ where
         );
     }
 
-    tracing::info!("Loading model: {} on {}", model, R::name());
+    let executor = {
+        let model = model.clone();
+        run_blocking(move || {
+            run_load::load_plain::<R>(&model, device, &runtime, chat_template.as_deref())
+        })
+    }
+    .await
+    .map_err(|e| anyhow!("model {model}: the load stopped: {e}"))??;
+    prompt_or_session(&executor, &model, prompt, &images, &gen_config, false).await
+}
 
-    // Detect format and load appropriately
-    let source = detect_model_source(Path::new(&model))?;
-
-    let (loaded_model, mut config, tokenizer) = match source.format {
-        ModelFormat::Gguf => {
-            // Load GGUF with embedded tokenizer
-            let loaded = loader::load_gguf_with_tokenizer_as::<R, _>(
-                &model,
-                &device,
-                runtime.load.dtype.as_ref(),
-            )?;
-            tracing::info!("Using GGUF-embedded tokenizer");
-            loaded
+/// Generate once from `prompt` behind `images`, eagerly. With no prompt,
+/// open the interactive session, which takes text only. `graphs` tells
+/// the session that graph mode is on.
+async fn prompt_or_session<R>(
+    executor: &Executor<R>,
+    model: &str,
+    prompt: Option<String>,
+    images: &[Vec<u8>],
+    gen_config: &GenerationConfig,
+    graphs: bool,
+) -> Result<()>
+where
+    R: Runtime<DType = DType>,
+    R::Client: boostr::ops::TensorOps<R>
+        + boostr::ScalarOps<R>
+        + boostr::ConvOps<R>
+        + boostr::NormalizationOps<R>
+        + boostr::UnaryOps<R>
+        + boostr::ActivationOps<R>
+        + boostr::BinaryOps<R>
+        + boostr::TypeConversionOps<R>
+        + boostr::SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
+        + boostr::model::ModelClient<R>
+        + boostr::RoPEPackedOps<R>
+        + boostr::quant::traits::DequantOps<R>,
+{
+    let Some(prompt) = prompt else {
+        if !images.is_empty() {
+            return Err(anyhow!(
+                "--image needs --prompt; the interactive session takes text only"
+            ));
         }
-        ModelFormat::SafeTensors => {
-            // Load SafeTensors with splintr tokenizer
-            let (loaded_model, config) =
-                loader::load_model_as::<R, _>(&model, &device, runtime.load.dtype.as_ref())?;
-            let tokenizer = checkpoint_tokenizer(Path::new(&model), config.vocab_size())?;
-            (loaded_model, config, tokenizer)
-        }
+        return interactive_repl(executor, gen_config, model, graphs).await;
     };
-    let loaded_model =
-        derive_run_model(loaded_model, run_adapter(&runtime.lora)?.as_ref(), &device)?;
-    // This path has no paged or graph decode, so only the load keys apply.
-    runtime.load.apply(&mut config.inference)?;
-    let template = ChatTemplate::detect(
-        Path::new(&model),
-        config.model_type(),
-        chat_template.as_deref(),
+    let prompt_tokens = image_prompt_ids(
+        executor.tokenizer(),
+        executor.vision_tower().map(|t| &**t),
+        &prompt,
+        images.len(),
     )?;
-    let executor = Executor::new(loaded_model, config, tokenizer, device, num_ctx)?
-        .with_chat_template(template)
-        .with_configured_vision_tower()?;
-
-    // Warm up model: compiles GPU pipelines before the first token.
-    executor.warmup()?;
-    tracing::info!("Model ready");
-
-    // If prompt provided, generate once
-    if let Some(prompt) = prompt {
-        let prompt_tokens = image_prompt_ids(
-            executor.tokenizer(),
-            executor.vision_tower().map(|t| &**t),
-            &prompt,
-            images.len(),
-        )?;
-        print_generation_stream(
-            executor.generate_with_images(&prompt_tokens, &images, &gen_config),
-            "",
-        )
-        .await?;
-        return Ok(());
-    }
-    if !images.is_empty() {
-        return Err(anyhow!(
-            "--image needs --prompt; the interactive session takes text only"
-        ));
-    }
-
-    // Interactive REPL
-    interactive_repl(&executor, &gen_config, &model, false).await
+    print_generation_stream(
+        executor.generate_with_images(&prompt_tokens, images, gen_config),
+        "",
+    )
+    .await
 }
 
 /// Read every `--image` file.

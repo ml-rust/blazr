@@ -12,6 +12,7 @@ use super::error::DecisionFailure;
 use super::kev_model::{kev_base_of, kev_dir_of};
 use super::registry::{lock, variant_decision_config};
 use crate::config::DecisionConfig;
+use crate::engine::load::blocking::run_blocking;
 use crate::engine::model_dir::find_model_path;
 use crate::engine::VariantInfo;
 use crate::loader::decision::{
@@ -122,17 +123,18 @@ pub(super) fn renderer_of(
         .map_err(|e| DecisionFailure::Internal(format!("model '{name}': {e}")))
 }
 
-/// Run `work`, which reads the disk, on a blocking thread.
+/// Run `work`, which reads the disk, off the async executor through
+/// [`run_blocking`].
 ///
 /// # Errors
 ///
 /// The error of `work`, or [`DecisionFailure::Internal`] naming the model
-/// `name` when the blocking thread stops before `work` returns.
+/// `name` when `work` panics or the runtime shuts down before it runs.
 pub(super) async fn blocking<T: Send + 'static>(
     name: &str,
     work: impl FnOnce() -> Result<T, DecisionFailure> + Send + 'static,
 ) -> Result<T, DecisionFailure> {
-    tokio::task::spawn_blocking(work).await.map_err(|e| {
+    run_blocking(work).await.map_err(|e| {
         DecisionFailure::Internal(format!("model '{name}': the decision load stopped: {e}"))
     })?
 }

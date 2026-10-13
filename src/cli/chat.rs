@@ -1,20 +1,19 @@
 //! Interactive chat command with multi-turn conversation support
 
 use std::io::{self, Write};
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use colored::Colorize;
 use futures::StreamExt;
 
 use super::LoadSettings;
 use crate::config::GenerationConfig;
+use crate::engine::load::blocking::run_blocking;
+use crate::engine::load::parts::{load_model_parts, start_executor};
 use crate::engine::vision_tower::{IMAGE_MARKER_TEXT, MARKER_NAMES};
 use crate::engine::Executor;
-use crate::loader::{self, detect_model_source, ModelFormat};
-use crate::model::chat_template::{
-    encode_chat_prompt_with_markers, ChatMessage, ChatTemplate, RenderOptions,
-};
-use crate::tokenizer::checkpoint_tokenizer;
+use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, RenderOptions};
 
 use crate::runtime::ServerRuntime as ChatRuntime;
 
@@ -28,16 +27,12 @@ pub async fn chat(
     gpu_index: usize,
     load: LoadSettings,
 ) -> Result<()> {
-    let executor = load_executor(&model, gpu_index, &load)?;
-
-    // Detect chat template
-    let model_path = std::path::Path::new(&model);
-    let template = ChatTemplate::detect(
-        model_path,
-        executor.config().model_type(),
-        chat_template.as_deref(),
-    )?;
-    let executor = executor.with_chat_template(template);
+    let executor = {
+        let model = model.clone();
+        run_blocking(move || load_executor(&model, gpu_index, &load, chat_template.as_deref()))
+    }
+    .await
+    .map_err(|e| anyhow!("model {model}: the load stopped: {e}"))??;
 
     // Warmup with spinner
     let spinner = super::util::spinner("Warming up model...");
@@ -249,51 +244,27 @@ pub async fn chat(
     Ok(())
 }
 
-/// Load model from any format, detecting source and dispatching to the correct loader.
-macro_rules! load_model_from_source {
-    ($model:expr, $device:expr, $load:expr) => {{
-        let source = detect_model_source(std::path::Path::new($model))?;
-        let (loaded_model, mut config, tokenizer) = match source.format {
-            ModelFormat::Gguf => {
-                let (m, c, tok) = loader::load_gguf_with_tokenizer_as::<ChatRuntime, _>(
-                    $model,
-                    &$device,
-                    $load.dtype.as_ref(),
-                )?;
-                (m, c, tok)
-            }
-            ModelFormat::SafeTensors => {
-                let (m, c) = loader::load_model_as::<ChatRuntime, _>(
-                    $model,
-                    &$device,
-                    $load.dtype.as_ref(),
-                )?;
-                let tok = checkpoint_tokenizer(std::path::Path::new($model), c.vocab_size())?;
-                (m, c, tok)
-            }
-        };
-        $load.apply(&mut config.inference)?;
-        Executor::new(loaded_model, config, tokenizer, $device, $load.num_ctx)?
-            .with_configured_vision_tower()
-    }};
-}
-
-/// Load `model` on GPU `gpu_index` of the build's runtime, or the CPU.
+/// Load `model` on GPU `gpu_index` of the build's runtime, or the CPU,
+/// with the chat template `chat_template` names, else the model's own.
 fn load_executor(
     model: &str,
     gpu_index: usize,
     load: &LoadSettings,
+    chat_template: Option<&str>,
 ) -> Result<Executor<ChatRuntime>> {
     let device = crate::runtime::open_device(gpu_index)?;
-
-    // Pre-load CUDA modules
     #[cfg(feature = "cuda")]
-    {
-        let client = boostr::CudaClient::new(device.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to create CUDA client: {}", e))?;
-        boostr::preload_inference_modules(&client)
-            .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
-    }
+    crate::runtime::preload_cuda_modules(&device)?;
 
-    load_model_from_source!(model, device, load)
+    let path = Path::new(model);
+    let (loaded_model, mut config, tokenizer) =
+        load_model_parts::<ChatRuntime>(path, &device, load.dtype.as_ref(), None)?;
+    load.apply(&mut config.inference)?;
+    start_executor(
+        path,
+        (loaded_model, config, tokenizer),
+        device,
+        load.num_ctx,
+        chat_template,
+    )
 }

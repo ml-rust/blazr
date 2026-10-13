@@ -11,9 +11,8 @@ use futures::StreamExt;
 
 use super::LoadSettings;
 use crate::config::GenerationConfig;
+use crate::engine::load::parts::load_model_parts;
 use crate::engine::Executor;
-use crate::loader::{self, detect_model_source, ModelFormat};
-use crate::tokenizer::checkpoint_tokenizer;
 use boostr::{DType, Runtime};
 
 use crate::runtime::ServerRuntime as BenchRuntime;
@@ -56,32 +55,15 @@ pub async fn bench(
 
     let device = crate::runtime::open_device(gpu_index)?;
 
-    let source = detect_model_source(std::path::Path::new(&model))?;
-
-    let (loaded_model, mut config, tokenizer) = match source.format {
-        ModelFormat::Gguf => {
-            let (m, c, tok) = loader::load_gguf_with_tokenizer_as::<BenchRuntime, _>(
-                &model,
-                &device,
-                load.dtype.as_ref(),
-            )?;
-            (m, c, tok)
-        }
-        ModelFormat::SafeTensors => {
-            let (m, c) =
-                loader::load_model_as::<BenchRuntime, _>(&model, &device, load.dtype.as_ref())?;
-            let tok = checkpoint_tokenizer(std::path::Path::new(&model), c.vocab_size())?;
-            (m, c, tok)
-        }
-    };
+    let (loaded_model, mut config, tokenizer) = load_model_parts::<BenchRuntime>(
+        std::path::Path::new(&model),
+        &device,
+        load.dtype.as_ref(),
+        None,
+    )?;
 
     #[cfg(feature = "cuda")]
-    {
-        let client = boostr::CudaClient::new(device.clone())
-            .map_err(|e| anyhow::anyhow!("Failed to create CUDA client: {}", e))?;
-        boostr::preload_inference_modules(&client)
-            .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {}", e))?;
-    }
+    crate::runtime::preload_cuda_modules(&device)?;
 
     load.apply(&mut config.inference)?;
     let num_ctx = load.num_ctx;
@@ -189,10 +171,8 @@ pub async fn bench(
             let start = std::time::Instant::now();
 
             for _ in 0..c {
-                let p = prompt.clone();
-                let gc = gen_config.clone();
                 // Run sequentially since executor isn't Send — measures throughput under load
-                handles.push(run_single_bench(&executor, &p, &gc).await);
+                handles.push(run_single_bench(&executor, &prompt, &gen_config).await);
             }
 
             let wall_time = start.elapsed().as_secs_f64();

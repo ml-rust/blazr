@@ -108,6 +108,23 @@ pub fn open_wgpu_device(index: usize) -> Result<boostr::runtime::wgpu::WgpuDevic
     Ok(device)
 }
 
+/// Compile every CUDA inference module for `device` now, so the first
+/// forward pass compiles none.
+///
+/// # Errors
+///
+/// A CUDA client that does not open on `device`, or a module that does
+/// not load.
+#[cfg(feature = "cuda")]
+pub fn preload_cuda_modules(device: &boostr::CudaDevice) -> Result<()> {
+    let client = boostr::CudaClient::new(device.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to create CUDA client for preload: {e}"))?;
+    boostr::preload_inference_modules(&client)
+        .map_err(|e| anyhow::anyhow!("Failed to preload CUDA modules: {e}"))?;
+    tracing::debug!("Pre-loaded all CUDA PTX modules");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

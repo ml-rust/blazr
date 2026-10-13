@@ -16,6 +16,7 @@ use boostr::{
 
 use super::kev_base::{resolve_kev_base, KevBase};
 use crate::config::DecisionConfig;
+use crate::engine::load::blocking::run_blocking;
 use crate::engine::lora::spec::check_name;
 use crate::engine::model_dir::find_model_path;
 use crate::engine::{AdapterSpec, Executor, LoraError, Scheduler, VariantInfo};
@@ -135,14 +136,12 @@ where
         let model_dir = self.model_dir().to_path_buf();
         let configured = self.decision_config.base_for(name).map(str::to_owned);
         let target = name.to_string();
-        let found = tokio::task::spawn_blocking(move || {
-            locate_kev(&model_dir, &target, configured.as_deref())
-        })
-        .await
-        .map_err(|e| {
-            LoraError::BaseLoad(format!("Kev model '{name}': the base lookup stopped: {e}"))
-        })?
-        .map_err(|e| LoraError::ModelNotFound(format!("Kev model '{name}': {e}")))?;
+        let found = run_blocking(move || locate_kev(&model_dir, &target, configured.as_deref()))
+            .await
+            .map_err(|e| {
+                LoraError::BaseLoad(format!("Kev model '{name}': the base lookup stopped: {e}"))
+            })?
+            .map_err(|e| LoraError::ModelNotFound(format!("Kev model '{name}': {e}")))?;
         let Some((dir, base)) = found else {
             return Ok(None);
         };

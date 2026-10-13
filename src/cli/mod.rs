@@ -26,6 +26,7 @@ mod narration;
 mod ps;
 mod pull;
 mod run;
+mod run_load;
 mod run_repl;
 #[cfg(feature = "server")]
 mod serve;

@@ -7,12 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
-use crate::config::{
-    BlazrConfig, DtypeRequest, InferenceOverlay, VisionOverrides, DEFAULT_NUM_CTX,
-};
-use crate::model::chat_template::ChatTemplate;
+use crate::config::{DtypeRequest, InferenceOverlay, VisionOverrides, DEFAULT_NUM_CTX};
 use tokio::sync::RwLock;
 
 use boostr::model::ModelClient;
@@ -21,14 +18,15 @@ use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, ScalarOps, UnaryOps,
 };
 
+use super::load::gate::LoadGates;
+use super::load::job::LoadJob;
+use super::load::registered::Models;
 use super::lora::eviction::{self, Resident};
 use super::lora::LoraRegistry;
 pub use super::model_dir::AvailableModelInfo;
 use crate::config::DecisionConfig;
 use crate::engine::decision::DecisionRegistry;
 use crate::engine::Executor;
-use crate::loader;
-use crate::tokenizer::checkpoint_tokenizer;
 
 /// Model entry in the scheduler
 pub(crate) struct ModelEntry<R: Runtime<DType = DType>> {
@@ -45,9 +43,7 @@ pub(crate) struct ModelEntry<R: Runtime<DType = DType>> {
 }
 
 /// Every loaded model, as eviction sees it.
-fn residents<R: Runtime<DType = DType>>(
-    models: &HashMap<String, ModelEntry<R>>,
-) -> Vec<Resident<'_>> {
+pub(crate) fn residents<R: Runtime<DType = DType>>(models: &Models<R>) -> Vec<Resident<'_>> {
     models
         .iter()
         .map(|(name, entry)| Resident {
@@ -61,10 +57,7 @@ fn residents<R: Runtime<DType = DType>>(
 
 /// Drop `name` and, for a base model, each of its variants first.
 /// Returns whether `name` was loaded.
-fn remove_with_variants<R: Runtime<DType = DType>>(
-    models: &mut HashMap<String, ModelEntry<R>>,
-    name: &str,
-) -> bool {
+fn remove_with_variants<R: Runtime<DType = DType>>(models: &mut Models<R>, name: &str) -> bool {
     let order = eviction::unload_order(&residents(models), name);
     for victim in &order {
         models.remove(victim);
@@ -79,12 +72,15 @@ fn remove_with_variants<R: Runtime<DType = DType>>(
 /// - Caching loaded models
 /// - Evicting least-recently-used models when memory is tight
 pub struct Scheduler<R: Runtime<DType = DType>> {
-    /// Loaded models by name: base models and LoRA variants
-    pub(crate) models: RwLock<HashMap<String, ModelEntry<R>>>,
+    /// Loaded models by name: base models and LoRA variants. Shared with
+    /// the blocking thread of each load, which registers its model.
+    pub(crate) models: Arc<RwLock<Models<R>>>,
+    /// One load at a time per model or variant name.
+    pub(crate) gates: LoadGates,
     /// Maximum number of loaded models
-    max_loaded: usize,
+    pub(crate) max_loaded: usize,
     /// Model directory for discovery
-    model_dir: PathBuf,
+    pub(crate) model_dir: PathBuf,
     /// Device for loading
     device: R::Device,
     /// Default context size for KV cache
@@ -108,8 +104,9 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     pub(crate) decision_config: DecisionConfig,
     /// The decision worker of each model that served `/v1/systemone`.
     pub(crate) decisions: DecisionRegistry<R>,
-    /// The registered LoRA adapter variants.
-    pub(crate) lora: LoraRegistry,
+    /// The registered LoRA adapter variants. Shared with the blocking
+    /// thread of each variant build, which registers its variant.
+    pub(crate) lora: Arc<LoraRegistry>,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -130,7 +127,8 @@ where
     /// Create a new scheduler
     pub fn new(model_dir: PathBuf, device: R::Device) -> Self {
         Self {
-            models: RwLock::new(HashMap::new()),
+            models: Arc::new(RwLock::new(HashMap::new())),
+            gates: LoadGates::default(),
             max_loaded: 1, // Default to single model
             model_dir,
             device,
@@ -142,7 +140,7 @@ where
             dtype: None,
             decision_config: DecisionConfig::default(),
             decisions: DecisionRegistry::default(),
-            lora: LoraRegistry::new(),
+            lora: Arc::new(LoraRegistry::new()),
         }
     }
 
@@ -235,187 +233,37 @@ where
         self.load_model(model_name).await
     }
 
-    /// The executor of the loaded `name`, with its last access set to now.
-    /// A variant's access counts as one for its base too, so the base is
-    /// never the least recently used model while its variant serves.
-    pub(crate) async fn touch(&self, name: &str) -> Option<Arc<Executor<R>>> {
-        let mut models = self.models.write().await;
-        let now = Instant::now();
-        let entry = models.get_mut(name)?;
-        entry.last_accessed = now;
-        let executor = Arc::clone(&entry.executor);
-        if let Some(base) = entry.variant_of.clone() {
-            if let Some(base) = models.get_mut(&base) {
-                base.last_accessed = now;
-            }
-        }
-        Some(executor)
-    }
-
-    /// Load a model by name
+    /// Load the base model `model_name` off the async executor, once: a
+    /// request that races a load of the same model waits for it and gets
+    /// its executor. See [`Self::load_base`].
+    ///
+    /// # Errors
+    ///
+    /// No such model, a load that fails, or a load that panics. A failed
+    /// load registers nothing.
     pub(crate) async fn load_model(&self, model_name: &str) -> Result<Arc<Executor<R>>> {
-        // Evict if necessary
-        self.ensure_capacity().await?;
+        let job = self.load_job();
+        self.load_base(model_name, move |path| job.run(path)).await
+    }
 
-        // Find model path
-        let model_path = self.find_model_path(model_name)?;
-
-        // Tensor parallel degree: BLAZR_TP_SIZE, then the user config file,
-        // then the model's own config.json, then 1.
-        let tp_size = self.tensor_parallel_size.unwrap_or_else(|| {
-            loader::model_config_inference(&model_path)
-                .map_or(1, |inference| inference.tensor_parallel_size)
-        });
-        super::tensor_parallel::validate_tp_config(tp_size, None).map_err(|e| anyhow!("{e}"))?;
-
-        let executor = if tp_size > 1 {
-            #[cfg(all(feature = "cuda", feature = "nccl"))]
-            {
-                use boostr::runtime::Device;
-                // Rank r runs on GPU `self.device + r`, each as a thread of
-                // this process. Followers load their shards while rank 0 does.
-                let (tp_state, comm) = super::tensor_parallel::init_tp(
-                    tp_size,
-                    self.device.id(),
-                    &model_path,
-                    self.dtype,
-                )
-                .map_err(|e| anyhow!("{e}"))?;
-                let (model, mut config) = loader::load_model_tp::<R, _>(
-                    &model_path,
-                    &self.device,
-                    comm,
-                    self.dtype.as_ref(),
-                )?;
-                if let Some(group) = &tp_state.group {
-                    group.wait_loaded()?;
-                }
-                self.apply_settings(&mut config, tp_size)?;
-                super::tensor_parallel::restrict_to_lockstep(&mut config.inference);
-                let tokenizer = checkpoint_tokenizer(&model_path, config.vocab_size())?;
-                let chat_template = ChatTemplate::detect(
-                    &model_path,
-                    config.model_type(),
-                    self.chat_template.as_deref(),
-                )?;
-                Arc::new(
-                    Executor::new_tensor_parallel(
-                        model,
-                        config,
-                        tokenizer,
-                        self.device.clone(),
-                        self.num_ctx,
-                        tp_state,
-                    )?
-                    .with_chat_template(chat_template)
-                    .with_model_dir(self.model_dir.clone()),
-                )
-            }
-            #[cfg(not(all(feature = "cuda", feature = "nccl")))]
-            {
-                return Err(anyhow::anyhow!(
-                    "tensor_parallel_size {tp_size} needs the cuda and nccl features. Rebuild \
-                     with --features cuda,nccl, or set the size to 1"
-                ));
-            }
-        } else {
-            // A GGUF carries its own vocabulary; a checkpoint directory is
-            // matched to a bundled one by size.
-            let source = loader::detect_model_source(&model_path)?;
-            let (model, mut config, tokenizer) = match source.format {
-                loader::ModelFormat::Gguf => loader::load_gguf_with_tokenizer_as::<R, _>(
-                    &model_path,
-                    &self.device,
-                    self.dtype.as_ref(),
-                )?,
-                loader::ModelFormat::SafeTensors => {
-                    let (model, config) = loader::load_model_as::<R, _>(
-                        &model_path,
-                        &self.device,
-                        self.dtype.as_ref(),
-                    )?;
-                    let tokenizer = checkpoint_tokenizer(&model_path, config.vocab_size())?;
-                    (model, config, tokenizer)
-                }
-            };
-            self.apply_settings(&mut config, tp_size)?;
-            let chat_template = ChatTemplate::detect(
-                &model_path,
-                config.model_type(),
-                self.chat_template.as_deref(),
-            )?;
-            Arc::new(
-                Executor::new(model, config, tokenizer, self.device.clone(), self.num_ctx)?
-                    .with_chat_template(chat_template)
-                    .with_model_dir(self.model_dir.clone())
-                    .with_configured_vision_tower()?,
-            )
-        };
-
-        metrics::counter!("blazr_scheduler_loads_total").increment(1);
-
-        // Store in cache
-        {
-            let mut models = self.models.write().await;
-            models.insert(
-                model_name.to_string(),
-                ModelEntry {
-                    executor: Arc::clone(&executor),
-                    last_accessed: Instant::now(),
-                    path: model_path,
-                    keep_alive: None,
-                    variant_of: None,
-                },
-            );
+    /// This scheduler's load settings, owned for a load thread.
+    fn load_job(&self) -> LoadJob<R> {
+        LoadJob {
+            model_dir: self.model_dir.clone(),
+            device: self.device.clone(),
+            num_ctx: self.num_ctx,
+            chat_template: self.chat_template.clone(),
+            vision: self.vision.clone(),
+            inference_overlay: self.inference_overlay.clone(),
+            tensor_parallel_size: self.tensor_parallel_size,
+            dtype: self.dtype,
         }
-
-        Ok(executor)
-    }
-
-    /// Write the user config file's inference keys, then the command-line
-    /// vision flags, over a freshly loaded model's config. Records the
-    /// tensor parallel degree the model runs at.
-    fn apply_settings(&self, config: &mut BlazrConfig, tp_size: usize) -> Result<()> {
-        self.inference_overlay.apply(&mut config.inference)?;
-        self.vision.apply(&mut config.inference);
-        config.inference.tensor_parallel_size = tp_size;
-        Ok(())
-    }
-
-    /// Find model path by name
-    fn find_model_path(&self, model_name: &str) -> Result<PathBuf> {
-        self.model_path(model_name)
-            .ok_or_else(|| anyhow!("Model not found: {}", model_name))
     }
 
     /// The path the model name `model_name` resolves to, as a load resolves
     /// it. `None` when no such model exists.
     pub fn model_path(&self, model_name: &str) -> Option<PathBuf> {
         super::model_dir::find_model_path(&self.model_dir, model_name)
-    }
-
-    /// Ensure capacity for a new model. Only base models count against
-    /// the limit. Evicting a base evicts its LoRA variants first.
-    async fn ensure_capacity(&self) -> Result<()> {
-        let mut models = self.models.write().await;
-        loop {
-            let order = {
-                let residents = residents(&models);
-                if eviction::base_count(&residents) < self.max_loaded {
-                    break;
-                }
-                let Some(lru) = eviction::lru_base(&residents) else {
-                    break;
-                };
-                eviction::unload_order(&residents, &lru)
-            };
-            for name in order {
-                tracing::info!("Evicting model: {}", name);
-                models.remove(&name);
-            }
-            metrics::counter!("blazr_scheduler_evictions_total").increment(1);
-        }
-        Ok(())
     }
 
     /// Set the keep-alive duration for a model.

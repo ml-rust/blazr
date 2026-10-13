@@ -21,6 +21,7 @@ use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, ScalarOps, UnaryOps,
 };
 
+pub use super::model_dir::AvailableModelInfo;
 use crate::engine::Executor;
 use crate::loader;
 use crate::tokenizer::checkpoint_tokenizer;
@@ -304,33 +305,14 @@ where
 
     /// Find model path by name
     fn find_model_path(&self, model_name: &str) -> Result<PathBuf> {
-        // Try direct path first
-        let direct = PathBuf::from(model_name);
-        if direct.exists() {
-            return Ok(direct);
-        }
+        self.model_path(model_name)
+            .ok_or_else(|| anyhow!("Model not found: {}", model_name))
+    }
 
-        // Try in model directory
-        let in_dir = self.model_dir.join(model_name);
-        if in_dir.exists() {
-            return Ok(in_dir);
-        }
-
-        // Try common patterns
-        let patterns = [
-            format!("{}.safetensors", model_name),
-            format!("{}.gguf", model_name),
-            format!("{}/model.safetensors", model_name),
-        ];
-
-        for pattern in &patterns {
-            let candidate = self.model_dir.join(pattern);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-
-        Err(anyhow!("Model not found: {}", model_name))
+    /// The path the model name `model_name` resolves to, as a load resolves
+    /// it. `None` when no such model exists.
+    pub fn model_path(&self, model_name: &str) -> Option<PathBuf> {
+        super::model_dir::find_model_path(&self.model_dir, model_name)
     }
 
     /// Ensure capacity for a new model
@@ -409,52 +391,7 @@ where
 
     /// List available models in the model directory
     pub fn list_available(&self) -> Result<Vec<AvailableModelInfo>> {
-        let mut models = Vec::new();
-
-        if !self.model_dir.exists() {
-            return Ok(models);
-        }
-
-        for entry in std::fs::read_dir(&self.model_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            if path.is_dir() {
-                // Check for model files in directory
-                if path.join("model.safetensors").exists()
-                    || path.join("config.json").exists()
-                    || std::fs::read_dir(&path)
-                        .map(|entries| {
-                            entries.filter_map(|e| e.ok()).any(|e| {
-                                e.path()
-                                    .extension()
-                                    .map(|ext| ext == "gguf")
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false)
-                {
-                    models.push(AvailableModelInfo {
-                        name: name.clone(),
-                        path: path.clone(),
-                        format: detect_format(&path),
-                    });
-                }
-            } else if path
-                .extension()
-                .map(|e| e == "safetensors" || e == "gguf")
-                .unwrap_or(false)
-            {
-                models.push(AvailableModelInfo {
-                    name: name.clone(),
-                    path: path.clone(),
-                    format: detect_format(&path),
-                });
-            }
-        }
-
-        Ok(models)
+        Ok(super::model_dir::list_available(&self.model_dir)?)
     }
 }
 

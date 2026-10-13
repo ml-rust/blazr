@@ -37,6 +37,7 @@ pub mod latency_window;
 pub mod lora;
 pub(crate) mod mirostat;
 pub mod pooling;
+mod model_dir;
 mod queue_depth;
 pub mod request_registry;
 pub mod request_scheduler;

@@ -1,7 +1,8 @@
 //! System One decision models on the engine: the service and worker thread
-//! of each loaded decision model, request preparation and limits, and the
-//! scheduler's decision entry points.
+//! of each loaded decision model, request preparation and limits, the
+//! scheduler's decision entry points, and temperature calibration.
 
+pub mod calibration;
 pub mod error;
 pub mod limits;
 pub mod prepare;

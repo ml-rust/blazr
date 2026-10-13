@@ -1,4 +1,4 @@
-//! `blazr serve`'s System One decision flags.
+//! The System One decision flags of `blazr serve` and `blazr decision`.
 
 use clap::Args;
 

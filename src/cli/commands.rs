@@ -457,6 +457,10 @@ pub enum Commands {
     #[cfg(feature = "audio")]
     SoundReview(super::narration::SoundReviewArgs),
 
+    /// System One decision model tools (`calibrate` fits answer temperatures)
+    #[command(subcommand)]
+    Decision(super::DecisionCommand),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for

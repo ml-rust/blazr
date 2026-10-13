@@ -5,13 +5,12 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use super::blazr_calibration::served_calibration;
 use super::detect::DecisionSource;
 use super::family_files::{
     contract_failures, decider_config, empty_config, jebadiah_contract, model_template,
 };
-use super::sidecar::{
-    context_length, decider_temperatures, jebadiah_temperatures, license_and_base, Calibration,
-};
+use super::sidecar::{context_length, license_and_base, Calibration};
 use crate::model::decision_template::decider::DEFAULT_MAX_STATE_TOKENS;
 use crate::model::decision_template::jebadiah::DEFAULT_MAX_TOKENS;
 use crate::model::decision_template::labels::DECIDER_MAX_OPTIONS;
@@ -33,17 +32,28 @@ pub struct ContractInfo {
 /// The temperatures a decision model ships.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CalibrationInfo {
-    /// The file the temperatures came from. `None` when there is none.
+    /// The file the temperatures came from: `blazr_calibration.json` when it
+    /// sets any type, else the vendor sidecar. `None` when there is none.
     pub source: Option<String>,
-    /// The temperature of each answer type the file sets.
+    /// The temperature of each answer type the files set.
     pub temperatures: Option<BTreeMap<String, f64>>,
+    /// The fit date of `blazr_calibration.json`, when it sets any type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fitted_at: Option<String>,
+    /// The file each type's temperature came from, when
+    /// `blazr_calibration.json` sets any type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sources: Option<BTreeMap<String, String>>,
 }
 
 impl CalibrationInfo {
     fn of(calibration: Option<&Calibration>) -> Self {
+        let fitted = calibration.filter(|c| c.fitted_at.is_some());
         Self {
             source: calibration.map(|c| c.source.clone()),
             temperatures: calibration.map(|c| c.temperatures.clone()),
+            fitted_at: fitted.and_then(|c| c.fitted_at.clone()),
+            sources: fitted.map(|c| c.sources.clone()),
         }
     }
 }
@@ -87,7 +97,7 @@ pub struct DecisionInfo {
 /// # Errors
 ///
 /// When a sidecar exists and does not parse, or its layout or temperatures
-/// are invalid.
+/// are invalid, `blazr_calibration.json` included.
 pub fn decision_info(source: &DecisionSource) -> Result<DecisionInfo, String> {
     let card_dir = source.model_dir.as_deref().unwrap_or(&source.sidecar_dir);
     let facts = source.gguf_facts.as_ref();
@@ -109,11 +119,7 @@ pub fn decision_info(source: &DecisionSource) -> Result<DecisionInfo, String> {
     };
     match source.family {
         Family::Decider => {
-            let cfg = decider_config(source)?;
-            let (value, name) = match &cfg {
-                Some(c) => (c.value.clone(), c.name()),
-                None => (empty_config(), String::new()),
-            };
+            let value = decider_config(source)?.map_or_else(empty_config, |c| c.value);
             let config = DeciderConfig::from_json(&value).map_err(|e| e.to_string())?;
             info.layout = match config.layout {
                 Layout::Plain => "plain",
@@ -121,11 +127,6 @@ pub fn decision_info(source: &DecisionSource) -> Result<DecisionInfo, String> {
             };
             info.max_options = Some(DECIDER_MAX_OPTIONS);
             info.max_state_tokens = Some(DEFAULT_MAX_STATE_TOKENS);
-            let calibration = match cfg {
-                Some(_) => decider_temperatures(&value, &name)?,
-                None => None,
-            };
-            info.calibration = CalibrationInfo::of(calibration.as_ref());
         }
         Family::Jebadiah => {
             info.layout = "chat";
@@ -144,10 +145,9 @@ pub fn decision_info(source: &DecisionSource) -> Result<DecisionInfo, String> {
                     problems,
                 });
             }
-            let calibration = jebadiah_temperatures(&source.sidecar_dir);
-            info.calibration = CalibrationInfo::of(calibration.as_ref());
         }
     }
+    info.calibration = CalibrationInfo::of(served_calibration(source)?.as_ref());
     Ok(info)
 }
 
@@ -200,5 +200,54 @@ mod tests {
         let info = decision_info(&source(dir.path(), Family::Jebadiah)).expect("info");
         assert_eq!(info.calibration.source.as_deref(), Some(TEMPERATURES));
         assert_eq!(info.max_prompt_tokens, Some(2048));
+    }
+
+    #[test]
+    fn blazr_calibration_wins_per_type_and_a_bad_one_fails() {
+        use crate::loader::decision::blazr_calibration::{BLAZR_CALIBRATION, CALIBRATION_SCHEMA};
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join(DECIDER_CONFIG),
+            r#"{"temperature": 1.0, "temperature_by_type": {"noul": 1.5}}"#,
+        )
+        .expect("write");
+        let file = serde_json::json!({"schema": CALIBRATION_SCHEMA, "family": "decider",
+            "fitted_at": "2026-10-13", "model": "d", "temperatures": {"choice": 1.3},
+            "fits": {}, "source": "blazr decision calibrate"});
+        let path = dir.path().join(BLAZR_CALIBRATION);
+        std::fs::write(&path, file.to_string()).expect("write");
+        let info = decision_info(&source(dir.path(), Family::Decider)).expect("info");
+        let cal = &info.calibration;
+        assert_eq!(cal.source.as_deref(), Some(BLAZR_CALIBRATION));
+        assert_eq!(cal.fitted_at.as_deref(), Some("2026-10-13"));
+        let temps = cal.temperatures.clone().expect("calibrated");
+        assert_eq!((temps["choice"], temps["noul"]), (1.3, 1.5));
+        let sources = cal.sources.clone().expect("per type");
+        assert_eq!(sources["noul"], DECIDER_CONFIG);
+        let json = serde_json::to_value(&info).expect("serializes");
+        assert_eq!(json["calibration"]["fitted_at"], "2026-10-13");
+
+        let mut bad = file;
+        bad["temperatures"]["choice"] = serde_json::json!(0.0);
+        std::fs::write(&path, bad.to_string()).expect("write");
+        let e = decision_info(&source(dir.path(), Family::Decider)).expect_err("refused");
+        assert!(
+            e.contains(BLAZR_CALIBRATION) && e.contains("temperatures"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn vendor_only_info_has_no_fit_date() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join(TEMPERATURES),
+            r#"{"temperatures": {"choice": 1.1}}"#,
+        )
+        .expect("write");
+        let info = decision_info(&source(dir.path(), Family::Jebadiah)).expect("info");
+        let json = serde_json::to_value(&info).expect("serializes");
+        assert!(json["calibration"].get("fitted_at").is_none());
+        assert!(json["calibration"].get("sources").is_none());
     }
 }

@@ -321,6 +321,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Decision(command) => blazr::cli::decision(command).await?,
         Commands::Completions { shell } => {
             clap_complete::generate(
                 shell,

@@ -826,11 +826,41 @@ An isolated decider Score answer adds `level_fit` and `fit_mass`. The response a
 
 The family comes from `--decision-family`, then a sidecar (`decider_config.json`: decider; `prompt_contract.json` or `jebadiah.json`: Jebadiah) in the model directory or beside the `.gguf`, then a GGUF `general.basename` of `decider` or `jebadiah` tagged `system-one` or `decision-model`. A `.gguf` with no sidecar takes one from `--decision-config`. Without it, answers are uncalibrated and `warnings` says so.
 
+#### Fitted temperatures
+
+`blazr decision calibrate` fits one temperature per answer type on the user's labelled data and writes `blazr_calibration.json` to the sidecar directory: the model directory, beside a bare `.gguf`, or beside `--decision-config`. Each type that file sets replaces the vendor's temperature (`decider_config.json` `temperature_by_type`, Jebadiah `temperatures.json`). A type it lacks keeps the vendor's. The response's `calibration.source` is then `blazr_calibration.json`. A file with the wrong `schema` or `family`, a bad `fitted_at`, an unknown type, or a temperature outside `[0.05, 100]` fails the model's load with the file and field named. A running model reads the file again only when it reloads.
+
+```bash
+blazr decision calibrate --model decider-4b --labels labels.jsonl [--min-rows 50] [--out FILE] [--dry-run]
+```
+
+Each line of the label file is one of:
+
+- a labelled request: `{"state": ..., "questions": {...}, "labels": {"route": "billing", "blocked": true, "urgency": 2}}`. Any request field of the family applies (`isolated`, `independent`, ...). The request runs at temperature 1. A choice gold is the option key, a noul gold `true` or `false`, and a score gold the level index or the level as the request spells it (decider: the key of a `{level number: description}` map, else the level text; Jebadiah: the level name). Questions without a label are skipped.
+- a precomputed record, as `decider/calibrate.py` reads it: `{"type": "choice" | "noul" | "score", "logits": [...], "gold": 0}` or `{"type": "score", "level_logits": [[no, yes], ...], "gold": 0}`. `probs` and `level_probs` stand in as their logarithms, so a 0 is refused.
+
+A type with fewer than `--min-rows` answers is not fitted. Score pools listed and isolated answers into one fit.
+
+```json
+{
+  "schema": "blazr.decision.calibration.v1",
+  "family": "decider",
+  "fitted_at": "2026-10-13",
+  "model": "decider-4b",
+  "temperatures": {"choice": 1.2873, "score": 1.4410},
+  "fits": {
+    "choice": {"n": 412, "nll_before": 0.4123, "nll_after": 0.3874, "t": 1.2873, "outcome": "converged"},
+    "score": {"n": 180, "nll_before": 0.9911, "nll_after": 0.9532, "t": 1.4410, "outcome": "converged"}
+  },
+  "source": "blazr decision calibrate"
+}
+```
+
 ## Models
 
 ### GET /v1/models
 
-Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family`, `readout`, `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider) or `max_prompt_tokens` (Jebadiah), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
+Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family`, `readout`, `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider) or `max_prompt_tokens` (Jebadiah), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
 
 ```bash
 curl http://localhost:8080/v1/models

@@ -486,6 +486,19 @@ Rules that apply to `run` and `generate`:
 
 `convert` runs the `compressr` binary found on `PATH`.
 
+### decision calibrate
+
+| Flag                  | Default                                    | Meaning                                                                   |
+| --------------------- | ------------------------------------------ | ------------------------------------------------------------------------- |
+| `-m`, `--model <M>`   | required                                   | Decision model name or path                                               |
+| `--labels <FILE>`     | required                                   | JSON-lines label file. See [Fitted temperatures](api.md#fitted-temperatures) |
+| `--min-rows <N>`      | `50`                                       | Fewest labelled answers a type needs to be fitted                         |
+| `--out <FILE>`        | `blazr_calibration.json` in the sidecar directory | Output file. A vendor sidecar name is refused                      |
+| `--dry-run`           | off                                        | Prints the fit and writes nothing                                         |
+| `--decision-*`        | as `serve`                                 | Family, sidecar and worker limits, as [serve](#serve) takes them          |
+
+The model loads on the build's runtime and the `device` key's GPU. A label file of records only loads no weights.
+
 ### swarm and disagg (distributed feature)
 
 | Command  | Flag                   | Default             | Meaning                                              |

@@ -11,6 +11,7 @@ pub mod jebadiah;
 pub mod jev;
 pub mod labels;
 pub mod py_text;
+pub mod score_keys;
 pub mod systemone;
 
 pub use decider::DeciderRenderer;

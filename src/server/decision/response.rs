@@ -50,10 +50,10 @@ mod tests {
 
     #[test]
     fn calibration_applies_unless_raw_or_absent() {
-        let calibration = Calibration {
-            source: "temperatures.json".into(),
-            temperatures: BTreeMap::from([("choice".to_string(), 1.1)]),
-        };
+        let calibration = Calibration::from_file(
+            "temperatures.json",
+            BTreeMap::from([("choice".to_string(), 1.1)]),
+        );
         let facts = ResponseFacts {
             model: "m",
             input_tokens: 12,

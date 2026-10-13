@@ -3,16 +3,18 @@
 //! The model file supplies the tokenizer and the chat template: a GGUF its
 //! embedded vocabulary and `tokenizer.chat_template`, a checkpoint
 //! directory its `tokenizer.json` and template files. The sidecars supply
-//! the decider config, the prompt contract and the temperatures.
+//! the decider config, the prompt contract and the temperatures, each type
+//! taken from `blazr_calibration.json` when that file sets it.
 
 use boostr::format::{extract_gguf_vocab, Gguf};
 
+use super::blazr_calibration::served_calibration;
 use super::detect::DecisionSource;
 use super::family_files::{
     contract_failures, decider_config, empty_config, jebadiah_contract, model_template,
 };
 use super::info::{decision_info, ContractInfo, DecisionInfo};
-use super::sidecar::{decider_temperatures, jebadiah_temperatures, Calibration, DECIDER_CONFIG};
+use super::sidecar::{Calibration, DECIDER_CONFIG};
 use crate::model::chat_template::{JinjaTemplate, ModelTemplate};
 use crate::model::decision_template::family::load_tokenizer;
 use crate::model::decision_template::{
@@ -74,7 +76,7 @@ pub fn load_renderer(
     let mut warnings = Vec::new();
     let tokenizer = tokenizer(source)?;
     let template = model_template(source)?;
-    let (renderer, calibration) = match source.family {
+    let renderer = match source.family {
         Family::Jebadiah => {
             let jinja = compiled(template.as_ref())?;
             let renderer = JebadiahRenderer::new(tokenizer, &jinja).map_err(|e| e.to_string())?;
@@ -105,8 +107,7 @@ pub fn load_renderer(
                         .to_string(),
                 ),
             }
-            let calibration = jebadiah_temperatures(&source.sidecar_dir);
-            (DecisionRenderer::Jebadiah(renderer), calibration)
+            DecisionRenderer::Jebadiah(renderer)
         }
         Family::Decider => {
             let cfg = decider_config(source)?;
@@ -118,23 +119,21 @@ pub fn load_renderer(
             };
             let renderer = DeciderRenderer::new(tokenizer, config, jinja.as_ref())
                 .map_err(|e| e.to_string())?;
-            let calibration = match &cfg {
-                Some(c) => decider_temperatures(&value, &c.name())?,
-                None => {
-                    warnings.push(format!(
-                        "no {DECIDER_CONFIG} beside the model: the decider's defaults apply \
-                         (neutralize_none on, isolated levels off). Pass --decision-config"
-                    ));
-                    None
-                }
-            };
-            (DecisionRenderer::Decider(renderer), calibration)
+            if cfg.is_none() {
+                warnings.push(format!(
+                    "no {DECIDER_CONFIG} beside the model: the decider's defaults apply \
+                     (neutralize_none on, isolated levels off). Pass --decision-config"
+                ));
+            }
+            DecisionRenderer::Decider(renderer)
         }
     };
+    let calibration = served_calibration(source)?;
     if calibration.is_none() {
         warnings.push(
             "the model ships no fitted temperatures, so every answer is uncalibrated \
-             (temperature 1). Pass --decision-config with the model's sidecar"
+             (temperature 1). Pass --decision-config with the model's sidecar, or fit them \
+             with blazr decision calibrate"
                 .to_string(),
         );
     }

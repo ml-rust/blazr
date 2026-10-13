@@ -1,12 +1,18 @@
 //! System One decision models: family detection, sidecar files, the
-//! `/v1/models` report, and the renderer a model's files build.
+//! user's fitted temperatures, the `/v1/models` report, and the renderer a
+//! model's files build.
 
+pub mod blazr_calibration;
 pub mod detect;
 pub mod family_files;
 pub mod info;
 pub mod renderer;
 pub mod sidecar;
 
+pub use blazr_calibration::{
+    read_calibration_file, served_calibration, write_calibration_file, CalibrationFile, TypeFit,
+    BLAZR_CALIBRATION,
+};
 pub use detect::{
     detect_decision, detect_decision_with, read_gguf_facts, DecisionSource, GgufFacts,
 };

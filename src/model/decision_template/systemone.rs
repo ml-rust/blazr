@@ -8,7 +8,8 @@
 use serde_json::{Map, Value};
 
 use super::encode::PromptText;
-use super::py_text::{is_py_space, nd_digit, py_float, py_repr, py_repr_str, py_str, py_truthy};
+use super::py_text::{is_py_space, nd_digit, py_repr, py_str, py_truthy};
+use super::score_keys::{criteria_of, keyed_levels};
 use crate::model::chat_template::jinja_json::python_json;
 
 /// The widest choice question.
@@ -158,10 +159,7 @@ pub fn render_question(spec: &Value) -> Result<S1Question, String> {
         return Err("a question must be an object of {type, instructions, criteria}".into());
     };
     let kind_value = spec.get("type").cloned().unwrap_or_else(|| "choice".into());
-    let crit = match spec.get("criteria") {
-        Some(v) => Some(v).filter(|v| !v.is_null()),
-        None => get(spec, "options"),
-    };
+    let crit = criteria_of(spec);
     // `spec.get("instructions", spec.get("question", ""))`; `None` is the `""`.
     let raw = spec.get("instructions").or_else(|| spec.get("question"));
     let is = |name: &str| kind_value.as_str() == Some(name);
@@ -276,22 +274,12 @@ fn choice_options(crit: Option<&Value>) -> Result<(Vec<PromptText>, Vec<String>)
 /// map in the order of its keys read as floats.
 fn score_levels(crit: Option<&Value>) -> Result<Vec<Value>, String> {
     let levels = match crit {
-        Some(Value::Object(map)) => {
-            let mut keyed = Vec::with_capacity(map.len());
-            for (k, v) in map {
-                let f = py_float(k)?;
-                if f.is_nan() {
-                    return Err(format!(
-                        "score criteria: the level key {} reads as NaN, which has no order",
-                        py_repr_str(k)
-                    ));
-                }
-                keyed.push((f, v.clone()));
-            }
-            // Stable, and -0.0 equals 0.0, as in Python's `sorted`.
-            keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            Some(keyed.into_iter().map(|(_, v)| v).collect::<Vec<_>>())
-        }
+        Some(Value::Object(map)) => Some(
+            keyed_levels(map)?
+                .into_iter()
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>(),
+        ),
         Some(Value::Array(items)) => Some(items.clone()),
         _ => None,
     };

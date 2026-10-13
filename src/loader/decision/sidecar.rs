@@ -22,19 +22,42 @@ pub const JEBADIAH_CARD: &str = "jebadiah.json";
 /// Jebadiah's fitted temperatures.
 pub const TEMPERATURES: &str = "temperatures.json";
 
+/// Every vendor sidecar `blazr decision calibrate` never writes.
+pub const VENDOR_SIDECARS: [&str; 4] =
+    [DECIDER_CONFIG, PROMPT_CONTRACT, JEBADIAH_CARD, TEMPERATURES];
+
 /// The answer types a temperature applies to.
-const TYPES: [&str; 3] = ["choice", "noul", "score"];
+pub const TYPES: [&str; 3] = ["choice", "noul", "score"];
 
 /// The temperatures a model was calibrated with.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Calibration {
-    /// The file the temperatures came from.
+    /// The file the temperatures came from: `blazr_calibration.json` when
+    /// it sets any type, else the vendor sidecar.
     pub source: String,
-    /// The temperature of each answer type the file sets.
+    /// The temperature of each answer type a file sets.
     pub temperatures: BTreeMap<String, f64>,
+    /// The file each type's temperature came from.
+    pub sources: BTreeMap<String, String>,
+    /// The fit date of `blazr_calibration.json` when it sets any type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fitted_at: Option<String>,
 }
 
 impl Calibration {
+    /// Temperatures that all come from the one file `source`.
+    pub fn from_file(source: &str, temperatures: BTreeMap<String, f64>) -> Self {
+        Self {
+            source: source.to_string(),
+            sources: temperatures
+                .keys()
+                .map(|kind| (kind.clone(), source.to_string()))
+                .collect(),
+            temperatures,
+            fitted_at: None,
+        }
+    }
+
     /// One temperature per answer type. A type the file leaves out takes 1.
     pub fn policy(&self) -> TemperaturePolicy {
         let t = |kind: &str| self.temperatures.get(kind).copied().unwrap_or(1.0);
@@ -85,10 +108,7 @@ pub fn jebadiah_temperatures(dir: &Path) -> Option<Calibration> {
             (t.is_finite() && t > 0.0).then(|| (kind.to_string(), t))
         })
         .collect();
-    (!temperatures.is_empty()).then(|| Calibration {
-        source: TEMPERATURES.to_string(),
-        temperatures,
-    })
+    (!temperatures.is_empty()).then(|| Calibration::from_file(TEMPERATURES, temperatures))
 }
 
 fn positive(value: &Value, at: &str) -> Result<f64, String> {
@@ -141,10 +161,7 @@ pub fn decider_temperatures(cfg: &Value, source: &str) -> Result<Option<Calibrat
             );
         }
     }
-    Ok(Some(Calibration {
-        source: source.to_string(),
-        temperatures,
-    }))
+    Ok(Some(Calibration::from_file(source, temperatures)))
 }
 
 /// The lowercase hex SHA-256 of a chat template's source, as Jebadiah's

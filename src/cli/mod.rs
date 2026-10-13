@@ -11,7 +11,7 @@ mod bench;
 mod chat;
 mod commands;
 mod convert;
-#[cfg(feature = "server")]
+mod decision;
 mod decision_args;
 #[cfg(all(feature = "distributed", feature = "server"))]
 mod disaggregated;
@@ -44,7 +44,7 @@ pub use bench::bench;
 pub use chat::chat;
 pub use commands::{Cli, Commands};
 pub use convert::convert;
-#[cfg(feature = "server")]
+pub use decision::{decision, CalibrateArgs, DecisionCommand};
 pub use decision_args::DecisionArgs;
 #[cfg(all(feature = "distributed", feature = "server"))]
 pub use disaggregated::{run_disagg_decode_worker, run_disagg_prefill_worker, run_disagg_router};

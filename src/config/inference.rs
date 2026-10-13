@@ -122,6 +122,9 @@ pub struct InferenceConfig {
     /// Most output tokens an image resizes to. `None` keeps the mmproj value.
     #[serde(default)]
     pub image_max_tokens: Option<usize>,
+    /// System One decision models: detection, batching and limits.
+    #[serde(default)]
+    pub decision: super::decision::DecisionConfig,
 }
 
 fn default_dtype() -> String {
@@ -191,6 +194,7 @@ impl Default for InferenceConfig {
             mmproj: None,
             image_min_tokens: None,
             image_max_tokens: None,
+            decision: Default::default(),
         }
     }
 }

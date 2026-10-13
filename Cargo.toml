@@ -173,6 +173,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 glob = "0.3"
+# The chat template hash a decision model's prompt contract pins. Pure
+# Rust: builds for wasm32 and Android.
+sha2 = { version = "0.11", default-features = false }
 
 # HuggingFace Hub for model downloading (`hub`)
 # Blocking API plus the async client, over reqwest with rustls: no system

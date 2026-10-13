@@ -7,6 +7,7 @@
 //! All heavy lifting is done by boostr's format module.
 
 mod api;
+pub mod decision;
 mod detect;
 pub(crate) mod gguf;
 mod gguf_config;

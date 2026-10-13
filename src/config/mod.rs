@@ -6,6 +6,8 @@
 //! and its per-model `inference` section.
 
 mod blazr;
+mod decision;
+mod decision_flags;
 mod defaults;
 mod device;
 mod dtype;
@@ -23,6 +25,8 @@ mod server;
 mod vision;
 
 pub use blazr::{parse_dtype, BlazrConfig};
+pub use decision::{DecisionConfig, DecisionFamily};
+pub use decision_flags::{resolve_decision, DecisionFlags};
 pub use defaults::{DEFAULT_MODEL_DIR, DEFAULT_NUM_CTX};
 pub use device::DeviceChoice;
 pub use dtype::{

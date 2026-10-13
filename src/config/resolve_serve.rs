@@ -7,7 +7,10 @@ use super::resolve::{
     pick, resolve_dtype, resolve_model, resolve_model_dir, resolve_num_ctx,
     resolve_reasoning_format, resolve_tp_size,
 };
-use super::{DeviceChoice, DtypeRequest, EnvVars, FileConfig, ReasoningFormat, ServerConfig};
+use super::{
+    resolve_decision, DecisionConfig, DecisionFlags, DeviceChoice, DtypeRequest, EnvVars,
+    FileConfig, ReasoningFormat, ServerConfig,
+};
 
 /// The `serve` flags that a key or variable also sets. `None` means not given.
 #[derive(Debug, Clone, Default)]
@@ -22,6 +25,7 @@ pub struct ServeFlags {
     pub voice_dir: Option<PathBuf>,
     pub data_parallel: Option<usize>,
     pub dtype: Option<boostr::DType>,
+    pub decision: DecisionFlags,
 }
 
 /// Every value `blazr serve` starts with.
@@ -52,6 +56,8 @@ pub struct ServeSettings {
     /// `--dtype`, then `inference.dtype`. `None` takes each model's
     /// `torch_dtype`, else f32.
     pub dtype: Option<DtypeRequest>,
+    /// `--decision-*` flags, then `inference.decision`.
+    pub decision: DecisionConfig,
 }
 
 /// Resolve every `serve` value.
@@ -78,6 +84,7 @@ pub fn resolve_serve(
     let tensor_parallel_size = resolve_tp_size(env, file);
     let data_parallel = pick(flags.data_parallel, None, file.inference.data_parallel(), 1);
     check_data_parallel(data_parallel, tensor_parallel_size, model.is_some())?;
+    let decision = resolve_decision(flags.decision, file, model.clone())?;
 
     Ok(ServeSettings {
         model,
@@ -91,6 +98,7 @@ pub fn resolve_serve(
         api_key: flags.api_key.or_else(|| env.api_key.clone()),
         voice_dir: flags.voice_dir.or_else(|| env.voice_dir.clone()),
         dtype: resolve_dtype(flags.dtype, file),
+        decision,
     })
 }
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 
-use crate::config::{tp_conflict, DtypeRequest, InferenceOverlay, VisionOverrides};
+use crate::config::{tp_conflict, DecisionConfig, DtypeRequest, InferenceOverlay, VisionOverrides};
 use crate::engine::{DataParallelGroup, Executor, Scheduler, SloBatchPolicy};
 use crate::server::handlers::{ServeReplica, ServerDevice, ServerRuntime, Serving};
 
@@ -25,6 +25,8 @@ pub struct SchedulerSettings {
     pub vision: VisionOverrides,
     /// `--dtype`, then `inference.dtype`, for every model loaded.
     pub dtype: Option<DtypeRequest>,
+    /// `--decision-*`, then `inference.decision`, for every decision model.
+    pub decision: DecisionConfig,
 }
 
 impl SchedulerSettings {
@@ -37,6 +39,7 @@ impl SchedulerSettings {
             .with_tensor_parallel_size(self.tensor_parallel_size)
             .with_vision(self.vision.clone())
             .with_dtype(self.dtype)
+            .with_decision(self.decision.clone())
     }
 }
 

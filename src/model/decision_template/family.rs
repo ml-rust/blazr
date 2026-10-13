@@ -105,6 +105,9 @@ pub struct DecisionQuestion {
     /// What each option answers to on the wire, in option order: a choice
     /// criteria key as written, `true`/`false`, or a level index.
     pub names: Vec<String>,
+    /// A Score question's level names as the family's wire `legend` shows
+    /// them, in level order. Empty for the other kinds.
+    pub legend: Vec<String>,
     /// The question's scoring rows: one, or one per level of an isolated
     /// Score question.
     pub scoring_rows: Range<usize>,
@@ -175,7 +178,7 @@ impl DecisionRenderer {
 }
 
 /// A JSON file of the model directory.
-pub(super) fn read_json(path: &Path) -> Result<Value, DecisionError> {
+pub(crate) fn read_json(path: &Path) -> Result<Value, DecisionError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| DecisionError::Model(format!("{} does not read: {e}", path.display())))?;
     serde_json::from_str(&text)
@@ -183,7 +186,7 @@ pub(super) fn read_json(path: &Path) -> Result<Value, DecisionError> {
 }
 
 /// `tokenizer.json` of the model directory.
-pub(super) fn load_tokenizer(dir: &Path) -> Result<splintr::AnyTokenizer, DecisionError> {
+pub(crate) fn load_tokenizer(dir: &Path) -> Result<splintr::AnyTokenizer, DecisionError> {
     let path = dir.join("tokenizer.json");
     splintr::from_json_path(&path).map_err(|e| {
         DecisionError::Model(format!(
@@ -194,7 +197,7 @@ pub(super) fn load_tokenizer(dir: &Path) -> Result<splintr::AnyTokenizer, Decisi
 }
 
 /// The chat template the model ships.
-pub(super) fn load_template(dir: &Path) -> Result<JinjaTemplate, DecisionError> {
+pub(crate) fn load_template(dir: &Path) -> Result<JinjaTemplate, DecisionError> {
     let shipped: Option<ModelTemplate> = ChatTemplate::from_model(dir)
         .map_err(|e| DecisionError::Model(format!("{}: {e:#}", dir.display())))?;
     let shipped = shipped.ok_or_else(|| {

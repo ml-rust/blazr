@@ -45,6 +45,7 @@ pub async fn serve(
         api_key,
         voice_dir,
         dtype,
+        decision,
     } = settings;
 
     // Check the tensor parallel degree before any model loads.
@@ -71,6 +72,7 @@ pub async fn serve(
         tensor_parallel_size,
         vision,
         dtype,
+        decision,
     };
     let scheduler = Arc::new(scheduler_settings.build(device.clone()));
     // The SLO checks and the batch policy start before any batching engine.
@@ -134,6 +136,21 @@ pub async fn serve(
                 tower.config().image_min_tokens,
                 tower.config().image_max_tokens,
             );
+        }
+        // A decision model starts its worker now, so a contract mismatch
+        // shows at start and the first request pays no renderer load.
+        match scheduler.decision_service(model_name).await {
+            Ok(service) => eprintln!(
+                "  {} {} decision model on POST /v1/systemone ({})",
+                "Loaded".green(),
+                service.family().name(),
+                match service.calibration() {
+                    Some(c) => format!("temperatures from {}", c.source),
+                    None => "uncalibrated".to_string(),
+                },
+            ),
+            Err(crate::engine::decision::DecisionFailure::NotDecisionModel(_)) => {}
+            Err(e) => tracing::warn!("POST /v1/systemone cannot serve '{model_name}': {e}"),
         }
     }
 

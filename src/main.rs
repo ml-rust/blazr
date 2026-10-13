@@ -122,6 +122,7 @@ async fn main() -> Result<()> {
             reasoning_format,
             vision,
             dtype,
+            decision,
         } => {
             let file_path = FileConfig::path();
             let file = FileConfig::load()?;
@@ -137,6 +138,7 @@ async fn main() -> Result<()> {
                 voice_dir,
                 data_parallel,
                 dtype: dtype.dtype,
+                decision: decision.into_flags(),
             };
             let settings = resolve_serve(flags, &env, &file).map_err(anyhow::Error::msg)?;
             blazr::cli::serve(

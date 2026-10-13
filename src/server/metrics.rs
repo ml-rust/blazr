@@ -102,6 +102,26 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
         names::PREFIX_CACHE_MISSES,
         "Total prefix cache misses (new KV blocks allocated)"
     );
+    metrics::describe_counter!(
+        names::DECISION_REQUESTS_TOTAL,
+        "Decision requests a model's worker finished, by model and outcome"
+    );
+    metrics::describe_counter!(
+        names::DECISION_ROWS_TOTAL,
+        "Prompt rows of finished decision requests, by model"
+    );
+    metrics::describe_counter!(
+        names::DECISION_PREFILL_TOKENS_TOTAL,
+        "Tokens decision runs prefilled, a shared prefix counted once, by model"
+    );
+    metrics::describe_histogram!(
+        names::DECISION_LATENCY,
+        "Seconds from queueing a decision request to its answers, by model"
+    );
+    metrics::describe_gauge!(
+        names::DECISION_QUEUE_ROWS,
+        "Decision rows queued or running, by model"
+    );
 
     Ok(handle)
 }

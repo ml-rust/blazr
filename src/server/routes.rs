@@ -12,6 +12,7 @@ use super::anthropic::{count_tokens, messages};
 use super::audio::{speech, transcriptions, translations, voices};
 use super::chat::chat_completions;
 use super::completions::completions;
+use super::decision::systemone;
 use super::embeddings::embeddings;
 use super::handlers::{
     apply_template, create_slot, delete_slot, detokenize, get_model, list_models, list_slots,
@@ -37,7 +38,8 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/v1/responses", post(responses))
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
-        .route("/v1/infill", post(infill));
+        .route("/v1/infill", post(infill))
+        .route("/v1/systemone", post(systemone));
 
     // The audio endpoints exist only in a build that can serve them.
     // Registering them anyway would answer a client with a 500 where a 404 is

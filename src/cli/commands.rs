@@ -202,6 +202,9 @@ pub enum Commands {
 
         #[command(flatten)]
         dtype: DtypeArgs,
+
+        #[command(flatten)]
+        decision: Box<super::DecisionArgs>,
     },
 
     /// List available models

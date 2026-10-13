@@ -96,7 +96,10 @@ impl JebadiahRenderer {
         let tokenizer = load_tokenizer(dir)?;
         let template = load_template(dir)?;
         let renderer = Self::new(tokenizer, &template)?;
-        renderer.check_contract(dir)?;
+        let path = dir.join("prompt_contract.json");
+        if path.is_file() {
+            renderer.check_contract(&read_json(&path)?)?;
+        }
         Ok(renderer)
     }
 
@@ -140,36 +143,15 @@ impl JebadiahRenderer {
         self.labels.extended.len()
     }
 
-    /// `prompt_contract.json`, when present, must name this renderer's
-    /// AINode copy, this tokenizer's label count, and thinking off.
-    fn check_contract(&self, dir: &Path) -> Result<(), DecisionError> {
-        let path = dir.join("prompt_contract.json");
-        if !path.is_file() {
-            return Ok(());
-        }
-        let contract: Value = read_json(&path)?;
-        let mut problems = Vec::new();
-        if contract.get("prompt_source_sha256").and_then(Value::as_str)
-            != Some(PROMPT_SOURCE_SHA256)
-        {
-            problems.push("prompt_source_sha256 differs from the bundled renderer".to_string());
-        }
-        match contract.get("single_token_labels") {
-            None | Some(Value::Null) => {}
-            Some(n) if n.as_u64() == Some(self.max_options() as u64) => {}
-            Some(n) => problems.push(format!(
-                "single_token_labels is {n}, this tokenizer has {}",
-                self.max_options()
-            )),
-        }
-        if let Some(kwargs) = contract.get("chat_template_kwargs") {
-            let want = serde_json::json!({
-                "add_generation_prompt": true, "enable_thinking": false, "thinking": false
-            });
-            if kwargs != &want {
-                problems.push("chat_template_kwargs differ (thinking must be off)".to_string());
-            }
-        }
+    /// A prompt contract (`prompt_contract.json`, or `jebadiah.json`'s
+    /// `prompt_contract`) must pass [`contract_problems`] with this
+    /// tokenizer's label count.
+    ///
+    /// # Errors
+    ///
+    /// [`DecisionError::Model`] naming every check that fails.
+    pub fn check_contract(&self, contract: &Value) -> Result<(), DecisionError> {
+        let problems = contract_problems(contract, Some(self.max_options()));
         if problems.is_empty() {
             Ok(())
         } else {
@@ -209,6 +191,10 @@ impl JebadiahRenderer {
             state_tokens,
         };
         for (i, (q, (t, keys))) in request.questions.iter().zip(translated).enumerate() {
+            let legend = match t.kind {
+                Kind::Score => t.names.clone(),
+                Kind::Choice | Kind::Noul => Vec::new(),
+            };
             let row = self.row(&q.id, &state, t, keys, &mut out.warnings)?;
             if row.ids.len() > max_tokens {
                 return Err(DecisionError::Request(format!(
@@ -241,6 +227,7 @@ impl JebadiahRenderer {
                     options: row.keys.len(),
                 },
                 names: row.keys,
+                legend,
                 scoring_rows: i..i + 1,
             });
             out.rows.push(row.ids);
@@ -368,6 +355,33 @@ impl JebadiahRenderer {
     }
 }
 
+/// What a prompt contract says that this renderer does not render: another
+/// AINode copy, another label count (`labels`, when the tokenizer is
+/// known), or thinking on. The chat template hash is the caller's check:
+/// the renderer keeps no template source. Empty when the contract matches.
+pub fn contract_problems(contract: &Value, labels: Option<usize>) -> Vec<String> {
+    let mut problems = Vec::new();
+    if contract.get("prompt_source_sha256").and_then(Value::as_str) != Some(PROMPT_SOURCE_SHA256) {
+        problems.push("prompt_source_sha256 differs from the bundled renderer".to_string());
+    }
+    match (contract.get("single_token_labels"), labels) {
+        (None | Some(Value::Null), _) | (_, None) => {}
+        (Some(n), Some(have)) if n.as_u64() == Some(have as u64) => {}
+        (Some(n), Some(have)) => problems.push(format!(
+            "single_token_labels is {n}, this tokenizer has {have}"
+        )),
+    }
+    if let Some(kwargs) = contract.get("chat_template_kwargs") {
+        let want = serde_json::json!({
+            "add_generation_prompt": true, "enable_thinking": false, "thinking": false
+        });
+        if kwargs != &want {
+            problems.push("chat_template_kwargs differ (thinking must be off)".to_string());
+        }
+    }
+    problems
+}
+
 /// `reorder_choice`: the criteria in `order`, a list read as keys with no
 /// description. `order` must hold every key once.
 fn reorder_choice(
@@ -449,6 +463,19 @@ mod tests {
         );
         let broken = "STATE:\n\nOPTIONS:\nnot a label\n\nQUESTION: q\n\nOPTIONS:\nA. one";
         assert_eq!(swap_labels(broken, &letters), None);
+    }
+
+    #[test]
+    fn contract_problems_name_each_mismatch() {
+        let good = json!({"prompt_source_sha256": PROMPT_SOURCE_SHA256, "single_token_labels": 68,
+            "chat_template_kwargs": {"add_generation_prompt": true, "enable_thinking": false,
+            "thinking": false}});
+        assert!(contract_problems(&good, Some(68)).is_empty());
+        assert!(contract_problems(&good, None).is_empty());
+        let bad = json!({"prompt_source_sha256": "x", "single_token_labels": 26,
+            "chat_template_kwargs": {"enable_thinking": true}});
+        assert_eq!(contract_problems(&bad, None).len(), 2);
+        assert_eq!(contract_problems(&bad, Some(68)).len(), 3);
     }
 
     #[test]

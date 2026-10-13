@@ -22,6 +22,8 @@ use boostr::{
 };
 
 pub use super::model_dir::AvailableModelInfo;
+use crate::config::DecisionConfig;
+use crate::engine::decision::DecisionRegistry;
 use crate::engine::Executor;
 use crate::loader;
 use crate::tokenizer::checkpoint_tokenizer;
@@ -70,6 +72,10 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     /// `--dtype`, then `inference.dtype`. `None` takes each model's
     /// `torch_dtype`, else f32.
     dtype: Option<DtypeRequest>,
+    /// `inference.decision` and the `--decision-*` flags.
+    pub(crate) decision_config: DecisionConfig,
+    /// The decision worker of each model that served `/v1/systemone`.
+    pub(crate) decisions: DecisionRegistry<R>,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -100,7 +106,15 @@ where
             inference_overlay: InferenceOverlay::default(),
             tensor_parallel_size: None,
             dtype: None,
+            decision_config: DecisionConfig::default(),
+            decisions: DecisionRegistry::default(),
         }
+    }
+
+    /// Detect, batch and bound System One decision models with `config`.
+    pub fn with_decision(mut self, config: DecisionConfig) -> Self {
+        self.decision_config = config;
+        self
     }
 
     /// Load every model at the compute dtype `request` names. `None` takes
@@ -401,40 +415,4 @@ pub struct LoadedModelInfo {
     pub name: String,
     pub path: PathBuf,
     pub last_accessed: Instant,
-}
-
-/// Information about an available model
-#[derive(Debug, Clone)]
-pub struct AvailableModelInfo {
-    pub name: String,
-    pub path: PathBuf,
-    pub format: String,
-}
-
-/// Detect model format from path
-fn detect_format(path: &std::path::Path) -> String {
-    if path.is_file() {
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("safetensors") => "SafeTensors",
-            Some("gguf") => "GGUF",
-            _ => "Unknown",
-        }
-    } else if path.join("model.safetensors").exists() {
-        "SafeTensors"
-    } else if std::fs::read_dir(path)
-        .map(|entries| {
-            entries.filter_map(|e| e.ok()).any(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "gguf")
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-    {
-        "GGUF"
-    } else {
-        "Unknown"
-    }
-    .to_string()
 }

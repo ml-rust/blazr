@@ -18,6 +18,7 @@ mod chat_vision;
 mod completions;
 mod concurrency;
 mod config_watch;
+pub mod decision;
 mod embeddings;
 mod encoding;
 mod gen_types;

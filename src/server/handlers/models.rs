@@ -1,7 +1,8 @@
 //! `GET /v1/models` and `GET /v1/models/{id}` — OpenAI-compatible model
 //! listing, merging text models (from the scheduler's model directory) with
 //! resident auxiliary models (vision/ASR/TTS, registered from
-//! `--vision-model`/`--asr-model`/`--tts-model`).
+//! `--vision-model`/`--asr-model`/`--tts-model`). A decision model's entry
+//! carries a `decision` object.
 
 use std::sync::Arc;
 
@@ -14,20 +15,53 @@ use serde::Serialize;
 
 use super::auxiliary::AuxiliaryModel;
 use super::state::AppState;
+use crate::loader::decision::DecisionInfo;
 use crate::server::generation::error_response;
+
+/// Every text model with its decision report, read on a blocking thread:
+/// the listing reads the model directory, sidecars and GGUF headers.
+async fn text_models(state: &AppState) -> anyhow::Result<Vec<(String, Option<DecisionInfo>)>> {
+    let scheduler = Arc::clone(&state.scheduler);
+    tokio::task::spawn_blocking(
+        move || -> anyhow::Result<Vec<(String, Option<DecisionInfo>)>> {
+            let models = scheduler.list_available()?;
+            Ok(models
+                .into_iter()
+                .map(|m| {
+                    let decision = match scheduler.decision_info(&m.name, &m.path) {
+                        Ok(info) => info.map(|i| (*i).clone()),
+                        Err(e) => {
+                            tracing::warn!("model '{}': no decision report: {e}", m.name);
+                            None
+                        }
+                    };
+                    (m.name, decision)
+                })
+                .collect())
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("the model listing stopped: {e}"))?
+}
 
 /// List available models
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.scheduler.list_available() {
+    match text_models(&state).await {
         Ok(text_models) => {
             let auxiliary = state.auxiliary_models().await;
             let ids = merged_model_ids(
-                text_models.into_iter().map(|m| m.name).collect(),
+                text_models.iter().map(|(name, _)| name.clone()).collect(),
                 &auxiliary,
             );
             let response = ModelsResponse {
                 object: "list".to_string(),
-                data: ids.into_iter().map(to_model_info).collect(),
+                data: ids
+                    .into_iter()
+                    .map(|id| {
+                        let decision = decision_of(&text_models, &id);
+                        to_model_info(id, decision)
+                    })
+                    .collect(),
             };
             (StatusCode::OK, Json(response)).into_response()
         }
@@ -40,14 +74,15 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
 ) -> Response {
-    match state.scheduler.list_available() {
+    match text_models(&state).await {
         Ok(text_models) => {
-            if let Some(m) = text_models.iter().find(|m| m.name == model_id) {
-                return (StatusCode::OK, Json(to_model_info(m.name.clone()))).into_response();
+            if text_models.iter().any(|(name, _)| *name == model_id) {
+                let decision = decision_of(&text_models, &model_id);
+                return (StatusCode::OK, Json(to_model_info(model_id, decision))).into_response();
             }
             let auxiliary = state.auxiliary_models().await;
             if auxiliary.iter().any(|m| m.name == model_id) {
-                return (StatusCode::OK, Json(to_model_info(model_id))).into_response();
+                return (StatusCode::OK, Json(to_model_info(model_id, None))).into_response();
             }
             error_response(
                 StatusCode::NOT_FOUND,
@@ -63,6 +98,14 @@ pub async fn get_model(
     }
 }
 
+/// The decision report of the text model `id`.
+fn decision_of(text_models: &[(String, Option<DecisionInfo>)], id: &str) -> Option<DecisionInfo> {
+    text_models
+        .iter()
+        .find(|(name, _)| name == id)
+        .and_then(|(_, decision)| decision.clone())
+}
+
 /// Build the merged id list: every text model, then every auxiliary model
 /// whose name is not already a text model (or an earlier auxiliary entry).
 /// Text models always win a name collision.
@@ -76,12 +119,13 @@ fn merged_model_ids(mut text: Vec<String>, auxiliary: &[AuxiliaryModel]) -> Vec<
     text
 }
 
-fn to_model_info(id: String) -> ModelInfo {
+fn to_model_info(id: String, decision: Option<DecisionInfo>) -> ModelInfo {
     ModelInfo {
         id,
         object: "model".to_string(),
         created: 0,
         owned_by: "local".to_string(),
+        decision,
     }
 }
 
@@ -97,6 +141,10 @@ pub struct ModelInfo {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    /// A System One decision model's family, limits, contract and
+    /// calibration, read without loading its weights.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionInfo>,
 }
 
 #[cfg(test)]

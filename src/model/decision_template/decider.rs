@@ -221,6 +221,7 @@ impl DeciderRenderer {
                 id: request.questions[entry.question].id.clone(),
                 meta: QuestionMeta { kind, options },
                 names: rq.names.clone(),
+                legend: rq.legend.clone(),
                 scoring_rows: span,
             });
         }

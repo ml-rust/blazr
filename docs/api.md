@@ -29,6 +29,7 @@ The error body depends on the route family.
 | OpenAI-compatible, slots, LoRA, tokenize, rerank, audio | `{"error":{"message":"...","type":"..."}}`                |
 | Anthropic (`/v1/messages`, `/v1/messages/count_tokens`) | `{"type":"error","error":{"type":"...","message":"..."}}` |
 | Ollama-style (`/api/show`, `/api/delete`, `/api/copy`)  | `{"error":"..."}`                                         |
+| System One (`/v1/systemone`)                            | `{"error":{"message":"...","type":"...","code":"..."}}`   |
 
 The `401` body uses the OpenAI shape with `"type":"invalid_api_key"`.
 
@@ -67,6 +68,7 @@ Streaming responses do not return `logprobs`. Tool calls are parsed only in non-
 | POST      | `/v1/embeddings`             | Embeddings                         | none          |
 | POST      | `/rerank`, `POST /v1/rerank` | Rerank documents                   | none          |
 | POST      | `/v1/infill`                 | Fill-in-the-middle completion      | none          |
+| POST      | `/v1/systemone`              | Typed decisions, System One models | none          |
 | POST      | `/tokenize`                  | Text to token IDs                  | none          |
 | POST      | `/detokenize`                | Token IDs to text                  | none          |
 | POST      | `/apply-template`            | Render a chat template             | none          |
@@ -776,11 +778,57 @@ curl http://localhost:8080/apply-template \
 }
 ```
 
+## System One decisions
+
+### POST /v1/systemone
+
+Answers typed questions about one state with a System One decision model: Jebadiah or the Mapika decider. The model reads one label token per option and generates nothing. Its other routes keep working on the same weights.
+
+```json
+{
+  "model": "decider-4b",
+  "state": {"ticket": {"subject": "Invoice does not match"}},
+  "questions": {
+    "route": {"type": "choice", "instructions": "Which team takes this?",
+              "criteria": {"billing": "a charge or refund", "support": "a product question"}},
+    "blocked": {"type": "noul", "instructions": "The customer is blocked."},
+    "urgency": {"type": "score", "instructions": "How urgent is it?",
+                "criteria": ["not urgent", "low", "medium", "high"]}
+  }
+}
+```
+
+- `model`: unset takes the start model (`--model`).
+- `questions`: answered in request order. Unknown fields are ignored. Each family's own fields apply: decider `independent`, `isolated`, `neutralize_none`, `max_state_tokens`, `layout`; Jebadiah `max_tokens`, `order`.
+- `calibration: "raw"`: temperature 1 instead of the model's fitted temperatures.
+
+Each answer has the shape the family's own server returns.
+
+| Type     | Decider (4 digits, `score` 2)                                                             | Jebadiah (6 digits)                                     |
+| -------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `choice` | `choice`, `confidence`, `x_p_max`, `certainty`, `probabilities`                           | `choice`, `confidence`, `probabilities`                 |
+| `noul`   | `noul`: P(true)                                                                           | `noul`: P(true)                                         |
+| `score`  | `score`, `confidence` (level distance), `x_p_max`, `certainty`, `legend`, `probabilities` | `score`, `confidence` (chance-corrected), `legend`, `probabilities` |
+
+An isolated decider Score answer adds `level_fit` and `fit_mass`. The response also carries `model`, `usage` (`input_tokens` with the shared prefix counted once, `output_tokens` 0, `cached_tokens`), `latency_ms`, `calibration` (`applied`, `temperatures`, `source`), and `warnings`.
+
+| Status | `code`                 | When                                                             |
+| ------ | ---------------------- | ---------------------------------------------------------------- |
+| `400`  | `not_a_decision_model` | The model is not a decision model                                |
+| `404`  | `model_not_found`      | No model has that name                                           |
+| `413`  | `request_too_large`    | Over `inference.decision.max_rows`, `max_row_tokens` or `max_request_tokens` |
+| `422`  | `invalid_request`      | Bad JSON, a question the family refuses, a state over the family's cap |
+| `503`  | `queue_full`           | Over `inference.decision.max_queue_rows`. Retry after `retry-after` |
+| `503`  | `model_unavailable`    | The model unloaded or its worker stopped. Send the request again |
+| `500`  | `internal_error`       | The model did not load, its sidecars did not read, or the run failed |
+
+The family comes from `--decision-family`, then a sidecar (`decider_config.json`: decider; `prompt_contract.json` or `jebadiah.json`: Jebadiah) in the model directory or beside the `.gguf`, then a GGUF `general.basename` of `decider` or `jebadiah` tagged `system-one` or `decision-model`. A `.gguf` with no sidecar takes one from `--decision-config`. Without it, answers are uncalibrated and `warnings` says so.
+
 ## Models
 
 ### GET /v1/models
 
-Lists text models and resident vision, ASR, and TTS models. A text model wins a name collision.
+Lists text models and resident vision, ASR, and TTS models. A text model wins a name collision. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family`, `readout`, `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider) or `max_prompt_tokens` (Jebadiah), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`.
 
 ```bash
 curl http://localhost:8080/v1/models

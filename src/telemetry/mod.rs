@@ -4,6 +4,7 @@
 //! installed every call is a no-op. The `server` feature installs the
 //! Prometheus recorder and serves it on `/metrics`.
 
+pub mod decision;
 pub mod names;
 pub mod record;
 pub mod slo;

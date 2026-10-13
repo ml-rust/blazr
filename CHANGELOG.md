@@ -16,12 +16,14 @@ preview on crates.io that shares no code with it.
 
 - **`loader::load_safetensors_with_report`** — the regular SafeTensors load, plus a `TensorLoadReport`: the tensors uploaded, the tensors left on disk, and the compute dtype. `loader::model_torch_dtype` gives the dtype a model's `config.json` names.
 - **`tests/decision_loader_real_file.rs`** — a Qwen3.5 decision model (Jebadiah, the Mapika decider) through blazr's loader, then `LabelTokenHead` against reference fixtures, from SafeTensors or GGUF, on CPU or CUDA. It skips unless `BLAZR_DECISION_MODEL_DIR` or `BLAZR_DECISION_GGUF`, and `BLAZR_DECISION_FIXTURE_DIR`, are set.
+- **`POST /v1/systemone`** — typed decisions from a System One model (Jebadiah, the Mapika decider), each answer in the family's own wire shape. The family comes from `--decision-family`, a sidecar beside the weights, or the GGUF header. Each model gets one decision worker thread: requests with a short shared prefix merge into one run, longer ones run once over their prefix. Limits answer `413` and a full queue `503`. Keys: `inference.decision.*` and the `--decision-*` flags. `GET /v1/models` adds a `decision` object read without loading weights.
+- **`blazr_decision_*` metrics** — requests, rows, prefill tokens, latency and queued rows, by model.
 
 ### Changed
 
+- `Executor::get_embeddings` is a plain function. `/v1/embeddings` and `/rerank` run it on a blocking thread, never inside an async task.
 - `POST /v1/lora` reads adapters through boostr's `PeftAdapter`. A load now fails when `adapter_config.json` is missing or lacks `r` or `lora_alpha`. It also fails on an unpaired `lora_A`/`lora_B`, a rank mismatch, `.bin` weights, DoRA, `fan_in_fan_out`, `lora_bias` and `modules_to_save`. `use_rslora`, `rank_pattern` and `alpha_pattern` now set each module's scaling.
 
-- `Executor::get_embeddings` is a plain function. `/v1/embeddings` and `/rerank` run it on a blocking thread, never inside an async task.
 ### Removed
 
 - `engine::load_lora_adapter` and `engine::LoraAdapter`. `LoraAdapterRegistry` holds `boostr::format::PeftAdapter`, and `insert` takes the adapter name.

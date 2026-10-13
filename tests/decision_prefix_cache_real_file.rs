@@ -25,7 +25,7 @@
 //!   unit of the family's rounding.
 //! - The worker's counts and `/v1/models` report the hits.
 
-#![cfg(feature = "server")]
+#![cfg(all(feature = "server", not(any(feature = "cuda", feature = "wgpu"))))]
 
 mod decision_route;
 
@@ -122,7 +122,6 @@ async fn cache_checks(served: &Served, fixtures: &[Fixture]) {
 
 /// The checkpoint on the CPU, every weight F32, every state from its first
 /// token a shared prefix.
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 #[tokio::test(flavor = "multi_thread")]
 async fn hf_cpu_f32_prefix_cache_hits_match() {
     let Some((dir, fixtures)) = model_and_fixtures(ENV_MODEL) else {

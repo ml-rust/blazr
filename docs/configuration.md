@@ -503,7 +503,7 @@ Rules that apply to `run` and `generate`:
 | `--dry-run`           | off                                        | Prints the fit and writes nothing                                         |
 | `--decision-*`        | as `serve`                                 | Family, sidecar and worker limits, as [serve](#serve) takes them          |
 
-The model loads on the build's runtime and the `device` key's GPU. A label file of records only loads no weights. A Clef model is refused: its head serves no temperature.
+The model loads on the build's runtime and the `device` key's GPU. A label file of records only loads no weights. A Clef model is refused: its head serves no temperature. The label format is in [Fitted temperatures](api.md#fitted-temperatures), and the workflow is in [Decision models](decision-models.md#calibration).
 
 ### swarm and disagg (distributed feature)
 

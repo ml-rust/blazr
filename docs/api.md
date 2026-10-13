@@ -783,7 +783,7 @@ curl http://localhost:8080/apply-template \
 
 ### POST /v1/systemone
 
-Answers typed questions about one state with a System One decision model: Jebadiah, the Mapika decider, Kev, or Clef. Jebadiah and the decider read one label token per option. Kev reads a pointer head: the decide token's query against each option's closing-token key. Clef reads a joint-schema head over every hidden row of the record and scores all questions together. No model generates. Its other routes keep working on the same weights.
+Answers typed questions about one state with a System One decision model: Jebadiah, the Mapika decider, Kev, or Clef. Jebadiah and the decider read one label token per option. Kev reads a pointer head: the decide token's query against each option's closing-token key. Clef reads a joint-schema head over every hidden row of the record and scores all questions together. No model generates. Its other routes keep working on the same weights. For setup, families, limits and the tested matrix, see [decision-models.md](decision-models.md).
 
 ```json
 {
@@ -852,7 +852,7 @@ A Kev directory holds a PEFT LoRA adapter (`adapter_config.json`, `adapter_model
 - Temperature: `head.pt`'s one fitted temperature for every type. `blazr_calibration.json` replaces it per type.
 - `/v1/chat/completions` on the Kev name runs the base with the adapter attached. The output is base-model text: Kev never trained a generation head.
 
-Answers follow `kev/api.py`, every value rounded to 4 digits:
+Answers follow the Kev reference server, every value rounded to 4 digits:
 
 | Type     | Fields                                                                                                   |
 | -------- | -------------------------------------------------------------------------------------------------------- |
@@ -891,17 +891,17 @@ A Score question with one level answers `score` 0 and `confidence` 1.
 A Clef directory (Cloudflare's Clef and Clef-Flash) is an ordinary Hugging Face Qwen3.5 checkpoint (`Qwen3_5ForConditionalGeneration`, untied `lm_head`) with a joint-schema head beside it: `joint_head_config.json` and `joint_head.safetensors`. Put it in the model directory and request it by its directory name, such as `clef-flash`. `--decision-family clef` names a directory as Clef; `--decision-config <dir>/joint_head_config.json` points at a head in another directory.
 
 - Backbone: the full fine-tuned weights load through blazr's SafeTensors loader, in the dtype blazr picks for any model: `--dtype`, else the checkpoint's `bfloat16`. Only the shards `model.safetensors.index.json` names load, and the vision tower stays on disk. Clef-Flash's text backbone is 9.0B parameters: 16.7 GiB in BF16, 34 GiB in F32. It must fit one device: blazr has no layer offloading for a server model, so a 12 GB GPU does not hold it. On the CPU it runs in BF16 or F32 with that much free RAM. A quantized GGUF of the backbone is unconfirmed: no Clef GGUF is published, and none has been tested.
-- Head: boostr's `JointSchemaHead` in F32, every head weight cast once at load. The release runs the head in BF16. On the same hidden rows the two differ by about 0.002 in a probability.
-- Prompt: the release's own layout. A ChatML system and user turn hold the state and a `SCHEMA FIELDS` block that lists every question with its `ID`, `TYPE`, `INSTRUCTION` and `OPTION n` lines. The assistant turn holds an empty `<think>` block and `JOINT SCHEMA DECISIONS:`. The chat template is not used. A state, instruction or option that is not a string is written as compact JSON with sorted keys. Each piece is encoded on its own, as the release encodes it.
+- Head: boostr's `JointSchemaHead` in F32, every head weight cast once at load. The reference runs the head in BF16. On the same hidden rows the two differ by about 0.002 in a probability.
+- Prompt: the reference layout. A ChatML system and user turn hold the state and a `SCHEMA FIELDS` block that lists every question with its `ID`, `TYPE`, `INSTRUCTION` and `OPTION n` lines. The assistant turn holds an empty `<think>` block and `JOINT SCHEMA DECISIONS:`. The chat template is not used. A state, instruction or option that is not a string is written as compact JSON with sorted keys. Each piece is encoded on its own, as the reference encodes it.
 - Options in the head: `noul` is `true` then `false`; `choice` is the criteria keys in code-point order; `score` is the levels in list order. A one-option `choice` or `score` is accepted. A `noul` field's `criteria` may describe `true` and `false`; other keys are ignored.
 - Limits: one record of at most 16,384 tokens. The state is cut at the token level to fit, and `warnings` says so. A schema that leaves no room is a `422`: `schema requires N tokens before state; maximum is 16384`. With `--decision-max-row-tokens` below 16,384, a longer record is a `413`.
 - Each request runs alone: the head reads every row of the record, so records never merge.
-- Control-token text in a request (`<|im_end|>`, `<think>`) stays text. The release turns it into control tokens, which lets a state close its turn. blazr does not, so such a request gets other ids than the release gives it. Any other request gets the release's ids.
+- Control-token text in a request (`<|im_end|>`, `<think>`) stays text. The reference turns it into control tokens, which lets a state close its turn. blazr does not, so such a request gets other ids than the reference gives it. Any other request gets the reference's ids.
 - No temperature: the probabilities are a plain softmax of the head's logits. `blazr decision calibrate` refuses a Clef model, and `blazr_calibration.json` is not read for it.
 
-Errors use the release's words: `model and state are required`, `at least one question is required`, `<id>: type must be noul, choice, or score`, `<id>: criteria must not be empty`. blazr also refuses criteria of a shape the release cannot read: a `choice` list, a `score` object, a `noul` list.
+Errors use the reference's words: `model and state are required`, `at least one question is required`, `<id>: type must be noul, choice, or score`, `<id>: criteria must not be empty`. blazr also refuses criteria of a shape the release cannot read: a `choice` list, a `score` object, a `noul` list.
 
-Answers follow `systemone_answer`, every value rounded to 4 digits:
+Answers follow the Clef reference answer shape, every value rounded to 4 digits:
 
 | Type     | Fields                                                                                                                       |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -927,7 +927,7 @@ Answers follow `systemone_answer`, every value rounded to 4 digits:
 }
 ```
 
-`usage.input_tokens` is the record's length. `latency_ms`, `calibration`, `warnings`, `usage.cached_tokens` and `usage.cached_input_tokens` are blazr's fields. The last two are always 0 for Clef. blazr reads Clef requests as text only: a request with `images` or `videos` is a `422`.
+`usage.input_tokens` is the record's length. `latency_ms`, `calibration`, `warnings`, `usage.cached_tokens` and `usage.cached_input_tokens` are blazr's fields. The last two are always 0 for Clef. blazr reads Clef requests as text only: a non-empty `images` or `videos` field is a `422`.
 
 #### Fitted temperatures
 
@@ -940,7 +940,7 @@ blazr decision calibrate --model decider-4b --labels labels.jsonl [--min-rows 50
 Each line of the label file is one of:
 
 - a labelled request: `{"state": ..., "questions": {...}, "labels": {"route": "billing", "blocked": true, "urgency": 2}}`. Any request field of the family applies (`isolated`, `independent`, ...). The request runs at temperature 1. A choice gold is the option key, a noul gold `true` or `false`, and a score gold the level index or the level as the request spells it (decider: the key of a `{level number: description}` map, else the level text; Jebadiah: the level name). Questions without a label are skipped.
-- a precomputed record, as `decider/calibrate.py` reads it: `{"type": "choice" | "noul" | "score", "logits": [...], "gold": 0}` or `{"type": "score", "level_logits": [[no, yes], ...], "gold": 0}`. `probs` and `level_probs` stand in as their logarithms, so a 0 is refused.
+- a precomputed record, in the Mapika decider's reference calibration format: `{"type": "choice" | "noul" | "score", "logits": [...], "gold": 0}` or `{"type": "score", "level_logits": [[no, yes], ...], "gold": 0}`. `probs` and `level_probs` stand in as their logarithms, so a 0 is refused.
 
 A type with fewer than `--min-rows` answers is not fitted. Score pools listed and isolated answers into one fit.
 

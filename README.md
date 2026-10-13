@@ -280,6 +280,25 @@ blazr ships no Kotlin or Swift bindings. An app calls the C functions through JN
 
 The Android check needs NDK 27 variables. [examples/capi/README.md](examples/capi/README.md#android) lists them and the emulator steps. The x86_64 emulator run needs `-Wl,-z,max-page-size=16384` at link. The CI iOS job checks `aarch64-apple-ios` and `aarch64-apple-ios-sim` on macOS.
 
+## Decision models
+
+blazr serves System One decision models on `POST /v1/systemone`. A decision model answers typed questions about one state. It returns probabilities and does not generate text.
+
+| Family     | Model                                                    | Weights                                             |
+| ---------- | -------------------------------------------------------- | --------------------------------------------------- |
+| `jebadiah` | Jebadiah                                                 | SafeTensors or GGUF                                 |
+| `decider`  | Mapika decider                                           | SafeTensors or GGUF                                 |
+| `kev`      | Kev: LoRA adapter and pointer head, served on its base   | Adapter directory, plus a base model                |
+| `clef`     | Clef-Flash: full checkpoint and joint-schema head, text only | SafeTensors checkpoint with the head beside it  |
+
+```bash
+BLAZR_MODEL_DIR=/path/to/models blazr serve --model decider-4b --port 8080
+```
+
+Clef-Flash's text backbone takes 16.7 GiB in BF16. It does not fit a 12 GB GPU. Kev and Clef are not tested on CUDA. Clef 27B is not tested and not claimed. Other families are not served.
+
+See [docs/decision-models.md](docs/decision-models.md) for run commands for each family, family detection, calibration, limits, and the tested matrix.
+
 ## Requirements
 
 - Rust 1.95+ to build from source
@@ -295,6 +314,7 @@ The Android check needs NDK 27 variables. [examples/capi/README.md](examples/cap
 | [docs/configuration.md](docs/configuration.md) | Config file, CLI flags, environment variables         |
 | [docs/deployment.md](docs/deployment.md)       | Install, systemd, Docker, reverse proxy, TLS, metrics |
 | [docs/models.md](docs/models.md)               | Architecture, format, and quantization matrix         |
+| [docs/decision-models.md](docs/decision-models.md) | System One decision models: families, run, limits |
 | [docs/tuning.md](docs/tuning.md)               | Batching, caching, parallelism knobs                  |
 | [docs/architecture.md](docs/architecture.md)   | Layers, request path, modules                         |
 

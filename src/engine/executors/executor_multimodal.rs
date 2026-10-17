@@ -6,7 +6,7 @@
 
 use anyhow::{anyhow, Result};
 use async_stream::stream;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 
 use boostr::autograd::Var;
 use boostr::inference::LayeredKvCache;
@@ -353,70 +353,7 @@ where
         audio_segments: &[Vec<f32>],
         gen_config: &GenerationConfig,
     ) -> Result<super::types::GenerationResult> {
-        let prompt_token_count = prompt_tokens.len();
-
-        let mut result = String::new();
-        let mut completion_tokens = 0usize;
-        let mut finish_reason = FinishReason::Length;
-        let mut stream = std::pin::pin!(self.generate_multimodal(
-            prompt_tokens,
-            images,
-            audio_segments,
-            gen_config
-        ));
-        let prefill_start = std::time::Instant::now();
-        let mut prompt_eval_duration_ms = 0u64;
-        let mut token_logprobs: Vec<GeneratedToken> = Vec::new();
-
-        while let Some(token_result) = stream.next().await {
-            let token = token_result?;
-            completion_tokens += 1;
-
-            if completion_tokens == 1 {
-                prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
-            }
-
-            result.push_str(&token.text);
-
-            if let Some(reason) = token.finish_reason {
-                finish_reason = reason;
-            }
-
-            if gen_config.logprobs {
-                token_logprobs.push(token);
-            }
-
-            // Check stop sequences
-            for stop in &gen_config.stop_sequences {
-                if result.ends_with(stop) {
-                    result.truncate(result.len() - stop.len());
-                    return Ok(super::types::GenerationResult {
-                        text: result,
-                        prompt_tokens: prompt_token_count,
-                        completion_tokens,
-                        finish_reason: FinishReason::Stop,
-                        prompt_eval_duration_ms,
-                        token_logprobs: if gen_config.logprobs {
-                            Some(token_logprobs)
-                        } else {
-                            None
-                        },
-                    });
-                }
-            }
-        }
-
-        Ok(super::types::GenerationResult {
-            text: result,
-            prompt_tokens: prompt_token_count,
-            completion_tokens,
-            finish_reason,
-            prompt_eval_duration_ms,
-            token_logprobs: if gen_config.logprobs {
-                Some(token_logprobs)
-            } else {
-                None
-            },
-        })
+        let stream = self.generate_multimodal(prompt_tokens, images, audio_segments, gen_config);
+        super::generate_text::collect_generation(stream, prompt_tokens.len(), gen_config).await
     }
 }

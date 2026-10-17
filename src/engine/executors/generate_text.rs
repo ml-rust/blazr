@@ -12,6 +12,7 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
+use crate::engine::StopMatcher;
 use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
@@ -174,6 +175,7 @@ where
     S: futures::Stream<Item = Result<GeneratedToken>>,
 {
     let mut result = String::new();
+    let mut matcher = StopMatcher::new(&gen_config.stop_sequences);
     let mut completion_tokens = 0usize;
     let mut finish_reason = FinishReason::Length;
     let mut stream = std::pin::pin!(stream);
@@ -196,7 +198,8 @@ where
         }
         last_token = now;
 
-        result.push_str(&token.text);
+        let step = matcher.push(&token.text);
+        result.push_str(&step.emit);
 
         if let Some(reason) = token.finish_reason {
             finish_reason = reason;
@@ -206,25 +209,25 @@ where
             token_logprobs.push(token);
         }
 
-        // Check stop sequences
-        for stop in &gen_config.stop_sequences {
-            if result.ends_with(stop) {
-                result.truncate(result.len() - stop.len());
-                return Ok(GenerationResult {
-                    text: result,
-                    prompt_tokens: prompt_token_count,
-                    completion_tokens,
-                    finish_reason: FinishReason::Stop,
-                    prompt_eval_duration_ms,
-                    token_logprobs: if gen_config.logprobs {
-                        Some(token_logprobs)
-                    } else {
-                        None
-                    },
-                });
-            }
+        // The text ends at the first stop, even when it sits inside a token.
+        if step.stopped {
+            return Ok(GenerationResult {
+                text: result,
+                prompt_tokens: prompt_token_count,
+                completion_tokens,
+                finish_reason: FinishReason::Stop,
+                prompt_eval_duration_ms,
+                token_logprobs: if gen_config.logprobs {
+                    Some(token_logprobs)
+                } else {
+                    None
+                },
+            });
         }
     }
+
+    // No stop matched: held-back text is part of the result.
+    result.push_str(&matcher.finish());
 
     Ok(GenerationResult {
         text: result,

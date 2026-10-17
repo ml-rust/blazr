@@ -10,7 +10,7 @@ use futures::StreamExt;
 
 use super::streaming::StreamToken;
 use crate::config::GenerationConfig;
-use crate::engine::FinishReason;
+use crate::engine::{FinishReason, StopMatcher};
 use crate::server::metrics;
 
 // Re-export types and utilities from gen_types so callers import from one place.
@@ -166,7 +166,8 @@ async fn forward_with_stop_sequences<S>(
     S: futures::Stream<Item = anyhow::Result<crate::engine::GeneratedToken>>,
 {
     let mut stream = std::pin::pin!(stream);
-    let mut accumulated = String::new();
+    let mut matcher = StopMatcher::new(stop_sequences);
+    let mut ended = false;
     let start = std::time::Instant::now();
     let mut last_token_time = start;
     let mut token_count = 0usize;
@@ -182,53 +183,49 @@ async fn forward_with_stop_sequences<S>(
                     metrics::record_itl(last_token_time.elapsed().as_secs_f64());
                 }
                 last_token_time = std::time::Instant::now();
-                accumulated.push_str(&token.text);
 
-                // Check stop sequences
-                let mut stopped = false;
-                for stop in stop_sequences {
-                    if let Some(pos) = accumulated.find(stop.as_str()) {
-                        let already_sent = accumulated.len() - token.text.len();
-                        if pos >= already_sent {
-                            let safe_text = &token.text[..pos - already_sent];
-                            let _ = tx
-                                .send(StreamToken {
-                                    text: safe_text.to_string(),
-                                    finish_reason: Some(FinishReason::Stop),
-                                    error: None,
-                                })
-                                .await;
-                        } else {
-                            let _ = tx
-                                .send(StreamToken {
-                                    text: String::new(),
-                                    finish_reason: Some(FinishReason::Stop),
-                                    error: None,
-                                })
-                                .await;
-                        }
-                        stopped = true;
-                        break;
-                    }
-                }
-
-                if stopped {
+                let step = matcher.push(&token.text);
+                if step.stopped {
+                    let _ = tx
+                        .send(StreamToken {
+                            text: step.emit,
+                            finish_reason: Some(FinishReason::Stop),
+                            error: None,
+                        })
+                        .await;
+                    ended = true;
                     break;
                 }
 
-                let is_final = token.finish_reason.is_some();
+                if let Some(reason) = token.finish_reason {
+                    // The last token ends the text: held-back text is not a stop.
+                    let mut text = step.emit;
+                    text.push_str(&matcher.finish());
+                    let _ = tx
+                        .send(StreamToken {
+                            text,
+                            finish_reason: Some(reason),
+                            error: None,
+                        })
+                        .await;
+                    ended = true;
+                    break;
+                }
+
+                // A token held back by the matcher sends nothing.
+                if step.emit.is_empty() && !token.text.is_empty() {
+                    continue;
+                }
                 if tx
                     .send(StreamToken {
-                        text: token.text,
-                        finish_reason: token.finish_reason,
+                        text: step.emit,
+                        finish_reason: None,
                         error: None,
                     })
                     .await
                     .is_err()
                 {
-                    break;
-                }
-                if is_final {
+                    ended = true;
                     break;
                 }
             }
@@ -243,6 +240,19 @@ async fn forward_with_stop_sequences<S>(
                     .await;
                 return;
             }
+        }
+    }
+    if !ended {
+        // The stream ended without a final token: flush the held-back text.
+        let tail = matcher.finish();
+        if !tail.is_empty() {
+            let _ = tx
+                .send(StreamToken {
+                    text: tail,
+                    finish_reason: None,
+                    error: None,
+                })
+                .await;
         }
     }
     if token_count > 0 {
@@ -360,5 +370,89 @@ mod tests {
         assert_eq!(config.temperature, 0.0);
         assert!(config.stop_sequences.is_empty());
         assert_eq!(config.top_logprobs, 20);
+    }
+
+    fn tok(
+        text: &str,
+        finish_reason: Option<FinishReason>,
+    ) -> anyhow::Result<crate::engine::GeneratedToken> {
+        Ok(crate::engine::GeneratedToken {
+            token_id: 0,
+            text: text.to_string(),
+            logprob: None,
+            top_logprobs: None,
+            finish_reason,
+        })
+    }
+
+    /// Run the forwarder over `tokens` and collect what the client receives.
+    async fn forward(
+        tokens: Vec<anyhow::Result<crate::engine::GeneratedToken>>,
+        stops: &[&str],
+    ) -> Vec<(String, Option<FinishReason>)> {
+        let stops: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        forward_with_stop_sequences(futures::stream::iter(tokens), &stops, "Test", tx).await;
+        let mut out = Vec::new();
+        while let Some(t) = rx.recv().await {
+            out.push((t.text, t.finish_reason));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn split_stop_never_reaches_the_client() {
+        let out = forward(
+            vec![tok("hi E", None), tok("N", None), tok("D!", None)],
+            &["END"],
+        )
+        .await;
+        let text: String = out.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(text, "hi ");
+        assert_eq!(out.last().and_then(|(_, r)| *r), Some(FinishReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn no_stops_forward_every_token_unchanged() {
+        let out = forward(
+            vec![
+                tok("a", None),
+                tok("", None),
+                tok("b", Some(FinishReason::Eos)),
+            ],
+            &[],
+        )
+        .await;
+        assert_eq!(
+            out,
+            vec![
+                ("a".to_string(), None),
+                (String::new(), None),
+                ("b".to_string(), Some(FinishReason::Eos)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn final_token_flushes_held_back_text() {
+        let out = forward(
+            vec![tok("x EN", None), tok("", Some(FinishReason::Length))],
+            &["END"],
+        )
+        .await;
+        assert_eq!(
+            out,
+            vec![
+                ("x ".to_string(), None),
+                ("EN".to_string(), Some(FinishReason::Length)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_end_without_final_token_flushes_held_back_text() {
+        let out = forward(vec![tok("x EN", None)], &["END"]).await;
+        let text: String = out.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(text, "x EN");
     }
 }

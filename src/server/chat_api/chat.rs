@@ -20,8 +20,7 @@ use crate::server::generation::{
     stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
     stream_with_stop_sequences, validate_generation_params, HasSamplingFields, Usage,
 };
-use crate::server::handlers::{select_executor, AppState};
-use crate::server::metrics;
+use crate::server::handlers::{select_executor, AppState, DecodeSlot};
 use crate::server::reasoning::{split_reasoning_for_format, ReasoningParser};
 use crate::server::scheduled::generate_text_routed;
 use crate::server::streaming::{create_chat_stream, StreamToken};
@@ -191,9 +190,9 @@ pub async fn chat_completions(
 
     // Token budget admission control
     let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
-    if !state.try_admit(estimated_tokens) {
+    let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
-    }
+    };
 
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
@@ -204,12 +203,11 @@ pub async fn chat_completions(
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
-        let state_clone = Arc::clone(&state);
-        let budget = estimated_tokens;
 
-        metrics::adjust_decode_slots(1.0);
+        let slot = DecodeSlot::enter();
         tokio::spawn(async move {
             let _placement = placement;
+            let _guards = (permit, slot);
             match route {
                 ImageRoute::Tower => {
                     stream_images_with_stop_sequences(
@@ -236,15 +234,14 @@ pub async fn chat_completions(
                     stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await
                 }
             }
-            state_clone.release(budget);
-            metrics::adjust_decode_slots(-1.0);
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let parser = ReasoningParser::for_output(reasoning_format, &prompt);
         create_chat_stream(id, model_name, Box::pin(rx_stream), parser).into_response()
     } else {
-        metrics::adjust_decode_slots(1.0);
+        let _slot = DecodeSlot::enter();
+        let _permit = permit;
         let start = Instant::now();
         let think_enabled = request.think.unwrap_or(false);
         let n = request.n.unwrap_or(1).max(1);
@@ -326,8 +323,6 @@ pub async fn chat_completions(
                     });
                 }
                 Err(e) => {
-                    state.release(estimated_tokens);
-                    metrics::adjust_decode_slots(-1.0);
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         &e.to_string(),
@@ -373,8 +368,6 @@ pub async fn chat_completions(
             elapsed,
         );
         apply_keep_alive(&state, &model_name, &request.keep_alive).await;
-        state.release(estimated_tokens);
-        metrics::adjust_decode_slots(-1.0);
         (StatusCode::OK, Json(response)).into_response()
     }
 }

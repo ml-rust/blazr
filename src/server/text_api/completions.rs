@@ -17,8 +17,7 @@ use crate::server::generation::{
     stream_with_stop_sequences, validate_generation_params, HasSamplingFields, LogprobResult,
     ResponseFormat, SamplingParams, Usage,
 };
-use crate::server::handlers::{select_executor, AppState};
-use crate::server::metrics;
+use crate::server::handlers::{select_executor, AppState, DecodeSlot};
 use crate::server::scheduled::generate_text_routed;
 use crate::server::streaming::{create_completion_stream, StreamToken};
 
@@ -72,9 +71,9 @@ pub async fn completions(
 
     // Token budget admission control
     let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
-    if !state.try_admit(estimated_tokens) {
+    let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
-    }
+    };
 
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
@@ -85,21 +84,19 @@ pub async fn completions(
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
-        let state_clone = Arc::clone(&state);
-        let budget = estimated_tokens;
 
-        metrics::adjust_decode_slots(1.0);
+        let slot = DecodeSlot::enter();
         tokio::spawn(async move {
             let _placement = placement;
+            let _guards = (permit, slot);
             stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
-            state_clone.release(budget);
-            metrics::adjust_decode_slots(-1.0);
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_completion_stream(id, model_name, Box::pin(rx_stream)).into_response()
     } else {
-        metrics::adjust_decode_slots(1.0);
+        let _slot = DecodeSlot::enter();
+        let _permit = permit;
         let echo = request.echo.unwrap_or(false);
         let n = request.n.unwrap_or(1).max(1);
         let suffix = request.suffix.clone();
@@ -150,8 +147,6 @@ pub async fn completions(
                     });
                 }
                 Err(e) => {
-                    state.release(estimated_tokens);
-                    metrics::adjust_decode_slots(-1.0);
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         &e.to_string(),
@@ -196,8 +191,6 @@ pub async fn completions(
             elapsed,
         );
         apply_keep_alive(&state, &model_name, &request.keep_alive).await;
-        state.release(estimated_tokens);
-        metrics::adjust_decode_slots(-1.0);
         (StatusCode::OK, Json(response)).into_response()
     }
 }

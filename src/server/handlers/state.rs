@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -11,8 +10,8 @@ use tokio::sync::RwLock;
 use crate::config::resolve::resolve_reasoning_format;
 use crate::config::{FileConfig, LiveConfig, ReasoningFormat};
 use crate::engine::{Executor, Scheduler, SlotManager};
-use crate::server::metrics;
 
+use super::budget::{BudgetPermit, TokenBudget};
 use super::route::{Route, Serving};
 
 /// The runtime and device the server loads every model onto.
@@ -38,10 +37,8 @@ pub struct AppState {
     pub live_config: Arc<LiveConfig>,
     /// `--reasoning-format`. Wins over `server.reasoning_format`.
     reasoning_format_flag: Option<ReasoningFormat>,
-    /// Current in-flight token count (prompt + estimated decode tokens)
-    pub inflight_tokens: AtomicUsize,
-    /// Maximum in-flight token budget (0 = unlimited)
-    pub max_inflight_tokens: usize,
+    /// In-flight token budget (prompt + estimated decode tokens). 0 is unlimited.
+    pub budget: Arc<TokenBudget>,
     /// Inference slot manager
     pub slot_manager: SlotManager,
     /// The executors loaded at start and their batching schedulers.
@@ -84,8 +81,7 @@ impl AppState {
             metrics_handle,
             live_config: Arc::new(LiveConfig::default()),
             reasoning_format_flag: None,
-            inflight_tokens: AtomicUsize::new(0),
-            max_inflight_tokens: 0,
+            budget: TokenBudget::new(0),
             slot_manager: SlotManager::new(0), // unlimited by default
             serving: Serving::OnDemand,
             vision_embedders: Arc::new(RwLock::new(HashMap::new())),
@@ -201,8 +197,9 @@ impl AppState {
         self.tts_paths.read().await.get(model_name).cloned()
     }
 
+    /// Limit the tokens in flight to `max`. 0 is unlimited.
     pub fn with_max_inflight_tokens(mut self, max: usize) -> Self {
-        self.max_inflight_tokens = max;
+        self.budget = TokenBudget::new(max);
         self
     }
 
@@ -218,37 +215,9 @@ impl AppState {
     }
 
     /// Try to admit a request with the given token budget.
-    /// Returns `false` (and does not increment) if the budget would be exceeded.
-    pub fn try_admit(&self, tokens: usize) -> bool {
-        if self.max_inflight_tokens == 0 {
-            self.inflight_tokens.fetch_add(tokens, Ordering::Relaxed);
-            metrics::adjust_inflight_tokens(tokens as f64);
-            return true;
-        }
-        loop {
-            let current = self.inflight_tokens.load(Ordering::Relaxed);
-            if current + tokens > self.max_inflight_tokens {
-                return false;
-            }
-            if self
-                .inflight_tokens
-                .compare_exchange_weak(
-                    current,
-                    current + tokens,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                metrics::adjust_inflight_tokens(tokens as f64);
-                return true;
-            }
-        }
-    }
-
-    /// Release tokens back to the budget after a request completes
-    pub fn release(&self, tokens: usize) {
-        self.inflight_tokens.fetch_sub(tokens, Ordering::Relaxed);
-        metrics::adjust_inflight_tokens(-(tokens as f64));
+    /// Returns `None`, and reserves nothing, if the budget would be exceeded.
+    /// The permit releases the tokens when dropped.
+    pub fn try_admit(&self, tokens: usize) -> Option<BudgetPermit> {
+        self.budget.try_admit(tokens)
     }
 }

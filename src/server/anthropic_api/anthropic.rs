@@ -25,8 +25,7 @@ use crate::server::generation::{
     stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
     HasSamplingFields,
 };
-use crate::server::handlers::{classify_lookup, AppState};
-use crate::server::metrics;
+use crate::server::handlers::{classify_lookup, AppState, DecodeSlot};
 use crate::server::reasoning::ReasoningParser;
 use crate::server::scheduled::generate_text_routed;
 use crate::server::streaming::StreamToken;
@@ -112,9 +111,9 @@ pub async fn messages(
 
     // Token budget admission
     let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
-    if !state.try_admit(estimated_tokens) {
+    let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
-    }
+    };
 
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
@@ -126,12 +125,11 @@ pub async fn messages(
         let model_name = request.model;
         let input_tokens = prompt_tokens.len();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
-        let state_clone = Arc::clone(&state);
-        let budget = estimated_tokens;
 
-        metrics::adjust_decode_slots(1.0);
+        let slot = DecodeSlot::enter();
         tokio::spawn(async move {
             let _placement = placement;
+            let _guards = (permit, slot);
             match route {
                 ImageRoute::Tower => {
                     stream_images_with_stop_sequences(
@@ -158,8 +156,6 @@ pub async fn messages(
                     stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await
                 }
             }
-            state_clone.release(budget);
-            metrics::adjust_decode_slots(-1.0);
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -167,7 +163,8 @@ pub async fn messages(
         create_message_stream(id, model_name, input_tokens, Box::pin(rx_stream), parser)
             .into_response()
     } else {
-        metrics::adjust_decode_slots(1.0);
+        let _slot = DecodeSlot::enter();
+        let _permit = permit;
         let start = Instant::now();
         let model_name = request.model.clone();
 
@@ -202,8 +199,6 @@ pub async fn messages(
                     result.prompt_eval_duration_ms,
                     elapsed,
                 );
-                state.release(estimated_tokens);
-                metrics::adjust_decode_slots(-1.0);
 
                 let response = AnthropicResponse {
                     id: format!("msg_{}", uuid::Uuid::new_v4()),
@@ -220,15 +215,11 @@ pub async fn messages(
                 };
                 (StatusCode::OK, Json(response)).into_response()
             }
-            Err(e) => {
-                state.release(estimated_tokens);
-                metrics::adjust_decode_slots(-1.0);
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &e.to_string(),
-                    "api_error",
-                )
-            }
+            Err(e) => anthropic_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "api_error",
+            ),
         }
     }
 }

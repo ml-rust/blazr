@@ -22,8 +22,7 @@ use crate::server::generation::{
     chat_prompt_error_response, error_response, overloaded_response, record_generation_metrics,
     validate_generation_params,
 };
-use crate::server::handlers::{select_executor, AppState};
-use crate::server::metrics;
+use crate::server::handlers::{select_executor, AppState, DecodeSlot};
 use crate::server::scheduled::generate_text_routed;
 
 /// POST /v1/responses — OpenAI Responses API
@@ -131,16 +130,17 @@ pub async fn responses(
 
     // Token budget admission
     let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
-    if !state.try_admit(estimated_tokens) {
+    let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
-    }
+    };
 
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
     let placement = state.route(executor, &prompt_tokens);
     let executor = Arc::clone(&placement.executor);
 
-    metrics::adjust_decode_slots(1.0);
+    let _slot = DecodeSlot::enter();
+    let _permit = permit;
     let start = Instant::now();
     let model_name = request.model.clone();
 
@@ -169,8 +169,6 @@ pub async fn responses(
                 result.prompt_eval_duration_ms,
                 elapsed,
             );
-            state.release(estimated_tokens);
-            metrics::adjust_decode_slots(-1.0);
 
             let response = ResponsesResponse {
                 id: format!("resp_{}", uuid::Uuid::new_v4()),
@@ -188,14 +186,10 @@ pub async fn responses(
             };
             (StatusCode::OK, Json(response)).into_response()
         }
-        Err(e) => {
-            state.release(estimated_tokens);
-            metrics::adjust_decode_slots(-1.0);
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &e.to_string(),
-                "server_error",
-            )
-        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            "server_error",
+        ),
     }
 }

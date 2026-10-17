@@ -4,6 +4,7 @@
 //! (vision/ASR/TTS) model bookkeeping lives in `auxiliary`.
 
 mod auxiliary;
+mod budget;
 mod health;
 mod models;
 mod route;
@@ -14,6 +15,7 @@ mod tokenize;
 mod variant;
 
 pub use auxiliary::{AuxiliaryKind, AuxiliaryModel};
+pub use budget::{BudgetPermit, DecodeSlot, TokenBudget};
 pub use health::health;
 pub use models::{get_model, list_models, ModelInfo, ModelsResponse};
 pub use route::{Route, ServeReplica, Serving};

@@ -142,6 +142,23 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
     Ok(handle)
 }
 
+/// One request in the `blazr_requests_active` gauge. Dropping the guard
+/// removes it, also when a timeout or a client disconnect drops the request.
+struct ActiveRequest;
+
+impl ActiveRequest {
+    fn enter() -> Self {
+        metrics::gauge!(names::REQUESTS_ACTIVE).increment(1.0);
+        Self
+    }
+}
+
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        metrics::gauge!(names::REQUESTS_ACTIVE).decrement(1.0);
+    }
+}
+
 /// Middleware that records per-request metrics
 pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     let method = request.method().to_string();
@@ -149,14 +166,14 @@ pub async fn metrics_middleware(request: Request, next: Next) -> Response {
 
     metrics::counter!(names::REQUESTS_TOTAL, "method" => method.clone(), "path" => path.clone())
         .increment(1);
-    metrics::gauge!(names::REQUESTS_ACTIVE).increment(1.0);
+    let active = ActiveRequest::enter();
 
     let start = Instant::now();
     let response = next.run(request).await;
     let duration = start.elapsed().as_secs_f64();
     let status = response.status().as_u16().to_string();
 
-    metrics::gauge!(names::REQUESTS_ACTIVE).decrement(1.0);
+    drop(active);
     metrics::histogram!(names::REQUEST_DURATION, "method" => method, "path" => path, "status" => status)
         .record(duration);
 
@@ -178,12 +195,8 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
     metrics::gauge!(names::SCHEDULER_MODELS_AVAILABLE).set(available_count);
 
     // Update token budget utilization for autoscaling
-    if state.max_inflight_tokens > 0 {
-        let current = state
-            .inflight_tokens
-            .load(std::sync::atomic::Ordering::Relaxed) as f64;
-        let ratio = current / state.max_inflight_tokens as f64;
-        metrics::gauge!(names::TOKEN_BUDGET_UTILIZATION).set(ratio);
+    if state.budget.max() > 0 {
+        metrics::gauge!(names::TOKEN_BUDGET_UTILIZATION).set(state.budget.utilization());
     }
 
     // KV cache utilization over every batching scheduler's block pool

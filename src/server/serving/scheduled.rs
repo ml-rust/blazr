@@ -27,7 +27,7 @@ pub struct BatchedGenerationResult {
 ///
 /// The streaming and non-streaming text paths both route by this. A route
 /// carries a scheduler only for the start model with batching on. The
-/// speculative and graph decoders run only on the executor path.
+/// graph decoders run only on the executor path.
 pub fn batching_scheduler(route: &Route) -> Option<&dyn GenerationScheduler> {
     route.scheduler.as_deref()
 }

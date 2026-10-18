@@ -1,6 +1,6 @@
-//! Non-streaming text generation, plus the speculative decoding path.
+//! Non-streaming text generation.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use futures::StreamExt;
 
 use boostr::model::ModelClient;
@@ -13,7 +13,6 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 use crate::engine::StopMatcher;
-use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
 use super::types::{FinishReason, GeneratedToken, GenerationResult};
@@ -45,100 +44,8 @@ where
         prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
-        // The speculative path runs no sampler and applies no grammar mask,
-        // so a constrained request decodes through the sampler loop.
-        if self.config().inference.speculative.is_some() && gen_config.constraint.is_none() {
-            return self
-                .generate_text_speculative(prompt_tokens, gen_config)
-                .await;
-        }
         let stream = self.generate(prompt_tokens, gen_config);
         collect_generation(stream, prompt_tokens.len(), gen_config).await
-    }
-
-    /// Speculative decoding path: uses draft model for fast speculation, target for verification.
-    async fn generate_text_speculative(
-        &self,
-        prompt_tokens: &[u32],
-        gen_config: &GenerationConfig,
-    ) -> Result<GenerationResult> {
-        let spec_config = self
-            .config()
-            .inference
-            .speculative
-            .as_ref()
-            .ok_or_else(|| anyhow!("speculative config missing"))?;
-
-        let prompt_len = prompt_tokens.len();
-        let prefill_start = std::time::Instant::now();
-
-        // Load separate draft model (smaller, faster model for speculation)
-        let draft_model_arc = self.get_or_load_draft_model()?;
-        let draft = crate::engine::speculative::BlazrSpeculativeModel::new(
-            draft_model_arc,
-            self.device().clone(),
-            self.config().dtype(),
-            &spec_config.draft_model,
-        )?;
-
-        // Target model is the main (larger) model
-        let target = crate::engine::speculative::BlazrSpeculativeModel::new(
-            std::sync::Arc::clone(self.model_arc()),
-            self.device().clone(),
-            self.config().dtype(),
-            "target",
-        )?;
-
-        let boostr_config = boostr::inference::speculative::SpeculativeConfig {
-            num_speculative_tokens: spec_config.num_speculative_tokens,
-            adaptive_depth: spec_config.adaptive_depth,
-            seed: gen_config.seed,
-            ..Default::default()
-        };
-
-        let mut executor =
-            boostr::inference::speculative::SpeculativeExecutor::new(draft, target, boostr_config);
-
-        let generated_ids = executor
-            .generate(prompt_tokens, gen_config.max_tokens)
-            .map_err(|e| anyhow!("speculative generation failed: {}", e))?;
-
-        let prompt_eval_duration_ms = prefill_start.elapsed().as_millis() as u64;
-
-        // Text ends at the first EOS. The prompt primes the decoder, so the
-        // first generated token keeps its leading space, as when streaming.
-        let eos_pos = generated_ids
-            .iter()
-            .position(|&t| self.tokenizer().is_eos(t));
-        let kept = &generated_ids[..eos_pos.unwrap_or(generated_ids.len())];
-        let mut stream = TokenTextStream::new(self.tokenizer(), prompt_tokens);
-        let mut final_text: String = kept
-            .iter()
-            .map(|&id| stream.push(self.tokenizer(), id))
-            .collect();
-        final_text.push_str(&stream.finish());
-        let finish_reason = if eos_pos.is_some() {
-            FinishReason::Eos
-        } else {
-            FinishReason::Length
-        };
-
-        let stats = executor.stats;
-        tracing::info!(
-            speculative_iterations = stats.iterations,
-            speculative_accepted = stats.accepted_tokens,
-            speculative_rejected = stats.rejected_tokens,
-            "speculative decoding complete"
-        );
-
-        Ok(GenerationResult {
-            text: final_text,
-            prompt_tokens: prompt_len,
-            completion_tokens: generated_ids.len(),
-            finish_reason,
-            prompt_eval_duration_ms,
-            token_logprobs: None,
-        })
     }
 }
 
@@ -220,4 +127,35 @@ where
             None
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SpeculativeDecodingConfig;
+    use crate::engine::test_support::tiny_executor;
+
+    /// Token ids generated from a fixed prompt, greedy.
+    async fn greedy_count(exec: &Executor<boostr::CpuRuntime>) -> Result<(String, usize)> {
+        let cfg = GenerationConfig {
+            max_tokens: 6,
+            temperature: 0.0,
+            ..GenerationConfig::default()
+        };
+        let result = exec.generate_text(&[1, 2, 3], &cfg).await?;
+        Ok((result.text, result.completion_tokens))
+    }
+
+    #[tokio::test]
+    async fn speculative_config_leaves_generation_unchanged() -> Result<()> {
+        let plain = tiny_executor()?;
+        let mut with_spec = tiny_executor()?;
+        with_spec.config.inference.speculative = Some(SpeculativeDecodingConfig {
+            draft_model: "missing-draft".to_string(),
+            num_speculative_tokens: 5,
+            adaptive_depth: false,
+        });
+        assert_eq!(greedy_count(&plain).await?, greedy_count(&with_spec).await?);
+        Ok(())
+    }
 }

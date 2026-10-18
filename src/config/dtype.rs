@@ -32,9 +32,6 @@ pub enum DtypeSource {
     Flag,
     /// `inference.dtype` in `~/.blazr/config.yaml`.
     File,
-    /// The target model of speculative decoding. Its draft model shares
-    /// the target's compute dtype, as both run in one decode loop.
-    Target,
 }
 
 impl DtypeSource {
@@ -43,7 +40,6 @@ impl DtypeSource {
         match self {
             Self::Flag => "--dtype",
             Self::File => "inference.dtype in ~/.blazr/config.yaml",
-            Self::Target => "the speculative target model",
         }
     }
 }

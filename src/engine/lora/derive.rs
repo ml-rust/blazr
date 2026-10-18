@@ -80,7 +80,7 @@ where
     /// unmerged. The variant shares every weight with this model, which is
     /// not modified. It gets its own executor, so its own KV pool, prefix
     /// cache and decode sessions, with this executor's config, tokenizer,
-    /// chat template, vision tower and loaded speculative draft model.
+    /// chat template and vision tower.
     ///
     /// # Errors
     ///
@@ -105,14 +105,7 @@ where
             ))
         })?;
         executor.chat_template = self.chat_template.clone();
-        executor.model_dir = self.model_dir.clone();
         executor.vision_tower = self.vision_tower.clone();
-        // A speculative draft model the base already loaded serves the
-        // variant too, rather than a second copy.
-        let base_draft = self.draft_model.lock().ok().and_then(|draft| draft.clone());
-        if let Ok(slot) = executor.draft_model.get_mut() {
-            *slot = base_draft;
-        }
         tracing::info!(
             adapter = %spec.name,
             path = %spec.path.display(),

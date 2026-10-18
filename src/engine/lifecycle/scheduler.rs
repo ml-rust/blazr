@@ -249,7 +249,6 @@ where
     /// This scheduler's load settings, owned for a load thread.
     fn load_job(&self) -> LoadJob<R> {
         LoadJob {
-            model_dir: self.model_dir.clone(),
             device: self.device.clone(),
             num_ctx: self.num_ctx,
             chat_template: self.chat_template.clone(),

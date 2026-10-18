@@ -2,7 +2,6 @@
 //!
 //! Runs inference on loaded models using boostr's LoadedModel.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -63,10 +62,6 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) paged_pool: std::sync::OnceLock<LayeredPagedKvCache<R>>,
     /// Shared prefix cache for paged attention (persists across requests)
     pub(crate) prefix_cache: Option<std::sync::Mutex<PrefixCache<CpuBlockAllocator>>>,
-    /// Model directory (for resolving relative draft model paths)
-    pub(crate) model_dir: Option<PathBuf>,
-    /// Lazily-loaded draft model for speculative decoding
-    pub(crate) draft_model: std::sync::Mutex<Option<Arc<LoadedModel<R>>>>,
     /// Vision tower for image inputs, loaded from `inference.mmproj`.
     pub(crate) vision_tower: Option<Arc<VisionTower<R>>>,
     /// The bytes of every model token id, built on the first constrained request.
@@ -133,6 +128,7 @@ where
         num_ctx: usize,
     ) -> Result<Self> {
         let config = with_runtime_dtype::<R>(config)?;
+        config.inference.warn_speculative_ignored();
         if config.inference.paged_attention {
             if let Some(reason) = model.paged_attention_refusal() {
                 return Err(anyhow!(reason));
@@ -242,8 +238,6 @@ where
             shared_allocator,
             paged_pool: std::sync::OnceLock::new(),
             prefix_cache,
-            model_dir: None,
-            draft_model: std::sync::Mutex::new(None),
             vision_tower: None,
             grammar_vocab: std::sync::OnceLock::new(),
             #[cfg(feature = "cuda")]
@@ -288,12 +282,6 @@ where
         self
     }
 
-    /// Set the model directory (for resolving relative draft model paths)
-    pub fn with_model_dir(mut self, dir: PathBuf) -> Self {
-        self.model_dir = Some(dir);
-        self
-    }
-
     /// Load the vision tower `config.inference.mmproj` names, with the
     /// `image_min_tokens` / `image_max_tokens` limits, onto this executor's
     /// device. No `mmproj` set: returns `self` unchanged.
@@ -335,65 +323,6 @@ where
     /// The vision tower, when `mmproj` was configured.
     pub fn vision_tower(&self) -> Option<&Arc<VisionTower<R>>> {
         self.vision_tower.as_ref()
-    }
-
-    /// Get or lazily load the draft model for speculative decoding.
-    /// The draft model is loaded from the path specified in the speculative config.
-    pub(crate) fn get_or_load_draft_model(&self) -> Result<Arc<LoadedModel<R>>>
-    where
-        R::Client: boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
-    {
-        let mut guard = self
-            .draft_model
-            .lock()
-            .map_err(|e| anyhow!("draft model lock: {e}"))?;
-
-        if let Some(ref model) = *guard {
-            return Ok(Arc::clone(model));
-        }
-
-        let spec_config = self
-            .config
-            .inference
-            .speculative
-            .as_ref()
-            .ok_or_else(|| anyhow!("no speculative config"))?;
-
-        let draft_path = PathBuf::from(&spec_config.draft_model);
-        let draft_path = if draft_path.is_absolute() || draft_path.exists() {
-            draft_path
-        } else if let Some(ref model_dir) = self.model_dir {
-            let in_dir = model_dir.join(&spec_config.draft_model);
-            if in_dir.exists() {
-                in_dir
-            } else {
-                return Err(anyhow!(
-                    "Draft model not found: {} (searched {} and model_dir {})",
-                    spec_config.draft_model,
-                    draft_path.display(),
-                    model_dir.display()
-                ));
-            }
-        } else {
-            return Err(anyhow!(
-                "Draft model not found: {} (no model_dir set)",
-                spec_config.draft_model
-            ));
-        };
-
-        tracing::info!("Loading draft model from {:?}", draft_path);
-        // The draft shares the target's KV cache dtype, so it loads at the
-        // target's compute dtype.
-        let request = crate::config::DtypeRequest {
-            dtype: self.config.compute_dtype()?,
-            source: crate::config::DtypeSource::Target,
-        };
-        let (model, _config) =
-            crate::loader::load_model_as::<R, _>(&draft_path, &self.device, Some(&request))?;
-        let model = Arc::new(model);
-        *guard = Some(Arc::clone(&model));
-        tracing::info!("Draft model loaded (vocab_size={})", model.vocab_size());
-        Ok(model)
     }
 
     /// Get the chat template for this model
@@ -444,7 +373,7 @@ where
         &self.device
     }
 
-    /// Get the loaded model as an Arc (for sharing with speculative/batch engines)
+    /// Get the loaded model as an Arc (for sharing with batch engines)
     pub(crate) fn model_arc(&self) -> &Arc<LoadedModel<R>> {
         &self.model
     }

@@ -94,13 +94,7 @@ The sweep runs its requests one after another through a single executor. The swe
 
 ## Speculative decoding
 
-| Knob           | Where set                                      | Default                        | Effect                                                |
-| -------------- | ---------------------------------------------- | ------------------------------ | ----------------------------------------------------- |
-| Draft model    | `inference.speculative.draft_model`            | required when the block is set | Sets the path or name of the draft model.             |
-| Draft length   | `inference.speculative.num_speculative_tokens` | `5`                            | Sets the tokens drafted per iteration.                |
-| Adaptive depth | `inference.speculative.adaptive_depth`         | `false`                        | Adjusts speculation depth from the acceptance rate. Passed to boostr `SpeculativeConfig`. |
-
-Speculative decoding runs on the single-sequence path only. The batched paths do not read the block.
+Blazr ignores `inference.speculative`. It logs one warning at load and decodes with the sampler, because the speculative implementation is being rewritten.
 
 ## CUDA graphs
 
@@ -154,7 +148,7 @@ blazr has no flag or key for the CPU thread count.
 | Symptom                          | Check first                                                                          | Knobs                                                                                                                                                                                                                                                                      |
 | -------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | High TTFT                        | `blazr_time_to_first_token_seconds`                                                  | `inference.prefill_chunk_size` for long prompts. `inference.prefix_cache` with `inference.paged_attention` for repeated prefixes. `inference.gpu_prefix_cache` on a CUDA build. `inference.max_batch_size` above `1` with `inference.paged_attention` when requests queue. |
-| High ITL                         | `blazr_inter_token_latency_seconds`                                                  | `--graphs` on a CUDA build for greedy decode. `inference.speculative.num_speculative_tokens` on the single-sequence path. `inference.prefill_chunk_size` to interleave prompts with decode steps.                                                                          |
+| High ITL                         | `blazr_inter_token_latency_seconds`                                                  | `--graphs` on a CUDA build for greedy decode. `inference.prefill_chunk_size` to interleave prompts with decode steps.                                                                          |
 | Out of GPU memory                | Device memory from the GPU tools. `blazr_vram_used_bytes` also reports it on CUDA builds.                     | `inference.max_context_len`. `--num-ctx` (`run`, `generate`). `inference.max_batch_size` and `inference.kv_pool_blocks`, which size the pool. `--gpu-layers` (`run`, `generate`).                                                                 |
 | Low throughput with many clients | `blazr_active_decode_slots`, `blazr_requests_active`, `blazr_tokens_generated_total` | `inference.max_batch_size` above `1` with `inference.paged_attention`. `inference.kv_pool_blocks` large enough for the batch. `inference.prefix_cache` for shared prefixes. GDN models need a CUDA build for lanes.                                                        |
 | Long prompts block short ones    | `blazr_time_to_first_token_seconds`                                                  | `inference.prefill_chunk_size`. `inference.max_batch_size` above `1` with `inference.paged_attention`, so the scheduler runs requests together.                                                                                                                            |

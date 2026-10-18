@@ -1,9 +1,8 @@
-//! Token selection: sampling, mirostat, grammar constraints, speculative decoding.
+//! Token selection: sampling, mirostat, grammar constraints.
 
 pub mod grammar_cache;
 pub(crate) mod mirostat;
 pub(crate) mod sampling;
-pub mod speculative;
 mod stop_matcher;
 mod token_budget;
 

@@ -98,7 +98,6 @@ Rules:
 - `bf16` or `f16` in a build without the `f16` feature exits with an error that names the feature.
 - wgpu computes in `f32` only. A request for `bf16` or `f16` logs a warning that names its flag or key. The model then runs `f32`.
 - A GGUF model runs `f32`. An AWQ or GPTQ model runs `f16`. A request for another dtype logs a warning, and the model keeps its own dtype.
-- A speculative draft model loads at the dtype of its target model.
 - The CPU runs `f32`, `bf16`, and `f16`. CUDA runs all three.
 
 ### Validation
@@ -236,10 +235,10 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `gpu_prefix_cache`                   | boolean  | `false`             | GPU prefix cache lookup. Falls back to CPU lookup without CUDA.                                                              |
 | `gpu_prefix_cache_ram_tier`          | integer  | `5000`              | RAM tier entries for the GPU prefix cache                                                                                    |
 | `prefill_chunk_size`                 | integer  | `0`                 | Prompt tokens per prefill chunk. `0` processes the whole prompt at once.                                                     |
-| `speculative`                        | object   | unset               | Speculative decoding. Blazr uses it when the section is set.                                                                 |
-| `speculative.draft_model`            | string   | required in section | Draft model path. A relative path also resolves against the model directory.                                                 |
-| `speculative.num_speculative_tokens` | integer  | `5`                 | Tokens speculated per step.                                                                                                  |
-| `speculative.adaptive_depth`         | boolean  | `false`             | Adjusts speculation depth from the acceptance rate. Passed to boostr `SpeculativeConfig`.                                    |
+| `speculative`                        | object   | unset               | Ignored. Blazr logs one warning at load and decodes with the sampler, because the speculative implementation is being rewritten. |
+| `speculative.draft_model`            | string   | required in section | Draft model path. Ignored.                                                                                                   |
+| `speculative.num_speculative_tokens` | integer  | `5`                 | Tokens speculated per step. Ignored.                                                                                         |
+| `speculative.adaptive_depth`         | boolean  | `false`             | Speculation depth control. Ignored.                                                                                          |
 | `tensor_parallel_size`               | integer  | `1`                 | Tensor parallel degree. `BLAZR_TP_SIZE` overrides it for `serve`.                                                            |
 | `data_parallel`                      | integer  | `1`                 | Replicas of the start model for `serve`. Only `config.yaml` sets it. See [Data-parallel replicas](deployment.md#data-parallel-replicas). |
 | `graphs`                             | boolean  | `false`             | CUDA graph capture for greedy decode. `run` and `generate` read it. `serve` logs a warning when it is set.                   |

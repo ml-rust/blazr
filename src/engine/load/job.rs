@@ -2,7 +2,7 @@
 //! step reads the disk or uploads to the device, so the scheduler runs
 //! [`LoadJob::run`] off the async executor.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
@@ -20,8 +20,6 @@ use crate::loader;
 /// The scheduler settings every load applies, owned so the load runs on
 /// another thread.
 pub(crate) struct LoadJob<R: Runtime<DType = DType>> {
-    /// The directory models are searched in.
-    pub(crate) model_dir: PathBuf,
     /// The device the weights upload to.
     pub(crate) device: R::Device,
     /// The KV cache context size.
@@ -81,7 +79,7 @@ where
             self.num_ctx,
             self.chat_template.as_deref(),
         )?;
-        Ok(executor.with_model_dir(self.model_dir))
+        Ok(executor)
     }
 
     /// Load `model_path` sharded `tp_size` ways. Rank r runs on GPU
@@ -116,8 +114,7 @@ where
             self.num_ctx,
             tp_state,
         )?
-        .with_chat_template(chat_template)
-        .with_model_dir(self.model_dir))
+        .with_chat_template(chat_template))
     }
 
     #[cfg(not(all(feature = "cuda", feature = "nccl")))]

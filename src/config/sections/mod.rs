@@ -11,7 +11,7 @@ pub(super) mod vision;
 pub use constraint::{CompiledConstraint, Constraint};
 pub use decision::{DecisionConfig, DecisionFamily};
 pub use generation::GenerationConfig;
-pub use inference::InferenceConfig;
+pub use inference::{InferenceConfig, SpeculativeDecodingConfig};
 pub use overlay::InferenceOverlay;
 pub use server::{LatencySlo, ReasoningFormat, ServerConfig};
 pub use vision::VisionOverrides;

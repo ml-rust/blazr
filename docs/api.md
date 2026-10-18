@@ -162,7 +162,7 @@ Each field the request omits takes its value from the `generation` section of `~
 - A grammar or schema that does not compile is a `400` that names the error and its position.
 - A schema keyword a grammar cannot enforce, such as `minimum` or `pattern`, is a `400`.
 - Generation ends by EOS once the output completes the grammar, or at `max_tokens`.
-- A constrained request decodes through the sampler: speculative decoding and CUDA graph replay do not run for it.
+- A constrained request decodes through the sampler: CUDA graph replay does not run for it.
 - `/v1/responses` takes the same constraints from `text.format`.
 
 ### keep_alive

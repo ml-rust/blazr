@@ -20,9 +20,10 @@ preview on crates.io that shares no code with it.
 ### Fixed
 
 - **Streaming token metrics** — streamed requests now count their prompt and generated tokens and record tokens per second, as non-streamed requests do.
+- **Speculative decoding** — the `inference.speculative` setting no longer routes requests through a speculative path that produced wrong output. Blazr ignores it with one warning at load until the rewrite lands.
 - **Streaming finish** — a stream whose generation ends without a finish token now closes with `finish_reason` `length`, as the non-streaming response reports it.
 
-- **Logprobs on GPU** — `logprobs` requests no longer crash the server on half-precision GPU logits. The last logits row casts to F32 on the device before its host copy. Dynamic temperature, DRY, typical sampling, speculative decoding and the swarm and disaggregated stages read their logits and activations the same way. `logit_bias` now applies to BF16 and F16 logits.
+- **Logprobs on GPU** — `logprobs` requests no longer crash the server on half-precision GPU logits. The last logits row casts to F32 on the device before its host copy. Dynamic temperature, DRY, typical sampling and the swarm and disaggregated stages read their logits and activations the same way. `logit_bias` now applies to BF16 and F16 logits.
 - **Constrained output** — `grammar`, `response_format` `json_schema` and `json_object`, and `/v1/responses` `text.format` now constrain the output. Before, most grammars and every schema decoded unconstrained. boostr compiles each one to a DFA that masks the logits on the device. Schema properties come out in declared order.
 - **Invalid grammars** — a grammar or schema that does not compile now fails the request with a `400` that names the error and its position. Before, the request ran unconstrained. A schema keyword a grammar cannot enforce, such as `minimum`, is a `400` too.
 - **Grammar end** — generation now ends by EOS when the output completes the grammar. EOS is allowed only then, so a constrained run never stops early and never runs past the grammar's end.
@@ -43,7 +44,7 @@ preview on crates.io that shares no code with it.
 - **Streaming uses continuous batching** — with batching on, streamed completions, chat, infill and Anthropic messages requests now run in the batch engine. Before, they decoded one sequence at a time beside the batch. Requests with images or audio still stream from the executor. A client that disconnects cancels its batched request and frees its KV blocks.
 - **`json_object` mode** — `response_format` `json_object` now constrains the output to one JSON object. It no longer generates up to three times until the text parses.
 - **`grammar` beside `response_format`** — a request that sets both, with a `response_format` other than `text`, is now a `400`. Before, `grammar` won. An empty `grammar` sets no constraint.
-- **Constrained requests skip speculative decoding** — a constrained request decodes through the sampler, because the speculative path applies no mask. `run --graphs` decodes eagerly with a grammar.
+- **Constrained graphs** — `run --graphs` decodes eagerly with a grammar.
 - **Compile cache** — the server keeps up to 64 compiled DFAs, at most 256 MiB, and evicts the least recently used. A request compiles its constraint once, at admission, off the async runtime.
 - **Config `generation.grammar`** — GBNF text works as before. The key also takes `{json_schema: <schema>}` and `{json_object: true}`.
 

@@ -62,7 +62,10 @@ pub(super) fn check_dimensions(dimensions: Option<usize>, pooling: Pooling) -> R
 }
 
 /// Check every token id against the vocabulary size.
-pub(super) fn check_token_ids(ids: &[u32], vocab_size: usize) -> Result<(), String> {
+pub(in crate::server::text_api) fn check_token_ids(
+    ids: &[u32],
+    vocab_size: usize,
+) -> Result<(), String> {
     match ids.iter().find(|&&id| id as usize >= vocab_size) {
         Some(id) => Err(format!(
             "Token id {id} is outside the vocabulary of size {vocab_size}"

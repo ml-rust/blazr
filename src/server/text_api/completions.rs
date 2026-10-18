@@ -1,6 +1,5 @@
-//! Text completion endpoint handler
+//! The `/v1/completions` handler.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,16 +8,15 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
 
+use super::completion_choices::generate_choices;
+use super::completion_prompt::{resolve_prompt, PromptContext, ResolvedPrompt};
+use super::completion_types::{CompletionRequest, CompletionResponse};
 use crate::server::generation::{
-    admit_constraint, apply_keep_alive, convert_logprobs, decode_context_prefix,
-    encode_with_allowed_special, error_response, overloaded_response, policy_error_response,
-    record_generation_metrics, resolve_constraint, validate_generation_params, HasSamplingFields,
-    LogprobResult, ResponseFormat, SamplingParams, Usage,
+    admit_constraint, apply_keep_alive, decode_context_prefix, error_response, overloaded_response,
+    record_generation_metrics, resolve_constraint, HasSamplingFields, Usage,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
-use crate::server::scheduled::generate_text_routed;
 use crate::server::scheduled_stream::stream_routed;
 use crate::server::streaming::{create_completion_stream, StreamToken};
 
@@ -27,9 +25,7 @@ pub async fn completions(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CompletionRequest>,
 ) -> Response {
-    if let Err(e) =
-        validate_generation_params(request.temperature, request.top_p, request.max_tokens)
-    {
+    if let Err(e) = request.check_fields() {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 
@@ -41,9 +37,8 @@ pub async fn completions(
         };
     let load_duration_ms = load_start.elapsed().as_millis() as u64;
 
-    let prompt = match decode_context_prefix(&executor, &request.context) {
-        Ok(prefix) if prefix.is_empty() => request.prompt.clone(),
-        Ok(prefix) => format!("{}{}", prefix, request.prompt),
+    let prefix = match decode_context_prefix(&executor, &request.context) {
+        Ok(prefix) => prefix,
         Err(e) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -62,38 +57,66 @@ pub async fn completions(
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 
-    // The prompt is encoded here, once, and these are the ids that reach the
-    // model. Nothing in the caller's text becomes a control token unless the
-    // request named that token in `allowed_special` — same rule and same shape
-    // as `/v1/tokenize`.
-    let prompt_tokens = match encode_with_allowed_special(
-        executor.tokenizer(),
-        &prompt,
-        request.allowed_special.as_deref(),
-    ) {
-        Ok(tokens) => tokens,
-        Err(e) => return policy_error_response(&e),
+    // Each prompt is encoded once, and these ids reach the model.
+    // Caller text becomes a control token only when `allowed_special` names it.
+    // `/v1/tokenize` follows the same rule. Token id prompts skip the tokenizer.
+    let echo = request.echo.unwrap_or(false);
+    let context = PromptContext {
+        tokenizer: executor.tokenizer(),
+        vocab_size: executor.vocab_size(),
+        prefix: &prefix,
+        suffix: request.suffix.as_deref(),
+        allowed_special: request.allowed_special.as_deref(),
+        echo,
+    };
+    let mut prompts: Vec<ResolvedPrompt> = Vec::new();
+    for item in request.prompt.items() {
+        match resolve_prompt(&item, &context) {
+            Ok(p) => prompts.push(p),
+            Err(e) => return e.into_response(),
+        }
+    }
+    let Some(first) = prompts.first() else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "prompt must not be empty",
+            "invalid_request_error",
+        );
     };
 
-    // Token budget admission control
-    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
+    // Token budget admission control: every prompt with its generation budget.
+    let estimated_tokens: usize = prompts
+        .iter()
+        .map(|p| p.tokens.len() + gen_config.max_tokens)
+        .sum();
     let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
     };
 
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
-    let placement = state.route(executor, &prompt_tokens);
+    let placement = state.route(executor, &first.tokens);
 
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
+        let Some(prompt) = prompts.into_iter().next() else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "prompt must not be empty",
+                "invalid_request_error",
+            );
+        };
+        // `echo` sends the prompt text as the first chunk.
+        if echo {
+            let _ = tx.try_send(StreamToken::text(prompt.echo, None));
+        }
 
         let slot = DecodeSlot::enter();
         tokio::spawn(async move {
             let _guards = (permit, slot);
-            stream_routed(&placement, prompt_tokens, gen_config, tx).await;
+            stream_routed(&placement, prompt.tokens, gen_config, tx).await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -101,85 +124,44 @@ pub async fn completions(
     } else {
         let _slot = DecodeSlot::enter();
         let _permit = permit;
-        let echo = request.echo.unwrap_or(false);
-        let n = request.n.unwrap_or(1).max(1);
-        let suffix = request.suffix.clone();
+        let n = request.choices_per_prompt();
         let model_name = request.model.clone();
         let start = Instant::now();
 
-        let mut choices = Vec::with_capacity(n);
-        let mut total_prompt_tokens = 0;
-        let mut total_completion_tokens = 0;
-        let mut first_prompt_eval_ms = 0u64;
-
-        for i in 0..n {
-            let mut iter_config = gen_config.clone();
-            if let Some(s) = iter_config.seed {
-                iter_config.seed = Some(s.wrapping_add(i as u64));
+        let generated = match generate_choices(&placement, &prompts, n, echo, &gen_config).await {
+            Ok(g) => g,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &e.to_string(),
+                    "server_error",
+                );
             }
-
-            // The route's batching scheduler when it has one, else its executor.
-            let gen_result = generate_text_routed(&placement, &prompt_tokens, &iter_config).await;
-
-            match gen_result {
-                Ok(result) => {
-                    if i == 0 {
-                        total_prompt_tokens = result.prompt_tokens;
-                        first_prompt_eval_ms = result.prompt_eval_duration_ms;
-                    }
-                    total_completion_tokens += result.completion_tokens;
-
-                    let mut text = if echo {
-                        format!("{}{}", prompt, result.text)
-                    } else {
-                        result.text
-                    };
-                    if let Some(ref sfx) = suffix {
-                        text.push_str(sfx);
-                    }
-
-                    let logprobs = result
-                        .token_logprobs
-                        .as_ref()
-                        .map(|tl| convert_logprobs(tl));
-
-                    choices.push(CompletionChoice {
-                        text,
-                        index: i,
-                        finish_reason: result.finish_reason.as_str().to_string(),
-                        logprobs,
-                    });
-                }
-                Err(e) => {
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &e.to_string(),
-                        "server_error",
-                    );
-                }
-            }
-        }
+        };
 
         let elapsed = start.elapsed();
-        let done_reason = choices
+        let done_reason = generated
+            .choices
             .last()
             .map(|c| c.finish_reason.clone())
             .unwrap_or_default();
+        let (prompt_tokens, completion_tokens) =
+            (generated.prompt_tokens, generated.completion_tokens);
         let response = CompletionResponse {
             id: format!("cmpl-{}", uuid::Uuid::new_v4()),
             object: "text_completion".to_string(),
             created: chrono::Utc::now().timestamp(),
             model: request.model,
-            choices,
+            choices: generated.choices,
             usage: Usage {
-                prompt_tokens: total_prompt_tokens,
-                completion_tokens: total_completion_tokens,
-                total_tokens: total_prompt_tokens + total_completion_tokens,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
                 total_duration_ms: elapsed.as_millis() as u64,
-                prompt_eval_duration_ms: first_prompt_eval_ms,
+                prompt_eval_duration_ms: generated.first_prompt_eval_ms,
                 load_duration_ms,
                 tokens_per_second: if elapsed.as_secs_f64() > 0.0 {
-                    total_completion_tokens as f64 / elapsed.as_secs_f64()
+                    completion_tokens as f64 / elapsed.as_secs_f64()
                 } else {
                     0.0
                 },
@@ -189,148 +171,12 @@ pub async fn completions(
         record_generation_metrics(
             &model_name,
             &request.user,
-            total_prompt_tokens,
-            total_completion_tokens,
-            first_prompt_eval_ms,
+            prompt_tokens,
+            completion_tokens,
+            generated.first_prompt_eval_ms,
             elapsed,
         );
         apply_keep_alive(&state, &model_name, &request.keep_alive).await;
         (StatusCode::OK, Json(response)).into_response()
     }
-}
-
-// ── Request/Response types ──
-
-#[derive(Deserialize)]
-pub struct CompletionRequest {
-    pub model: String,
-    pub prompt: String,
-    /// Special tokens the caller permits `prompt` to spell out, tiktoken-style.
-    ///
-    /// Absent (the default) means none: a `prompt` containing `"<|im_start|>"`
-    /// generates from the tokens of that literal string rather than from the
-    /// real control-token id. A caller hand-building a chat format opts each
-    /// token it needs back in by name; any *other* special token in the prompt
-    /// is then refused with a 400 rather than silently promoted.
-    #[serde(default)]
-    pub allowed_special: Option<Vec<String>>,
-    #[serde(default)]
-    pub max_tokens: Option<usize>,
-    #[serde(default)]
-    pub temperature: Option<f32>,
-    #[serde(default)]
-    pub top_p: Option<f32>,
-    #[serde(default)]
-    pub top_k: Option<usize>,
-    #[serde(default)]
-    pub min_p: Option<f32>,
-    #[serde(default)]
-    pub repeat_penalty: Option<f32>,
-    #[serde(default)]
-    pub frequency_penalty: Option<f32>,
-    #[serde(default)]
-    pub presence_penalty: Option<f32>,
-    #[serde(default)]
-    pub stream: Option<bool>,
-    #[serde(default)]
-    pub stop: Option<Vec<String>>,
-    #[serde(default)]
-    pub seed: Option<u64>,
-    #[serde(default)]
-    pub echo: Option<bool>,
-    #[serde(default)]
-    pub n: Option<usize>,
-    #[serde(default)]
-    pub suffix: Option<String>,
-    #[serde(default)]
-    pub context: Option<Vec<i64>>,
-    #[serde(default)]
-    pub keep_alive: Option<String>,
-    #[serde(default)]
-    pub logit_bias: Option<HashMap<String, f32>>,
-    #[serde(default)]
-    pub logprobs: Option<bool>,
-    #[serde(default)]
-    pub top_logprobs: Option<usize>,
-    #[serde(default)]
-    pub response_format: Option<ResponseFormat>,
-    #[serde(default)]
-    pub mirostat: Option<u8>,
-    #[serde(default)]
-    pub mirostat_tau: Option<f32>,
-    #[serde(default)]
-    pub mirostat_eta: Option<f32>,
-    #[serde(default)]
-    pub dynatemp_range: Option<f32>,
-    #[serde(default)]
-    pub dynatemp_exponent: Option<f32>,
-    #[serde(default)]
-    pub dry_multiplier: Option<f32>,
-    #[serde(default)]
-    pub dry_base: Option<usize>,
-    #[serde(default)]
-    pub dry_allowed_length: Option<usize>,
-    #[serde(default)]
-    pub dry_sequence_breakers: Option<Vec<String>>,
-    #[serde(default)]
-    pub typical_p: Option<f32>,
-    #[serde(default)]
-    pub grammar: Option<String>,
-    #[serde(default)]
-    pub user: Option<String>,
-    /// The registered LoRA adapter of `model` to run on. See `ChatRequest`.
-    #[serde(default)]
-    pub lora_adapter: Option<String>,
-}
-
-impl HasSamplingFields for CompletionRequest {
-    fn sampling_params(&self) -> SamplingParams {
-        SamplingParams {
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            top_p: self.top_p,
-            top_k: self.top_k,
-            min_p: self.min_p,
-            repeat_penalty: self.repeat_penalty,
-            frequency_penalty: self.frequency_penalty,
-            presence_penalty: self.presence_penalty,
-            stop: self.stop.clone(),
-            seed: self.seed,
-            logit_bias: self.logit_bias.clone(),
-            logprobs: self.logprobs,
-            top_logprobs: self.top_logprobs,
-            mirostat_mode: self.mirostat,
-            mirostat_tau: self.mirostat_tau,
-            mirostat_eta: self.mirostat_eta,
-            dynatemp_range: self.dynatemp_range,
-            dynatemp_exponent: self.dynatemp_exponent,
-            dry_multiplier: self.dry_multiplier,
-            dry_base: self.dry_base,
-            dry_allowed_length: self.dry_allowed_length,
-            dry_sequence_breakers: self.dry_sequence_breakers.clone(),
-            typical_p: self.typical_p,
-            lora_adapter: self.lora_adapter.clone(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct CompletionResponse {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub model: String,
-    pub choices: Vec<CompletionChoice>,
-    pub usage: Usage,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub done_reason: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct CompletionChoice {
-    pub text: String,
-    pub index: usize,
-    pub finish_reason: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logprobs: Option<LogprobResult>,
 }

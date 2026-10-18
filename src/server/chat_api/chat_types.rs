@@ -10,7 +10,8 @@ use super::tools::{ChatRequestMessage, ChatResponseMessage, Tool};
 use crate::config::{Constraint, ReasoningFormat};
 use crate::model::chat_template::RenderOptions;
 use crate::server::generation::{
-    resolve_constraint, HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage,
+    check_stop, resolve_constraint, string_or_array, validate_generation_params, HasSamplingFields,
+    LogprobResult, ResponseFormat, SamplingParams, Usage,
 };
 
 // ── Request/Response types ──
@@ -26,6 +27,9 @@ pub struct ChatRequest {
     pub tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
+    /// Alias of `max_tokens`. It wins when both are present.
+    #[serde(default)]
+    pub max_completion_tokens: Option<usize>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -42,7 +46,8 @@ pub struct ChatRequest {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub stream: Option<bool>,
-    #[serde(default)]
+    /// One string or up to four.
+    #[serde(default, deserialize_with = "string_or_array")]
     pub stop: Option<Vec<String>>,
     #[serde(default)]
     pub seed: Option<u64>,
@@ -111,6 +116,17 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
+    /// The token limit: `max_completion_tokens` when set, else `max_tokens`.
+    pub fn effective_max_tokens(&self) -> Option<usize> {
+        self.max_completion_tokens.or(self.max_tokens)
+    }
+
+    /// Check the sampling fields and `stop`. The handler answers 400 on an error.
+    pub fn check_fields(&self) -> Result<(), String> {
+        validate_generation_params(self.temperature, self.top_p, self.effective_max_tokens())?;
+        check_stop(self.stop.as_deref())
+    }
+
     /// Template variables for this request.
     ///
     /// `think` sets `enable_thinking`, `reasoning_effort` passes through, and
@@ -164,7 +180,7 @@ impl ChatRequest {
 impl HasSamplingFields for ChatRequest {
     fn sampling_params(&self) -> SamplingParams {
         SamplingParams {
-            max_tokens: self.max_tokens,
+            max_tokens: self.effective_max_tokens(),
             temperature: self.temperature,
             top_p: self.top_p,
             top_k: self.top_k,
@@ -245,6 +261,50 @@ mod tests {
             body.extend(extra.clone());
         }
         serde_json::from_value(body).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn max_completion_tokens_aliases_max_tokens() {
+        assert_eq!(request(json!({})).effective_max_tokens(), None);
+        let only_old = request(json!({"max_tokens": 7}));
+        assert_eq!(only_old.effective_max_tokens(), Some(7));
+        let only_new = request(json!({"max_completion_tokens": 9}));
+        assert_eq!(only_new.effective_max_tokens(), Some(9));
+        assert_eq!(only_new.sampling_params().max_tokens, Some(9));
+    }
+
+    #[test]
+    fn max_completion_tokens_wins_when_both_are_present() {
+        let both = request(json!({"max_tokens": 7, "max_completion_tokens": 9}));
+        assert_eq!(both.effective_max_tokens(), Some(9));
+        assert_eq!(both.sampling_params().max_tokens, Some(9));
+    }
+
+    #[test]
+    fn zero_max_completion_tokens_is_an_error() {
+        let req = request(json!({"max_tokens": 5, "max_completion_tokens": 0}));
+        assert!(req.check_fields().is_err());
+    }
+
+    #[test]
+    fn stop_reads_as_a_string_or_an_array() {
+        assert_eq!(
+            request(json!({"stop": "END"})).stop,
+            Some(vec!["END".to_string()])
+        );
+        assert_eq!(
+            request(json!({"stop": ["a", "b"]})).stop,
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(request(json!({})).stop, None);
+    }
+
+    #[test]
+    fn more_than_four_stop_sequences_is_an_error() {
+        let five = request(json!({"stop": ["1", "2", "3", "4", "5"]}));
+        assert!(five.check_fields().is_err());
+        let four = request(json!({"stop": ["1", "2", "3", "4"]}));
+        assert!(four.check_fields().is_ok());
     }
 
     #[test]

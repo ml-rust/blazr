@@ -6,7 +6,7 @@
 //! The endpoint takes a `prefix` and `suffix`, wraps them with the model's
 //! FIM special tokens, and generates the middle portion.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
@@ -16,6 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::fim_prompt::{build_fim_prompt, FIM_MARKERS};
 use crate::server::generation::{
     admit_constraint, apply_keep_alive, error_response, overloaded_response, policy_error_response,
     record_generation_metrics, validate_generation_params, HasSamplingFields, SamplingParams,
@@ -25,53 +26,6 @@ use crate::server::handlers::{lookup_error_response, AppState, DecodeSlot};
 use crate::server::scheduled::generate_text_routed;
 use crate::server::scheduled_stream::stream_routed;
 use crate::server::streaming::{create_completion_stream, StreamToken};
-
-/// FIM token names used across different model families
-const FIM_PREFIX_TOKEN: &str = "<|fim_prefix|>";
-const FIM_MIDDLE_TOKEN: &str = "<|fim_middle|>";
-const FIM_SUFFIX_TOKEN: &str = "<|fim_suffix|>";
-
-/// The only special tokens this endpoint inserts, and therefore the only ones
-/// the assembled prompt may contain — a `prefix` spelling out `<|im_start|>` is
-/// refused rather than promoted to that control token's id.
-///
-/// Built once: every infill request borrows it.
-static FIM_MARKERS: LazyLock<splintr::FxHashSet<String>> = LazyLock::new(|| {
-    [FIM_PREFIX_TOKEN, FIM_MIDDLE_TOKEN, FIM_SUFFIX_TOKEN]
-        .iter()
-        .map(|t| (*t).to_string())
-        .collect()
-});
-
-/// Build a FIM prompt from prefix and suffix using the model's FIM markers.
-///
-/// PSM order (prefix-suffix-middle): `<fim_prefix>PREFIX<fim_suffix>SUFFIX<fim_middle>`
-/// This is the standard order used by StarCoder, CodeLlama, and OpenAI models.
-///
-/// The markers go in as their literal spellings, which is exactly what the
-/// allow-list names, so the encode below turns them into the same ids
-/// `special_token_id` reports here.
-fn build_fim_prompt(
-    tokenizer: &splintr::AnyTokenizer,
-    prefix: &str,
-    suffix: &str,
-) -> Result<String, String> {
-    // Check if tokenizer supports FIM tokens
-    for token in [FIM_PREFIX_TOKEN, FIM_SUFFIX_TOKEN, FIM_MIDDLE_TOKEN] {
-        if tokenizer.special_token_id(token).is_none() {
-            return Err(format!(
-                "Model tokenizer does not support FIM tokens ({})",
-                token
-            ));
-        }
-    }
-
-    // PSM order: <fim_prefix>PREFIX<fim_suffix>SUFFIX<fim_middle>
-    Ok(format!(
-        "{}{}{}{}{}",
-        FIM_PREFIX_TOKEN, prefix, FIM_SUFFIX_TOKEN, suffix, FIM_MIDDLE_TOKEN
-    ))
-}
 
 /// FIM/Infill endpoint
 pub async fn infill(

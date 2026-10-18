@@ -21,7 +21,7 @@ use crate::server::chat_stream::create_chat_stream;
 use crate::server::generation::{
     admit_constraint, apply_keep_alive, chat_prompt_error_response, convert_logprobs,
     decode_context_prefix, error_response, overloaded_response, policy_error_response,
-    record_generation_metrics, validate_generation_params, HasSamplingFields, Usage,
+    record_generation_metrics, HasSamplingFields, Usage,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
 use crate::server::reasoning::{split_reasoning_for_format, ReasoningParser};
@@ -44,9 +44,7 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Response {
-    if let Err(e) =
-        validate_generation_params(request.temperature, request.top_p, request.max_tokens)
-    {
+    if let Err(e) = request.check_fields() {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 

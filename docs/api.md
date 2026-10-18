@@ -116,7 +116,7 @@ Completions and chat accept these fields. Infill accepts a subset.
 
 | Field                   | Type             | Default | Meaning                                                                       |
 | ----------------------- | ---------------- | ------- | ----------------------------------------------------------------------------- |
-| `max_tokens`            | integer          | `2048`  | Maximum tokens to generate. Must be greater than `0`.                         |
+| `max_tokens`            | integer          | `2048`  | Maximum tokens to generate. Must be greater than `0`. Chat also accepts `max_completion_tokens`. It wins when both are set. |
 | `temperature`           | number           | `1.0`   | Sampling temperature. Range `0` to `2`.                                       |
 | `top_p`                 | number           | `1.0`   | Nucleus sampling. Range `0` to `1`.                                           |
 | `top_k`                 | integer          | `0`     | Top-k sampling limit.                                                         |
@@ -126,9 +126,9 @@ Completions and chat accept these fields. Infill accepts a subset.
 | `presence_penalty`      | number           | `0.0`   | Presence penalty.                                                             |
 | `typical_p`             | number           | `0.0`   | Typical sampling.                                                             |
 | `seed`                  | integer          | none    | Sampling seed. With `n`, choice `i` uses `seed + i`.                          |
-| `stop`                  | array of strings | none    | Stop sequences. Honored in streaming and non-streaming responses.             |
+| `stop`                  | string or array of strings | none | Stop sequences. At most 4, else `400`. Honored in streaming and non-streaming responses. |
 | `logit_bias`            | object           | none    | Map of token ID string to bias. Keys that do not parse as `u32` are dropped.  |
-| `logprobs`              | boolean          | `false` | Return token log probabilities.                                               |
+| `logprobs`              | boolean          | `false` | Return token log probabilities. Completions also accepts an integer `0` to `5` that sets the top logprobs count. Another integer returns `400`. |
 | `top_logprobs`          | integer          | `5`     | Alternatives per token. Capped at `20`.                                       |
 | `mirostat`              | integer          | `0`     | Mirostat mode.                                                                |
 | `mirostat_tau`          | number           | `5.0`   | Mirostat target entropy.                                                      |
@@ -185,14 +185,17 @@ Generates text from a prompt.
 | Field             | Type              | Default  | Meaning                                                                 |
 | ----------------- | ----------------- | -------- | ----------------------------------------------------------------------- |
 | `model`           | string            | required | Model name.                                                             |
-| `prompt`          | string            | required | Prompt text.                                                            |
+| `prompt`          | string, array of strings, array of integers, or array of integer arrays | required | Prompt text, or token IDs that skip the tokenizer. An ID at or above the vocabulary size returns `400`. |
 | `stream`          | boolean           | `false`  | Stream the response as SSE.                                             |
-| `n`               | integer           | `1`      | Number of choices. Non-streaming only.                                  |
-| `echo`            | boolean           | `false`  | Prepend the prompt to each choice. Non-streaming only.                  |
-| `suffix`          | string            | none     | Append text to each choice. Non-streaming only.                         |
-| `context`         | array of integers | none     | Token IDs decoded and prepended to the prompt.                          |
+| `n`               | integer           | `1`      | Choices per prompt. Streaming with `n` above `1` returns `400`.         |
+| `best_of`         | integer           | none     | Must not exceed `n`. A larger value returns `400`.                      |
+| `echo`            | boolean           | `false`  | Prepend the prompt to each choice. Streaming sends it as the first chunk. Token prompts echo as decoded text. |
+| `suffix`          | string            | none     | Text after the completion. The server builds a fill-in-the-middle prompt. The response never repeats it. The tokenizer must define the FIM tokens, else `400` names the missing ones. Not supported with token prompts. |
+| `context`         | array of integers | none     | Token IDs decoded and prepended to a text prompt. Token prompts ignore it. |
 | `allowed_special` | array of strings  | none     | Control tokens that `prompt` encodes as real tokens. Absent means none. |
 | Sampling fields   |                   |          | See [Sampling fields](#sampling-fields).                                |
+
+With several prompts, a non-streaming response holds `n` choices per prompt. Choice `index` is `prompt_index * n + j`, and `usage` sums all prompts. Streaming accepts one prompt.
 
 Special tokens in `prompt` encode as their literal text by default. Name a token in `allowed_special` to allow it. Any other control token returns `400`.
 

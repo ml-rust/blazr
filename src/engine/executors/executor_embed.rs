@@ -13,6 +13,7 @@ use boostr::{
 };
 
 use super::executor::Executor;
+use crate::engine::host_read::to_host_f32;
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -49,15 +50,7 @@ where
         let hidden_var = self.model.forward_hidden(&input)?;
         let hidden_tensor = hidden_var.tensor();
 
-        // A BF16 or F16 model returns half-width states. Reading them as f32
-        // would read past the buffer, so cast first.
-        let hidden_f32 = if hidden_tensor.dtype() == DType::F32 {
-            hidden_tensor.contiguous()?
-        } else {
-            let client = R::default_client(device);
-            client.cast(hidden_tensor, DType::F32)?.contiguous()?
-        };
-
-        Ok(hidden_f32.try_to_vec::<f32>()?)
+        // A BF16 or F16 model returns half-width states, so they cast first.
+        Ok(to_host_f32(hidden_tensor)?)
     }
 }

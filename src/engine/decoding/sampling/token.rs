@@ -14,6 +14,7 @@ use crate::config::GenerationConfig;
 use crate::tokenizer::{token_piece, TokenTextStream};
 
 use crate::engine::executor::Executor;
+use crate::engine::host_read::last_logits_row;
 use crate::engine::types::{FinishReason, GeneratedToken, TokenLogprob};
 
 use super::MirostatState;
@@ -91,14 +92,8 @@ where
         mirostat: &mut MirostatState,
         gen_config: &GenerationConfig,
     ) -> Result<(Tensor<R>, u32)> {
-        let shape = logits.shape();
-        let seq_len = shape[1];
-        let vocab_size = shape[2];
-        let all_logits: Vec<f32> = logits.to_vec();
-        let offset = (seq_len - 1) * vocab_size;
-        let last_logits = &all_logits[offset..offset + vocab_size];
-
-        let (token_id, _logprob) = mirostat.sample(last_logits, gen_config.temperature);
+        let last_logits = last_logits_row(logits)?;
+        let (token_id, _logprob) = mirostat.sample(&last_logits, gen_config.temperature);
 
         let token_tensor = Tensor::from_slice(&[token_id as i64], &[1], logits.device())?;
         Ok((token_tensor, token_id))
@@ -123,12 +118,7 @@ where
             finish_reason.is_some(),
         );
 
-        let (logprob, top_logprobs) = if gen_config.logprobs {
-            let (lp, top) = self.compute_logprobs(logits, token_id, gen_config.top_logprobs)?;
-            (Some(lp), Some(top))
-        } else {
-            (None, None)
-        };
+        let (logprob, top_logprobs) = self.token_logprobs(logits, token_id, gen_config)?;
 
         Ok(GeneratedToken {
             token_id,
@@ -139,22 +129,38 @@ where
         })
     }
 
+    /// The logprob of `token_id` and the top logprobs, when `gen_config`
+    /// asks for them. Both are `None` otherwise, and nothing is computed.
+    ///
+    /// Every decode loop and the batching engine call this with the logits
+    /// the token was sampled from.
+    pub(crate) fn token_logprobs(
+        &self,
+        logits: &Tensor<R>,
+        token_id: u32,
+        gen_config: &GenerationConfig,
+    ) -> Result<(Option<f32>, Option<Vec<TokenLogprob>>)> {
+        if !gen_config.logprobs {
+            return Ok((None, None));
+        }
+        let (lp, top) = self.compute_logprobs(logits, token_id, gen_config.top_logprobs)?;
+        Ok((Some(lp), Some(top)))
+    }
+
     /// Compute log probabilities for the last position in logits.
     ///
     /// Returns (logprob of chosen token, top-N logprobs) by computing log-softmax
-    /// on the raw logits at the last sequence position.
+    /// on the raw logits at the last sequence position. Only that position's
+    /// row copies to the host.
     fn compute_logprobs(
         &self,
         logits: &Tensor<R>,
         chosen_token: u32,
         top_n: usize,
     ) -> Result<(f32, Vec<TokenLogprob>)> {
-        let shape = logits.shape();
-        let seq_len = shape[1];
-        let vocab_size = shape[2];
-        let all_logits: Vec<f32> = logits.to_vec();
-        let offset = (seq_len - 1) * vocab_size;
-        let last_logits = &all_logits[offset..offset + vocab_size];
+        let last_logits = last_logits_row(logits)?;
+        let vocab_size = last_logits.len();
+        let last_logits = last_logits.as_slice();
 
         // Log-softmax: log(softmax(x)) = x - log(sum(exp(x - max)))
         let max_logit = last_logits
@@ -172,7 +178,9 @@ where
         let n = top_n.min(vocab_size).min(20);
         let mut top: Vec<(usize, f32)> = Vec::with_capacity(n + 1);
 
-        for (i, &logit) in last_logits.iter().enumerate() {
+        // With no top entries asked for, nothing is scanned.
+        let scanned: &[f32] = if n == 0 { &[] } else { last_logits };
+        for (i, &logit) in scanned.iter().enumerate() {
             let lp = logit - log_sum_exp;
             if top.len() < n {
                 top.push((i, lp));
@@ -202,5 +210,91 @@ where
             .collect();
 
         Ok((chosen_logprob, top_logprobs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boostr::CpuRuntime;
+
+    use crate::engine::test_support::tiny_executor;
+
+    /// `[1, 2, vocab]` logits: the last position peaks at `peak`.
+    fn two_positions(exec: &Executor<CpuRuntime>, peak: usize) -> Result<Tensor<CpuRuntime>> {
+        let vocab = exec.vocab_size();
+        let mut rows = vec![0.0f32; 2 * vocab];
+        rows[0] = 50.0;
+        rows[vocab + peak] = 20.0;
+        Ok(Tensor::from_slice(&rows, &[1, 2, vocab], exec.device())?)
+    }
+
+    #[test]
+    fn logprobs_read_the_last_position_and_only_when_asked() -> Result<()> {
+        let exec = tiny_executor()?;
+        let logits = two_positions(&exec, 7)?;
+        let off = GenerationConfig::default();
+        assert!(matches!(
+            exec.token_logprobs(&logits, 7, &off)?,
+            (None, None)
+        ));
+
+        let asked = GenerationConfig {
+            logprobs: true,
+            top_logprobs: 2,
+            ..GenerationConfig::default()
+        };
+        let (lp, top) = exec.token_logprobs(&logits, 7, &asked)?;
+        assert!(lp.is_some_and(|lp| lp <= 0.0 && lp > -1e-3));
+        let top = top.unwrap_or_default();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top.first().map(|t| t.token_id), Some(7));
+        Ok(())
+    }
+
+    #[test]
+    fn zero_top_logprobs_gives_the_chosen_logprob_and_no_entries() -> Result<()> {
+        let exec = tiny_executor()?;
+        let asked = GenerationConfig {
+            logprobs: true,
+            top_logprobs: 0,
+            ..GenerationConfig::default()
+        };
+        let (lp, top) = exec.token_logprobs(&two_positions(&exec, 3)?, 3, &asked)?;
+        assert!(lp.is_some());
+        assert_eq!(top.map(|t| t.len()), Some(0));
+        Ok(())
+    }
+
+    /// BF16 logits, the CUDA default, give the same logprobs as F32 logits.
+    ///
+    /// Sabotage check: read the row with `try_to_vec::<f32>` and no cast,
+    /// and this test fails with a host read type mismatch.
+    #[cfg(feature = "f16")]
+    #[test]
+    fn bf16_logits_give_logprobs() -> Result<()> {
+        let exec = tiny_executor()?;
+        let vocab = exec.vocab_size();
+        // BF16 bit patterns: 50.0 at position 0, 20.0 at token 7 of the last.
+        let mut bits = vec![0u16; 2 * vocab];
+        bits[0] = 0x4248;
+        bits[vocab + 7] = 0x41a0;
+        let bytes: &[u8] = bytemuck::cast_slice(&bits);
+        let logits =
+            Tensor::<CpuRuntime>::from_bytes(bytes, &[1, 2, vocab], DType::BF16, exec.device())?;
+        let asked = GenerationConfig {
+            logprobs: true,
+            top_logprobs: 2,
+            ..GenerationConfig::default()
+        };
+
+        let (lp, top) = exec.token_logprobs(&logits, 7, &asked)?;
+        let (want_lp, want_top) = exec.token_logprobs(&two_positions(&exec, 7)?, 7, &asked)?;
+        assert_eq!(lp, want_lp);
+        let ids = |t: Option<Vec<TokenLogprob>>| -> Vec<u32> {
+            t.unwrap_or_default().iter().map(|t| t.token_id).collect()
+        };
+        assert_eq!(ids(top), ids(want_top));
+        Ok(())
     }
 }

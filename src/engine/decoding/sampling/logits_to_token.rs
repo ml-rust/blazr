@@ -13,6 +13,7 @@ use boostr::{
 use crate::config::GenerationConfig;
 
 use crate::engine::executor::Executor;
+use crate::engine::host_read::last_logits_row;
 
 /// Logits ready to sample, and what `logits_to_token[_into]` samples them
 /// with: the penalty-window tensors, how many unique tokens they carry, and
@@ -124,21 +125,18 @@ where
         // Apply CPU-side penalties (DRY, typical) if enabled — these still need CPU
         let needs_cpu = gen_config.dry_multiplier > 0.0 || gen_config.typical_p > 0.0;
         let logits = if needs_cpu {
-            let shape = logits.shape();
-            let seq_len = shape[1];
-            let vocab_size = shape[2];
-            let mut all_logits: Vec<f32> = logits.to_vec();
-            let offset = (seq_len - 1) * vocab_size;
-            let last_logits = &mut all_logits[offset..offset + vocab_size];
+            // Only the sampled position matters, so only its row copies.
+            let mut last_logits = last_logits_row(logits)?;
+            let vocab_size = last_logits.len();
 
             if gen_config.dry_multiplier > 0.0 {
-                Self::apply_dry_penalty(last_logits, recent_tokens, gen_config);
+                Self::apply_dry_penalty(&mut last_logits, recent_tokens, gen_config);
             }
             if gen_config.typical_p > 0.0 {
-                Self::apply_typical_filter(last_logits, gen_config.typical_p);
+                Self::apply_typical_filter(&mut last_logits, gen_config.typical_p);
             }
 
-            Tensor::from_slice(&all_logits, shape, logits.device())?
+            Tensor::from_slice(&last_logits, &[1, 1, vocab_size], logits.device())?
         } else {
             logits.clone()
         };
@@ -168,7 +166,7 @@ where
         let temperature = if gen_config.is_greedy() {
             0.0
         } else if gen_config.dynatemp_range > 0.0 {
-            self.compute_dynamic_temperature(&logits, gen_config)
+            self.compute_dynamic_temperature(&logits, gen_config)?
         } else {
             gen_config.temperature
         };
@@ -196,6 +194,10 @@ where
             }
         }
         let bias_tensor = Tensor::from_slice(&bias_vec, &[1, 1, vocab_size], self.device())?;
+        // Half-precision logits take the bias in their own dtype.
+        let bias_tensor = R::default_client(self.device())
+            .cast(&bias_tensor, logits.dtype())
+            .map_err(|e| anyhow!("casting logit_bias to {:?} failed: {e}", logits.dtype()))?;
         logits
             .add(&bias_tensor)
             .map_err(|e| anyhow!("logit_bias add failed: {}", e))

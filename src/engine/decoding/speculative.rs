@@ -16,6 +16,7 @@ use boostr::{
 };
 
 use crate::config::parse_dtype;
+use crate::engine::host_read::last_logits_row;
 
 /// Adapter wrapping a LoadedModel to implement SpeculativeModel
 pub struct BlazrSpeculativeModel<R: Runtime<DType = DType>> {
@@ -124,13 +125,8 @@ where
 
         self.position = position + input_tokens.len();
 
-        // Extract last position logits
-        let shape = logits.shape();
-        let seq_len = shape[1];
-        let vocab_size = shape[2];
-        let all: Vec<f32> = logits.to_vec();
-        let offset = (seq_len - 1) * vocab_size;
-        Ok(all[offset..offset + vocab_size].to_vec())
+        // Only the last position's row copies to the host, as f32.
+        last_logits_row(&logits)
     }
 
     fn vocab_size(&self) -> usize {

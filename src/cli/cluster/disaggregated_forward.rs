@@ -13,6 +13,7 @@ use crate::distributed::disaggregated::DisaggRouter;
 use crate::distributed::disaggregated::{DecodeStepFn, PrefillFn};
 use crate::distributed::kv_serialize;
 
+use crate::engine::host_read::{last_logits_row, to_host_f32};
 use crate::runtime::ServerRuntime;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,7 +151,7 @@ fn run_prefill_forward(
     // Activation: final hidden state serialised as raw f32 bytes.
     // The decode worker doesn't strictly need this (it uses the KV cache),
     // but we return it for completeness / future use.
-    let hidden_f32: Vec<f32> = hidden_out.tensor().to_vec();
+    let hidden_f32 = to_host_f32(hidden_out.tensor())?;
     let activation_bytes = bytemuck::cast_slice::<f32, u8>(&hidden_f32).to_vec();
 
     Ok((activation_bytes, kv_bytes))
@@ -215,17 +216,9 @@ fn run_decode_step(
     let logits = model.forward_head(hidden_out, None)?;
 
     // Greedy argmax over the last token position.
-    let logits_f32: Vec<f32> = logits.to_vec::<f32>();
-    let vocab_size = model.vocab_size();
+    let last_logits = last_logits_row(&logits)?;
 
-    // Logits shape: [batch=1, seq=1, vocab_size] — last `vocab_size` elements.
-    let logit_slice = if logits_f32.len() >= vocab_size {
-        &logits_f32[logits_f32.len() - vocab_size..]
-    } else {
-        &logits_f32[..]
-    };
-
-    let next_token = logit_slice
+    let next_token = last_logits
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))

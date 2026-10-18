@@ -14,6 +14,7 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
+- **Logprobs on GPU** — `logprobs` requests no longer crash the server on half-precision GPU logits. The last logits row casts to F32 on the device before its host copy. Dynamic temperature, DRY, typical sampling, speculative decoding and the swarm and disaggregated stages read their logits and activations the same way. `logit_bias` now applies to BF16 and F16 logits.
 - **Constrained output** — `grammar`, `response_format` `json_schema` and `json_object`, and `/v1/responses` `text.format` now constrain the output. Before, most grammars and every schema decoded unconstrained. boostr compiles each one to a DFA that masks the logits on the device. Schema properties come out in declared order.
 - **Invalid grammars** — a grammar or schema that does not compile now fails the request with a `400` that names the error and its position. Before, the request ran unconstrained. A schema keyword a grammar cannot enforce, such as `minimum`, is a `400` too.
 - **Grammar end** — generation now ends by EOS when the output completes the grammar. EOS is allowed only then, so a constrained run never stops early and never runs past the grammar's end.

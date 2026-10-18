@@ -1,6 +1,8 @@
 //! Host-side logit shaping: dynamic temperature from entropy, the
 //! penalty window, the DRY penalty and the typical filter.
 
+use anyhow::Result;
+
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -11,6 +13,7 @@ use boostr::{
 use crate::config::GenerationConfig;
 
 use crate::engine::executor::Executor;
+use crate::engine::host_read::last_logits_row;
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -32,17 +35,14 @@ where
     /// Maps entropy to a temperature in [base - range, base + range].
     /// Low entropy (model is confident) → lower temperature.
     /// High entropy (model is uncertain) → higher temperature.
+    /// Only the last position's row copies to the host, as `f32`.
     pub(crate) fn compute_dynamic_temperature(
         &self,
         logits: &Tensor<R>,
         gen_config: &GenerationConfig,
-    ) -> f32 {
-        let shape = logits.shape();
-        let seq_len = shape[1];
-        let vocab_size = shape[2];
-        let all_logits: Vec<f32> = logits.to_vec();
-        let offset = (seq_len - 1) * vocab_size;
-        let last_logits = &all_logits[offset..offset + vocab_size];
+    ) -> Result<f32> {
+        let last_logits = last_logits_row(logits)?;
+        let vocab_size = last_logits.len();
 
         // Compute softmax and entropy
         let max_logit = last_logits
@@ -76,7 +76,7 @@ where
         let base = gen_config.temperature;
         let range = gen_config.dynatemp_range;
         let dynamic_temp = base - range + 2.0 * range * mapped;
-        dynamic_temp.max(0.01) // floor to prevent division by zero
+        Ok(dynamic_temp.max(0.01)) // floor to prevent division by zero
     }
 
     /// Compute unique token IDs and counts from the penalty window, returning
@@ -107,7 +107,7 @@ where
 
     /// Apply DRY (Don't Repeat Yourself) penalty to logits.
     ///
-    /// Scans token history for n-gram patterns that could be extended by the next token.
+    /// Scans token history for n-gram patterns that the next token can extend.
     /// For each such token, subtracts `multiplier * match_length` from its logit.
     pub(crate) fn apply_dry_penalty(
         logits_vec: &mut [f32],

@@ -1,4 +1,4 @@
-//! Non-streaming text generation with JSON retry support.
+//! Non-streaming text generation, plus the speculative decoding path.
 
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
@@ -16,7 +16,7 @@ use crate::engine::StopMatcher;
 use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
-use super::types::{is_valid_json, FinishReason, GeneratedToken, GenerationResult};
+use super::types::{FinishReason, GeneratedToken, GenerationResult};
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -45,26 +45,15 @@ where
         prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
     ) -> Result<GenerationResult> {
-        // Use speculative decoding if configured
-        if self.config().inference.speculative.is_some() {
+        // The speculative path runs no sampler and applies no grammar mask,
+        // so a constrained request decodes through the sampler loop.
+        if self.config().inference.speculative.is_some() && gen_config.constraint.is_none() {
             return self
                 .generate_text_speculative(prompt_tokens, gen_config)
                 .await;
         }
-
-        let max_attempts = if gen_config.json_mode { 3 } else { 1 };
-        for attempt in 0..max_attempts {
-            let result = self.generate_text_once(prompt_tokens, gen_config).await?;
-            if !gen_config.json_mode || is_valid_json(&result.text) {
-                return Ok(result);
-            }
-            tracing::warn!(
-                "JSON mode: attempt {}/{} produced invalid JSON, retrying",
-                attempt + 1,
-                max_attempts
-            );
-        }
-        self.generate_text_once(prompt_tokens, gen_config).await
+        let stream = self.generate(prompt_tokens, gen_config);
+        collect_generation(stream, prompt_tokens.len(), gen_config).await
     }
 
     /// Speculative decoding path: uses draft model for fast speculation, target for verification.
@@ -150,16 +139,6 @@ where
             prompt_eval_duration_ms,
             token_logprobs: None,
         })
-    }
-
-    /// Single generation attempt (used by generate_text for JSON retry)
-    async fn generate_text_once(
-        &self,
-        prompt_tokens: &[u32],
-        gen_config: &GenerationConfig,
-    ) -> Result<GenerationResult> {
-        let stream = self.generate(prompt_tokens, gen_config);
-        collect_generation(stream, prompt_tokens.len(), gen_config).await
     }
 }
 

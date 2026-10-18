@@ -10,10 +10,11 @@ use crate::config::GenerationConfig;
 use crate::server::metrics;
 
 // Re-export types and utilities from gen_types so callers import from one place.
+pub use super::constraint_admission::admit_constraint;
 pub use super::gen_types::{
     apply_keep_alive, chat_prompt_error_response, convert_logprobs, encode_with_allowed_special,
     error_response, error_response_with_code, overloaded_response, policy_error_response,
-    validate_generation_params, LogprobResult, ResponseFormat, Usage,
+    resolve_constraint, validate_generation_params, LogprobResult, ResponseFormat, Usage,
 };
 pub use super::stop_stream::{
     stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
@@ -37,7 +38,6 @@ pub struct SamplingParams {
     pub logit_bias: Option<HashMap<String, f32>>,
     pub logprobs: Option<bool>,
     pub top_logprobs: Option<usize>,
-    pub json_mode: bool,
     pub mirostat_mode: Option<u8>,
     pub mirostat_tau: Option<f32>,
     pub mirostat_eta: Option<f32>,
@@ -48,7 +48,6 @@ pub struct SamplingParams {
     pub dry_allowed_length: Option<usize>,
     pub dry_sequence_breakers: Option<Vec<String>>,
     pub typical_p: Option<f32>,
-    pub grammar: Option<String>,
     /// The request's `lora_adapter`. The handler already chose the variant
     /// executor from it; the generation config only carries it.
     pub lora_adapter: Option<String>,
@@ -80,7 +79,6 @@ impl SamplingParams {
             logit_bias,
             logprobs: self.logprobs.unwrap_or(d.logprobs),
             top_logprobs: self.top_logprobs.unwrap_or(d.top_logprobs).min(20),
-            json_mode: self.json_mode || d.json_mode,
             mirostat_mode: self.mirostat_mode.unwrap_or(d.mirostat_mode),
             mirostat_tau: self.mirostat_tau.unwrap_or(d.mirostat_tau),
             mirostat_eta: self.mirostat_eta.unwrap_or(d.mirostat_eta),
@@ -93,7 +91,9 @@ impl SamplingParams {
                 .dry_sequence_breakers
                 .unwrap_or(d.dry_sequence_breakers),
             typical_p: self.typical_p.unwrap_or(d.typical_p),
-            grammar: self.grammar.or(d.grammar),
+            // The handler resolves the request's constraint at admission.
+            constraint: d.constraint,
+            compiled: None,
             lora_adapter: self.lora_adapter.or(d.lora_adapter),
             repeat_last_n: d.repeat_last_n,
             verbose_prompt: d.verbose_prompt,
@@ -171,7 +171,6 @@ mod tests {
             logit_bias: None,
             logprobs: None,
             top_logprobs: None,
-            json_mode: false,
             mirostat_mode: None,
             mirostat_tau: None,
             mirostat_eta: None,
@@ -182,7 +181,6 @@ mod tests {
             dry_allowed_length: None,
             dry_sequence_breakers: None,
             typical_p: None,
-            grammar: None,
             lora_adapter: None,
         }
     }

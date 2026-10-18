@@ -120,7 +120,7 @@ Completions and chat accept these fields. Infill accepts a subset.
 | `dry_base`              | integer          | `2`     | DRY base.                                                                     |
 | `dry_allowed_length`    | integer          | `0`     | DRY allowed repeat length.                                                    |
 | `dry_sequence_breakers` | array of strings | none    | DRY sequence breakers.                                                        |
-| `grammar`               | string           | none    | GBNF grammar that constrains output.                                          |
+| `grammar`               | string           | none    | GBNF grammar that constrains output. An empty string sets none.               |
 | `response_format`       | object           | none    | Structured output. See [Structured output](#structured-output).               |
 | `keep_alive`            | string           | none    | Time the model stays loaded after the request. See [keep_alive](#keep_alive). |
 | `lora_adapter`          | string           | none    | Registered adapter of `model`: runs on the variant `<model>:<name>`. See [LoRA adapters](#lora-adapters). |
@@ -132,14 +132,19 @@ Each field the request omits takes its value from the `generation` section of `~
 
 `response_format` takes one of these types.
 
-| `type`        | Effect                                                                |
-| ------------- | --------------------------------------------------------------------- |
-| `text`        | Default. No constraint.                                               |
-| `json_object` | Enables JSON mode.                                                    |
-| `json_schema` | Converts `json_schema` to a GBNF grammar and constrains output to it. |
+| `type`        | Effect                                                                                  |
+| ------------- | --------------------------------------------------------------------------------------- |
+| `text`        | Default. No constraint.                                                                 |
+| `json_object` | Constrains output to one JSON object.                                                   |
+| `json_schema` | Constrains output to JSON valid for the schema. Takes `{name, schema, strict}` or the schema itself. |
 
-- An explicit `grammar` field takes priority over `response_format`.
-- A `json_schema` that fails conversion applies no grammar. The request does not fail.
+- Object properties come out in the order the schema declares them.
+- `grammar` beside a `response_format` other than `text` is a `400`.
+- A grammar or schema that does not compile is a `400` that names the error and its position.
+- A schema keyword a grammar cannot enforce, such as `minimum` or `pattern`, is a `400`.
+- Generation ends by EOS once the output completes the grammar, or at `max_tokens`.
+- A constrained request decodes through the sampler: speculative decoding and CUDA graph replay do not run for it.
+- `/v1/responses` takes the same constraints from `text.format`.
 
 ### keep_alive
 

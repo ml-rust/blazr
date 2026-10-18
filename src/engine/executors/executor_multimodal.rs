@@ -18,12 +18,10 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
-use crate::tokenizer::TokenTextStream;
 
 use super::types::{FinishReason, GeneratedToken};
 
 use super::executor::Executor;
-use super::sampler_step::SamplerState;
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -297,14 +295,8 @@ where
             tracing::info!(phase = "prefill_end", backend = "multimodal");
 
             // ── Autoregressive decode (text-only, same as regular generate) ──
-            // This path applies no grammar, so the sampler carries no DFA.
-            let mut sampler = SamplerState {
-                token_history: prompt_tokens.to_vec(),
-                mirostat: Self::mirostat_state(gen_config),
-                grammar_dfa: None,
-                device_grammar: None,
-                text: TokenTextStream::new(self.tokenizer(), prompt_tokens),
-            };
+            // The sampler applies the request's grammar, as the text path does.
+            let mut sampler = self.sampler_state(prompt_tokens, gen_config)?;
 
             tracing::info!(phase = "decode_start", backend = "multimodal", max_tokens = max_tokens);
             for i in 0..max_tokens {

@@ -181,12 +181,16 @@ fn test_logprobs_config() {
 }
 
 #[test]
-fn test_json_mode_config() {
+fn test_json_object_constraint_config() {
     let config = blazr::GenerationConfig {
-        json_mode: true,
+        constraint: Some(blazr::config::Constraint::JsonObject),
         ..Default::default()
     };
-    assert!(config.json_mode);
+    assert_eq!(
+        config.constraint,
+        Some(blazr::config::Constraint::JsonObject)
+    );
+    assert!(config.compiled.is_none());
 }
 
 #[test]

@@ -64,9 +64,3 @@ pub struct GenerationResult {
     /// Per-token logprobs (when logprobs enabled)
     pub token_logprobs: Option<Vec<GeneratedToken>>,
 }
-
-/// Check if a string is valid JSON (object or array)
-pub fn is_valid_json(s: &str) -> bool {
-    let trimmed = s.trim();
-    serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
-}

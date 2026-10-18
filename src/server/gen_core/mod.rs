@@ -1,5 +1,6 @@
 //! Generation plumbing shared by the endpoints: sampling fields, streaming, reasoning.
 
+pub(super) mod constraint_admission;
 pub(super) mod gen_types;
 pub(super) mod generation;
 pub(super) mod reasoning;

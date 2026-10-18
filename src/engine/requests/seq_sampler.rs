@@ -30,7 +30,7 @@ use crate::engine::sampler_step::SamplerState;
 struct BatchSeq<R: Runtime<DType = DType>> {
     /// The config the request was submitted with.
     gen_config: GenerationConfig,
-    /// History, mirostat state and grammar DFAs, as the single-sequence loop
+    /// History, mirostat state and grammar state, as the single-sequence loop
     /// carries them.
     sampler: SamplerState<R>,
     /// The scheduler freed this sequence's KV blocks. The next decode must
@@ -138,12 +138,12 @@ where
 {
     /// Start `seq_id`'s state from its prompt and its request's config.
     ///
-    /// The history starts as the prompt and the grammar compiles here, as
-    /// the single-sequence loop does it.
+    /// The history starts as the prompt. The grammar state starts from the
+    /// DFA admission compiled, as the single-sequence loop does it.
     ///
     /// # Errors
     ///
-    /// An error when the device grammar upload fails.
+    /// An error when the constraint does not compile or does not upload.
     pub(in crate::engine) fn begin(
         &mut self,
         executor: &Executor<R>,

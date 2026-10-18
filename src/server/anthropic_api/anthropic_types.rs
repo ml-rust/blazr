@@ -106,7 +106,6 @@ impl HasSamplingFields for AnthropicRequest {
             logit_bias: None,
             logprobs: None,
             top_logprobs: None,
-            json_mode: false,
             mirostat_mode: None,
             mirostat_tau: None,
             mirostat_eta: None,
@@ -117,7 +116,6 @@ impl HasSamplingFields for AnthropicRequest {
             dry_allowed_length: None,
             dry_sequence_breakers: None,
             typical_p: None,
-            grammar: None,
             lora_adapter: None,
         }
     }

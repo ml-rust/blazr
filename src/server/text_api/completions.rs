@@ -12,10 +12,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::server::generation::{
-    apply_keep_alive, convert_logprobs, decode_context_prefix, encode_with_allowed_special,
-    error_response, overloaded_response, policy_error_response, record_generation_metrics,
-    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, LogprobResult,
-    ResponseFormat, SamplingParams, Usage,
+    admit_constraint, apply_keep_alive, convert_logprobs, decode_context_prefix,
+    encode_with_allowed_special, error_response, overloaded_response, policy_error_response,
+    record_generation_metrics, resolve_constraint, stream_with_stop_sequences,
+    validate_generation_params, HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams,
+    Usage,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
 use crate::server::scheduled::generate_text_routed;
@@ -52,9 +53,14 @@ pub async fn completions(
         }
     };
 
-    let gen_config = request
+    let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
+    let requested =
+        resolve_constraint(request.grammar.as_deref(), request.response_format.as_ref());
+    if let Err(e) = admit_constraint(&state, &mut gen_config, requested).await {
+        return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
+    }
 
     // The prompt is encoded here, once, and these are the ids that reach the
     // model. Nothing in the caller's text becomes a control token unless the
@@ -295,10 +301,6 @@ impl HasSamplingFields for CompletionRequest {
             logit_bias: self.logit_bias.clone(),
             logprobs: self.logprobs,
             top_logprobs: self.top_logprobs,
-            json_mode: self
-                .response_format
-                .as_ref()
-                .is_some_and(|rf| rf.r#type == "json_object"),
             mirostat_mode: self.mirostat,
             mirostat_tau: self.mirostat_tau,
             mirostat_eta: self.mirostat_eta,
@@ -309,25 +311,8 @@ impl HasSamplingFields for CompletionRequest {
             dry_allowed_length: self.dry_allowed_length,
             dry_sequence_breakers: self.dry_sequence_breakers.clone(),
             typical_p: self.typical_p,
-            grammar: self.effective_grammar(),
             lora_adapter: self.lora_adapter.clone(),
         }
-    }
-}
-
-impl CompletionRequest {
-    fn effective_grammar(&self) -> Option<String> {
-        if self.grammar.is_some() {
-            return self.grammar.clone();
-        }
-        if let Some(ref rf) = self.response_format {
-            if rf.r#type == "json_schema" {
-                if let Some(ref schema) = rf.json_schema {
-                    return crate::engine::grammar::json_schema_to_gbnf(schema).ok();
-                }
-            }
-        }
-        None
     }
 }
 

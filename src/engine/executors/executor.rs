@@ -66,6 +66,8 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) draft_model: std::sync::Mutex<Option<Arc<LoadedModel<R>>>>,
     /// Vision tower for image inputs, loaded from `inference.mmproj`.
     pub(crate) vision_tower: Option<Arc<VisionTower<R>>>,
+    /// The bytes of every model token id, built on the first constrained request.
+    pub(crate) grammar_vocab: std::sync::OnceLock<boostr::inference::grammar::VocabBytes>,
     /// Tensor parallelism state (CUDA only; present when tp_size > 1)
     #[cfg(feature = "cuda")]
     pub(crate) tp_state: Option<crate::engine::tensor_parallel::TensorParallelState>,
@@ -239,6 +241,7 @@ where
             model_dir: None,
             draft_model: std::sync::Mutex::new(None),
             vision_tower: None,
+            grammar_vocab: std::sync::OnceLock::new(),
             #[cfg(feature = "cuda")]
             tp_state: None,
             #[cfg(feature = "cuda")]

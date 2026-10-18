@@ -14,12 +14,29 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
-- **Grammar parser** — a `grammar` containing an unsupported character (such as a parenthesis) no longer hangs the server. The request fails with an error that names the character.
+- **Constrained output** — `grammar`, `response_format` `json_schema` and `json_object`, and `/v1/responses` `text.format` now constrain the output. Before, most grammars and every schema decoded unconstrained. boostr compiles each one to a DFA that masks the logits on the device. Schema properties come out in declared order.
+- **Invalid grammars** — a grammar or schema that does not compile now fails the request with a `400` that names the error and its position. Before, the request ran unconstrained. A schema keyword a grammar cannot enforce, such as `minimum`, is a `400` too.
+- **Grammar end** — generation now ends by EOS when the output completes the grammar. EOS is allowed only then, so a constrained run never stops early and never runs past the grammar's end.
+- **Mirostat with a grammar** — mirostat now samples from the grammar-masked logits.
+- **Multimodal grammar** — a request with images or audio now applies its constraint.
+- **Grammar parser** — a `grammar` containing an unsupported character no longer hangs the server. The request fails with a `400` that names the position.
 - **Batched sampling** — with batching on, `grammar`, `json_schema` and mirostat now apply to batched requests (previously ignored). Each batched sequence keeps its own sampler state, the one the single-sequence loop uses, so its penalty history and seed match an unbatched run.
 - **Batched preemption** — a sequence the scheduler preempts now recomputes its KV cache when it resumes. It used to decode over freed blocks. Its grammar and mirostat state survive the preemption.
 - **Batched first token** — a request that ends on its first token no longer fails the batch it shares. A failed batch now streams an error to each of its requests instead of closing their streams with no finish.
 - **Stop sequences** — a stop sequence split across tokens no longer leaks into the stream, and a stop sequence inside a token now ends the non-streaming text there. One `StopMatcher` serves the streaming and non-streaming paths, including multimodal text.
 - **Token budget leak** — the token budget no longer leaks when a request times out or the client disconnects. Admission returns a `BudgetPermit` that releases its tokens in `Drop`; a streaming response owns the permit until the stream ends or the client leaves. The `blazr_active_decode_slots` and `blazr_requests_active` gauges use the same guard, and `/v1/infill` no longer decrements the decode-slot gauge twice.
+
+### Changed
+
+- **`json_object` mode** — `response_format` `json_object` now constrains the output to one JSON object. It no longer generates up to three times until the text parses.
+- **`grammar` beside `response_format`** — a request that sets both, with a `response_format` other than `text`, is now a `400`. Before, `grammar` won. An empty `grammar` sets no constraint.
+- **Constrained requests skip speculative decoding** — a constrained request decodes through the sampler, because the speculative path applies no mask. `run --graphs` decodes eagerly with a grammar.
+- **Compile cache** — the server keeps up to 64 compiled DFAs, at most 256 MiB, and evicts the least recently used. A request compiles its constraint once, at admission, off the async runtime.
+- **Config `generation.grammar`** — GBNF text works as before. The key also takes `{json_schema: <schema>}` and `{json_object: true}`.
+
+### Removed
+
+- **`generation.json_mode`** — the config key is gone and now warns as unknown. Set `generation.grammar: {json_object: true}` instead.
 
 ---
 

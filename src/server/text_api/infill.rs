@@ -17,7 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::server::generation::{
-    apply_keep_alive, error_response, overloaded_response, policy_error_response,
+    admit_constraint, apply_keep_alive, error_response, overloaded_response, policy_error_response,
     record_generation_metrics, stream_with_stop_sequences, validate_generation_params,
     HasSamplingFields, SamplingParams, Usage,
 };
@@ -102,9 +102,13 @@ pub async fn infill(
         }
     };
 
-    let gen_config = request
+    // Infill takes no constraint of its own. A `generation.grammar` default compiles here.
+    let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
+    if let Err(e) = admit_constraint(&state, &mut gen_config, Ok(None)).await {
+        return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
+    }
 
     // Token budget admission control. The single encode of the assembled prompt
     // doubles as the gate: only the FIM markers this endpoint inserted are
@@ -239,7 +243,6 @@ impl HasSamplingFields for InfillRequest {
             logit_bias: None,
             logprobs: None,
             top_logprobs: None,
-            json_mode: false,
             mirostat_mode: None,
             mirostat_tau: None,
             mirostat_eta: None,
@@ -250,7 +253,6 @@ impl HasSamplingFields for InfillRequest {
             dry_allowed_length: None,
             dry_sequence_breakers: None,
             typical_p: None,
-            grammar: None,
             lora_adapter: None,
         }
     }

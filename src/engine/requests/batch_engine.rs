@@ -490,8 +490,12 @@ mod tests {
     use boostr::CpuRuntime;
     use futures::StreamExt;
 
+    use crate::config::Constraint;
     use crate::engine::requests::request_registry::RequestHandle;
-    use crate::engine::test_support::{seeded_executor, PagedPool};
+    use crate::engine::test_support::{
+        check_two_field_instance, full_vocab_executor, seeded_executor, two_field_bias,
+        two_field_schema, PagedPool, FULL_VOCAB_CTX,
+    };
     use crate::engine::types::GeneratedToken;
     use crate::tokenizer::token_piece_bytes;
 
@@ -504,10 +508,7 @@ mod tests {
         blocks: 16,
     };
     /// One digit from each pair, so the model picks within the grammar.
-    ///
-    /// The DFA builder expands only the `root` rule, with literals and
-    /// character classes. A rule reference matches any ASCII byte.
-    const THREE_DIGITS: &str = "root ::= [12] [34] [56]";
+    const THREE_DIGITS: &str = r#"root ::= ("1" | "2") ("3" | "4") ("5" | "6")"#;
 
     struct Rig {
         executor: Arc<Executor<CpuRuntime>>,
@@ -517,11 +518,17 @@ mod tests {
 
     /// A batching engine over the seeded tiny llama, admitting two sequences.
     fn rig(pool: PagedPool) -> Result<Rig> {
-        let executor = Arc::new(seeded_executor(SEED, Some(pool))?);
+        rig_on(seeded_executor(SEED, Some(pool))?, pool, 16)
+    }
+
+    /// A batching engine over `executor`, admitting two sequences of up to
+    /// `max_seq_len` tokens.
+    fn rig_on(executor: Executor<CpuRuntime>, pool: PagedPool, max_seq_len: usize) -> Result<Rig> {
+        let executor = Arc::new(executor);
         let config = SchedulerConfig {
             max_batch_size: 2,
             max_batch_tokens: 4096,
-            max_seq_len: 16,
+            max_seq_len,
             block_size: pool.block_size,
             ..Default::default()
         };
@@ -546,7 +553,7 @@ mod tests {
 
     fn grammar(rule: &str, max_tokens: usize) -> GenerationConfig {
         GenerationConfig {
-            grammar: Some(rule.to_string()),
+            constraint: Some(Constraint::Gbnf(rule.to_string())),
             ..greedy(max_tokens)
         }
     }
@@ -762,7 +769,7 @@ mod tests {
             block_size: 4,
             blocks: 3,
         })?;
-        let rule = "root ::= [12] [34] [56] [78]";
+        let rule = r#"root ::= ("1" | "2") ("3" | "4") ("5" | "6") ("7" | "8")"#;
         let (short, long) = ([1, 2, 3], [4, 5, 6]);
         let (short_cfg, long_cfg) = (greedy(2), grammar(rule, 4));
         let short_alone = alone(&rig.executor, &short, &short_cfg).await?;
@@ -790,6 +797,32 @@ mod tests {
             one_of_each(&produced, &[['1', '2'], ['3', '4'], ['5', '6'], ['7', '8']]),
             "the grammar state did not survive preemption: {produced:?}"
         );
+        assert_eq!(rig.engine.seqs.len(), 0);
+        Ok(())
+    }
+
+    /// A JSON-schema row produces its unbatched ids, a valid instance, and
+    /// ends by EOS once the object closes.
+    #[tokio::test]
+    async fn a_json_schema_row_matches_its_unbatched_run_and_ends_by_eos() -> Result<()> {
+        let mut rig = rig_on(full_vocab_executor(Some(POOL))?, POOL, FULL_VOCAB_CTX)?;
+        let cfg = GenerationConfig {
+            constraint: Some(Constraint::JsonSchema(two_field_schema())),
+            logit_bias: two_field_bias(&rig.executor)?,
+            ..greedy(40)
+        };
+        let prompt = [1];
+        let expected = alone(&rig.executor, &prompt, &cfg).await?;
+
+        let mut handle = rig.scheduler.submit(prompt.to_vec(), cfg)?;
+        drain(&mut rig).await?;
+        let got = ids(&mut handle)?;
+
+        assert_eq!(got, expected);
+        let eos = rig.executor.tokenizer().eos_token_id();
+        assert_eq!(got.last().copied(), eos, "the run ends by EOS");
+        let body = &got[..got.len().saturating_sub(1)];
+        check_two_field_instance(&text(&rig.executor, body))?;
         assert_eq!(rig.engine.seqs.len(), 0);
         Ok(())
     }

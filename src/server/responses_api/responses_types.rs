@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ReasoningFormat;
+use boostr::inference::grammar::json_schema::unwrap_response_format;
+
+use crate::config::{Constraint, ReasoningFormat};
 use crate::server::reasoning::split_reasoning_for_format;
 
 /// OpenAI Responses API request
@@ -28,9 +30,8 @@ pub struct ResponsesRequest {
     /// Instructions (system prompt)
     #[serde(default)]
     pub instructions: Option<String>,
-    /// Text response format
+    /// Text response format: `text.format` constrains the output.
     #[serde(default)]
-    #[allow(dead_code)]
     pub text: Option<TextFormat>,
     /// Stop sequences
     #[serde(default)]
@@ -112,7 +113,6 @@ fn default_effort() -> String {
 pub struct TextFormat {
     /// "text" or "json_object" or "json_schema"
     #[serde(default = "default_text_format")]
-    #[allow(dead_code)]
     pub format: TextFormatType,
 }
 
@@ -124,10 +124,27 @@ pub enum TextFormatType {
     #[serde(rename = "json_object")]
     JsonObject,
     #[serde(rename = "json_schema")]
-    JsonSchema {
-        #[allow(dead_code)]
-        schema: Option<serde_json::Value>,
-    },
+    JsonSchema { schema: Option<serde_json::Value> },
+}
+
+impl ResponsesRequest {
+    /// The constraint `text.format` asks for.
+    ///
+    /// An error string is a request error: the handler answers 400 with it.
+    pub fn constraint(&self) -> Result<Option<Constraint>, String> {
+        match self.text.as_ref().map(|text| &text.format) {
+            None | Some(TextFormatType::Text) => Ok(None),
+            Some(TextFormatType::JsonObject) => Ok(Some(Constraint::JsonObject)),
+            Some(TextFormatType::JsonSchema {
+                schema: Some(schema),
+            }) => Ok(Some(Constraint::JsonSchema(
+                unwrap_response_format(schema).clone(),
+            ))),
+            Some(TextFormatType::JsonSchema { schema: None }) => {
+                Err("text.format type json_schema has no schema member. Add the schema".to_string())
+            }
+        }
+    }
 }
 
 fn default_text_format() -> TextFormatType {
@@ -357,5 +374,31 @@ mod tests {
             }
             _ => panic!("expected items"),
         }
+    }
+
+    fn with_text(text: &str) -> ResponsesRequest {
+        let json = format!(r#"{{"model": "test", "input": "Hi", "text": {text}}}"#);
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn text_format_maps_to_a_constraint() {
+        let plain: ResponsesRequest =
+            serde_json::from_str(r#"{"model": "test", "input": "Hi"}"#).unwrap();
+        assert_eq!(plain.constraint(), Ok(None));
+        let object = with_text(r#"{"format": {"type": "json_object"}}"#);
+        assert_eq!(object.constraint(), Ok(Some(Constraint::JsonObject)));
+        let schema = with_text(
+            r#"{"format": {"type": "json_schema", "name": "n", "strict": true,
+                "schema": {"type": "integer"}}}"#,
+        );
+        assert_eq!(
+            schema.constraint(),
+            Ok(Some(Constraint::JsonSchema(
+                serde_json::json!({"type": "integer"})
+            )))
+        );
+        let missing = with_text(r#"{"format": {"type": "json_schema"}}"#);
+        assert!(missing.constraint().is_err());
     }
 }

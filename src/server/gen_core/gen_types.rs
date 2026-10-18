@@ -7,8 +7,10 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use boostr::inference::grammar::json_schema::unwrap_response_format;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Constraint;
 use crate::engine::{parse_keep_alive, GeneratedToken};
 use crate::server::handlers::AppState;
 
@@ -49,6 +51,50 @@ pub fn validate_generation_params(
         }
     }
     Ok(())
+}
+
+/// The constraint a request's `grammar` and `response_format` ask for.
+///
+/// - An empty `grammar` sets no constraint.
+/// - `json_object` is any JSON object. `json_schema` is its schema, with an
+///   OpenAI `{name, schema, strict}` wrapper removed.
+/// - `grammar` beside a `response_format` other than `text` is an error.
+///
+/// An error string is a request error: the handler answers 400 with it.
+pub fn resolve_constraint(
+    grammar: Option<&str>,
+    response_format: Option<&ResponseFormat>,
+) -> Result<Option<Constraint>, String> {
+    let from_format = match response_format {
+        None => None,
+        Some(rf) => match rf.r#type.as_str() {
+            "text" => None,
+            "json_object" => Some(Constraint::JsonObject),
+            "json_schema" => {
+                let schema = rf.json_schema.as_ref().ok_or_else(|| {
+                    "response_format type json_schema has no json_schema member. Add the schema"
+                        .to_string()
+                })?;
+                Some(Constraint::JsonSchema(
+                    unwrap_response_format(schema).clone(),
+                ))
+            }
+            other => {
+                return Err(format!(
+                    "response_format type {other:?} is not supported. Use text, json_object or \
+                     json_schema"
+                ))
+            }
+        },
+    };
+    let grammar = grammar.filter(|text| !text.trim().is_empty());
+    match (grammar, from_format) {
+        (Some(_), Some(_)) => Err(
+            "grammar and response_format both constrain the output. Set one of them".to_string(),
+        ),
+        (Some(text), None) => Ok(Some(Constraint::Gbnf(text.to_string()))),
+        (None, from_format) => Ok(from_format),
+    }
 }
 
 /// Return a 503 Service Unavailable response with Retry-After header
@@ -247,6 +293,51 @@ mod tests {
     fn eot(tok: &splintr::AnyTokenizer) -> u32 {
         tok.special_token_id("<|eot_id|>")
             .expect("llama3 names an end-of-turn token")
+    }
+
+    fn format(kind: &str, json_schema: Option<serde_json::Value>) -> ResponseFormat {
+        ResponseFormat {
+            r#type: kind.to_string(),
+            json_schema,
+        }
+    }
+
+    #[test]
+    fn resolve_constraint_maps_each_request_form() {
+        assert_eq!(resolve_constraint(None, None), Ok(None));
+        assert_eq!(resolve_constraint(Some("  "), None), Ok(None));
+        assert_eq!(
+            resolve_constraint(None, Some(&format("text", None))),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_constraint(Some(r#"root ::= "a""#), Some(&format("text", None))),
+            Ok(Some(Constraint::Gbnf(r#"root ::= "a""#.to_string())))
+        );
+        assert_eq!(
+            resolve_constraint(None, Some(&format("json_object", None))),
+            Ok(Some(Constraint::JsonObject))
+        );
+        let schema = serde_json::json!({"type": "object", "properties": {"b": {}, "a": {}}});
+        let wrapper = serde_json::json!({"name": "answer", "schema": schema, "strict": true});
+        assert_eq!(
+            resolve_constraint(None, Some(&format("json_schema", Some(wrapper)))),
+            Ok(Some(Constraint::JsonSchema(schema.clone())))
+        );
+        assert_eq!(
+            resolve_constraint(None, Some(&format("json_schema", Some(schema.clone())))),
+            Ok(Some(Constraint::JsonSchema(schema)))
+        );
+    }
+
+    #[test]
+    fn resolve_constraint_refuses_ambiguous_and_incomplete_requests() {
+        let both = resolve_constraint(Some(r#"root ::= "a""#), Some(&format("json_object", None)));
+        assert!(both.is_err_and(|e| e.contains("Set one of them")));
+        let missing = resolve_constraint(None, Some(&format("json_schema", None)));
+        assert!(missing.is_err_and(|e| e.contains("no json_schema member")));
+        let unknown = resolve_constraint(None, Some(&format("xml", None)));
+        assert!(unknown.is_err_and(|e| e.contains("\"xml\"")));
     }
 
     /// `/v1/completions` with no `allowed_special`: a control token spelled out

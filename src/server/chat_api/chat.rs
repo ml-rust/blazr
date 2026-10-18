@@ -15,10 +15,11 @@ use super::tool_calls::extract_tool_calls;
 use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg};
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, ChatTemplate};
 use crate::server::generation::{
-    apply_keep_alive, chat_prompt_error_response, convert_logprobs, decode_context_prefix,
-    error_response, overloaded_response, policy_error_response, record_generation_metrics,
-    stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
-    stream_with_stop_sequences, validate_generation_params, HasSamplingFields, Usage,
+    admit_constraint, apply_keep_alive, chat_prompt_error_response, convert_logprobs,
+    decode_context_prefix, error_response, overloaded_response, policy_error_response,
+    record_generation_metrics, stream_images_with_stop_sequences,
+    stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
+    HasSamplingFields, Usage,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
 use crate::server::reasoning::{split_reasoning_for_format, ReasoningParser};
@@ -181,9 +182,12 @@ pub async fn chat_completions(
         }
     }
 
-    let gen_config = request
+    let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
+    if let Err(e) = admit_constraint(&state, &mut gen_config, request.constraint()).await {
+        return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
+    }
     let reasoning_format = request
         .reasoning_format
         .unwrap_or_else(|| state.reasoning_format());

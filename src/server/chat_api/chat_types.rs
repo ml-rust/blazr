@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::tools::{ChatRequestMessage, ChatResponseMessage, Tool};
-use crate::config::ReasoningFormat;
+use crate::config::{Constraint, ReasoningFormat};
 use crate::model::chat_template::RenderOptions;
 use crate::server::generation::{
-    HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage,
+    resolve_constraint, HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams, Usage,
 };
 
 // ── Request/Response types ──
@@ -163,10 +163,6 @@ impl HasSamplingFields for ChatRequest {
             logit_bias: self.logit_bias.clone(),
             logprobs: self.logprobs,
             top_logprobs: self.top_logprobs,
-            json_mode: self
-                .response_format
-                .as_ref()
-                .is_some_and(|rf| rf.r#type == "json_object"),
             mirostat_mode: self.mirostat,
             mirostat_tau: self.mirostat_tau,
             mirostat_eta: self.mirostat_eta,
@@ -177,26 +173,15 @@ impl HasSamplingFields for ChatRequest {
             dry_allowed_length: self.dry_allowed_length,
             dry_sequence_breakers: self.dry_sequence_breakers.clone(),
             typical_p: self.typical_p,
-            grammar: self.effective_grammar(),
             lora_adapter: self.lora_adapter.clone(),
         }
     }
 }
 
 impl ChatRequest {
-    /// Resolve grammar from explicit `grammar` field or `response_format.json_schema`.
-    fn effective_grammar(&self) -> Option<String> {
-        if self.grammar.is_some() {
-            return self.grammar.clone();
-        }
-        if let Some(ref rf) = self.response_format {
-            if rf.r#type == "json_schema" {
-                if let Some(ref schema) = rf.json_schema {
-                    return crate::engine::grammar::json_schema_to_gbnf(schema).ok();
-                }
-            }
-        }
-        None
+    /// The constraint `grammar` and `response_format` ask for. See [`resolve_constraint`].
+    pub fn constraint(&self) -> Result<Option<Constraint>, String> {
+        resolve_constraint(self.grammar.as_deref(), self.response_format.as_ref())
     }
 }
 

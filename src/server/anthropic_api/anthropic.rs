@@ -21,9 +21,9 @@ use crate::model::chat_template::{
 };
 use crate::server::chat_vision::{decode_image_sources, image_route, ImageRoute};
 use crate::server::generation::{
-    overloaded_response, record_generation_metrics, stream_images_with_stop_sequences,
-    stream_multimodal_with_stop_sequences, stream_with_stop_sequences, validate_generation_params,
-    HasSamplingFields,
+    admit_constraint, overloaded_response, record_generation_metrics,
+    stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
+    stream_with_stop_sequences, validate_generation_params, HasSamplingFields,
 };
 use crate::server::handlers::{classify_lookup, AppState, DecodeSlot};
 use crate::server::reasoning::ReasoningParser;
@@ -104,9 +104,13 @@ pub async fn messages(
             return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
         }
     }
-    let gen_config = request
+    // Messages take no constraint of their own. A `generation.grammar` default compiles here.
+    let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
+    if let Err(e) = admit_constraint(&state, &mut gen_config, Ok(None)).await {
+        return anthropic_error(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
+    }
     let reasoning_format = state.reasoning_format();
 
     // Token budget admission

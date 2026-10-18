@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::config::resolve::resolve_reasoning_format;
 use crate::config::{FileConfig, LiveConfig, ReasoningFormat};
-use crate::engine::{Executor, Scheduler, SlotManager};
+use crate::engine::{Executor, GrammarCache, Scheduler, SlotManager};
 
 use super::budget::{BudgetPermit, TokenBudget};
 use super::route::{Route, Serving};
@@ -39,6 +39,8 @@ pub struct AppState {
     reasoning_format_flag: Option<ReasoningFormat>,
     /// In-flight token budget (prompt + estimated decode tokens). 0 is unlimited.
     pub budget: Arc<TokenBudget>,
+    /// Compiled constraint DFAs, shared by every model and request.
+    pub grammar_cache: Arc<GrammarCache>,
     /// Inference slot manager
     pub slot_manager: SlotManager,
     /// The executors loaded at start and their batching schedulers.
@@ -82,6 +84,7 @@ impl AppState {
             live_config: Arc::new(LiveConfig::default()),
             reasoning_format_flag: None,
             budget: TokenBudget::new(0),
+            grammar_cache: Arc::new(GrammarCache::default()),
             slot_manager: SlotManager::new(0), // unlimited by default
             serving: Serving::OnDemand,
             vision_embedders: Arc::new(RwLock::new(HashMap::new())),

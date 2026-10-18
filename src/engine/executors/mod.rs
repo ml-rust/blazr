@@ -10,6 +10,7 @@ pub(super) mod executor_multimodal;
 pub(super) mod executor_qwen35_vision;
 pub(super) mod generate_text;
 pub mod pooling;
+pub(super) mod sampler_grammar;
 pub(super) mod sampler_step;
 pub(super) mod types;
 pub(super) mod unsupported;

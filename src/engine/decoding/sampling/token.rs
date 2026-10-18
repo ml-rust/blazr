@@ -36,9 +36,9 @@ where
     /// Sample a token, dispatching to either standard or mirostat sampling.
     ///
     /// Returns the `[1]` I64 token tensor and, for mirostat, the token id.
-    /// Without mirostat, the fused logits_to_token kernel samples with the
-    /// optional grammar mask. The caller reads that id later through a
-    /// pipelined copy.
+    /// The optional grammar mask applies on both paths. Without mirostat,
+    /// the fused logits_to_token kernel samples. The caller reads that id
+    /// later through a pipelined copy.
     ///
     /// With `scratch`, the fused kernel writes into it, so a caller that
     /// steps the same lane every step reuses one buffer. Mirostat ignores
@@ -54,7 +54,14 @@ where
         scratch: Option<&SamplingScratch<R>>,
     ) -> Result<(Tensor<R>, Option<u32>)> {
         if let Some(ref mut ms) = mirostat {
-            let (tensor, id) = self.mirostat_sample_on_device(logits, ms, gen_config)?;
+            // Mirostat samples on the host, so the grammar mask applies first.
+            let masked = match gpu_grammar {
+                Some(grammar) => R::default_client(self.device())
+                    .grammar_dfa_mask_logits(logits, grammar)
+                    .map_err(|e| anyhow::anyhow!("grammar_dfa_mask_logits failed: {e}"))?,
+                None => logits.clone(),
+            };
+            let (tensor, id) = self.mirostat_sample_on_device(&masked, ms, gen_config)?;
             return Ok((tensor, Some(id)));
         }
         let tensor = match scratch {

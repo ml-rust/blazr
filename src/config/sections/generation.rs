@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::constraint::{CompiledConstraint, Constraint};
+
 /// Configuration for text generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationConfig {
@@ -98,10 +100,6 @@ pub struct GenerationConfig {
     #[serde(default = "default_dynatemp_exponent")]
     pub dynatemp_exponent: f32,
 
-    /// JSON mode: when true, retry generation up to 3 times if output is not valid JSON.
-    #[serde(default)]
-    pub json_mode: bool,
-
     /// DRY (Don't Repeat Yourself) penalty multiplier.
     /// Penalizes n-gram repetitions by subtracting `dry_multiplier * match_length`
     /// from logits of tokens that would extend a repeated n-gram.
@@ -131,10 +129,16 @@ pub struct GenerationConfig {
     #[serde(default)]
     pub typical_p: f32,
 
-    /// GBNF grammar string for constrained generation.
-    /// When set, only tokens valid according to the grammar DFA are allowed.
-    #[serde(default)]
-    pub grammar: Option<String>,
+    /// The language the output must match. The config key is `grammar`.
+    /// A string is GBNF text. See [`Constraint`] for the map forms.
+    #[serde(default, rename = "grammar")]
+    pub constraint: Option<Constraint>,
+
+    /// The DFA request admission compiled from `constraint`. Never in a
+    /// config file. The sampler compiles `constraint` itself when this is
+    /// unset or names another constraint.
+    #[serde(skip)]
+    pub compiled: Option<CompiledConstraint>,
 
     /// `blazr serve`: the registered LoRA adapter a request without its own
     /// `lora_adapter` runs on, as the variant `<model>:<name>` (shared base
@@ -212,13 +216,13 @@ impl Default for GenerationConfig {
             mirostat_eta: default_mirostat_eta(),
             dynatemp_range: 0.0,
             dynatemp_exponent: default_dynatemp_exponent(),
-            json_mode: false,
             dry_multiplier: 0.0,
             dry_base: default_dry_base(),
             dry_allowed_length: 0,
             dry_sequence_breakers: Vec::new(),
             typical_p: 0.0,
-            grammar: None,
+            constraint: None,
+            compiled: None,
             lora_adapter: None,
         }
     }

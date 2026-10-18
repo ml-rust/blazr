@@ -101,16 +101,20 @@ async fn run_cuda(
     .map_err(|e| anyhow!("model {model}: the load stopped: {e}"))??;
 
     // Graph replay reads only the argmax token, so it decodes greedily and
-    // applies no penalties. Any other sampling config runs eagerly. The
-    // interactive session decodes eagerly.
+    // applies no penalties and no grammar. Any other sampling config runs
+    // eagerly. The interactive session decodes eagerly.
     if let (Some(prompt), true) = (&prompt, graphs) {
-        let graph_eligible = gen_config.is_greedy() && !gen_config.has_penalties();
+        let graph_eligible = gen_config.is_greedy()
+            && !gen_config.has_penalties()
+            && gen_config.constraint.is_none();
         if !graph_eligible {
             tracing::warn!(
-                "CUDA graph mode needs temperature 0 and no repeat/frequency/presence \
-                 penalty (got temperature={}, repeat_penalty={}); decoding eagerly",
+                "CUDA graph mode needs temperature 0, no repeat/frequency/presence \
+                 penalty and no grammar (got temperature={}, repeat_penalty={}, grammar={}); \
+                 decoding eagerly",
                 gen_config.temperature,
-                gen_config.repeat_penalty
+                gen_config.repeat_penalty,
+                gen_config.constraint.is_some()
             );
         } else {
             let prompt_tokens = image_prompt_ids(

@@ -1,6 +1,8 @@
 //! Test fixtures shared by the engine's unit tests.
 
-use anyhow::Result;
+use std::collections::HashMap;
+
+use anyhow::{anyhow, Result};
 
 use boostr::model::traits::Model;
 use boostr::model::LoadedModel;
@@ -33,6 +35,101 @@ pub(crate) fn tiny_executor() -> Result<Executor<CpuRuntime>> {
         device,
         16,
     )
+}
+
+/// Context length of a [`full_vocab_executor`]: room for a short JSON object.
+pub(crate) const FULL_VOCAB_CTX: usize = 64;
+
+/// The tiny llama with all-zero weights over every llama3 token id.
+///
+/// Its logits are all zero, so a test steers it with `logit_bias`. The EOS
+/// id is inside its vocab, so a grammar can end generation. With `paged`,
+/// paged attention is on over that pool and two sequences batch.
+pub(crate) fn full_vocab_executor(paged: Option<PagedPool>) -> Result<Executor<CpuRuntime>> {
+    let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
+    let eos = tokenizer
+        .eos_token_id()
+        .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
+    let vocab = splintr::Tokenize::vocab_size(&tokenizer).max(eos as usize + 1);
+    let yaml = TINY_LLAMA_YAML
+        .replace("vocab_size: 32", &format!("vocab_size: {vocab}"))
+        .replace("max_seq_len: 16", &format!("max_seq_len: {FULL_VOCAB_CTX}"));
+    let device = CpuDevice::new();
+    let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
+    let model = boostr::model::llama::Llama::<CpuRuntime>::from_config(&config, &device)?;
+    let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
+    if let Some(pool) = paged {
+        blazr_config.inference.paged_attention = true;
+        blazr_config.inference.block_size = pool.block_size;
+        blazr_config.inference.kv_pool_blocks = pool.blocks;
+        blazr_config.inference.max_batch_size = 2;
+    }
+    Executor::new(
+        LoadedModel::Llama(Box::new(model)),
+        blazr_config,
+        tokenizer,
+        device,
+        FULL_VOCAB_CTX,
+    )
+}
+
+/// The id of the one-token piece `piece` in `exec`'s vocab.
+pub(crate) fn piece_id(exec: &Executor<CpuRuntime>, piece: &[u8]) -> Result<u32> {
+    (0..exec.vocab_size() as u32)
+        .find(|&id| crate::tokenizer::token_piece_bytes(exec.tokenizer(), id) == piece)
+        .ok_or_else(|| anyhow!("no token decodes to {:?}", String::from_utf8_lossy(piece)))
+}
+
+/// The schema of the end-to-end constraint tests: two required properties.
+pub(crate) fn two_field_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {"n": {"type": "integer"}, "s": {"type": "string"}},
+        "required": ["n", "s"],
+        "additionalProperties": false
+    })
+}
+
+/// Logit biases that steer a [`full_vocab_executor`] through one short
+/// instance of [`two_field_schema`].
+///
+/// The mask decides which tokens are open. Among them, EOS outranks all,
+/// and a closing quote outranks every other byte inside a string.
+pub(crate) fn two_field_bias(exec: &Executor<CpuRuntime>) -> Result<HashMap<u32, f32>> {
+    let eos = exec
+        .tokenizer()
+        .eos_token_id()
+        .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
+    let mut bias = HashMap::from([(eos, 30.0)]);
+    let ranks = [
+        ("\"", 25.0),
+        ("}", 22.0),
+        (",", 20.0),
+        (":", 18.0),
+        ("7", 15.0),
+        ("n", 12.0),
+        ("s", 11.0),
+        ("{", 10.0),
+    ];
+    for (piece, value) in ranks {
+        bias.insert(piece_id(exec, piece.as_bytes())?, value);
+    }
+    Ok(bias)
+}
+
+/// Check that `text` is an instance of [`two_field_schema`].
+pub(crate) fn check_two_field_instance(text: &str) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| anyhow!("{text:?} is not JSON: {e}"))?;
+    let fields = value
+        .as_object()
+        .ok_or_else(|| anyhow!("{text:?} is not a JSON object"))?;
+    let n_ok = fields.get("n").is_some_and(serde_json::Value::is_i64);
+    let s_ok = fields.get("s").is_some_and(serde_json::Value::is_string);
+    if fields.len() != 2 || !n_ok || !s_ok {
+        return Err(anyhow!("{text:?} breaks the schema"));
+    }
+    Ok(())
 }
 
 /// The paged KV pool a [`seeded_executor`] serves.

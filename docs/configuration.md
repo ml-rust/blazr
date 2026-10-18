@@ -312,7 +312,7 @@ Basic sampling:
 | `seed`           | integer      | unset   | Random seed                                        |
 | `stop_sequences` | string array | `[]`    | Stop sequences                                     |
 | `verbose_prompt` | boolean      | `false` | Prints prompt tokens before generation             |
-| `grammar`        | string       | unset   | GBNF grammar for constrained generation            |
+| `grammar`        | string or map | unset  | Constraint for every request that sets none: GBNF text, `{json_schema: <schema>}` or `{json_object: true}` |
 | `lora_adapter`   | string       | unset   | `serve`: registered LoRA adapter a request without `lora_adapter` runs on. Unregistered for the model: `404`. See [LoRA adapters](api.md#lora-adapters). |
 
 Penalties:
@@ -351,12 +351,6 @@ DRY and typical sampling:
 | `dry_allowed_length`    | integer      | `0`     | Tokens scanned back for repeats. `0` scans the full history. |
 | `dry_sequence_breakers` | string array | `[]`    | Strings that break n-gram matching                           |
 | `typical_p`             | float        | `0.0`   | Typical sampling threshold. `0` disables it.                 |
-
-JSON mode:
-
-| Key         | Type    | Default | Meaning                                             |
-| ----------- | ------- | ------- | --------------------------------------------------- |
-| `json_mode` | boolean | `false` | Retries up to 3 times when output is not valid JSON |
 
 ## CLI flags
 

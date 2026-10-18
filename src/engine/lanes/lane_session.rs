@@ -36,7 +36,7 @@ pub(in crate::engine) struct LaneRequest {
     /// Sampling policy this lane decodes under.
     pub(in crate::engine) gen_config: GenerationConfig,
     /// Token history for the repetition penalties, mirostat state and the
-    /// grammar DFAs, exactly as the single-sequence loop carries them.
+    /// grammar state, exactly as the single-sequence loop carries them.
     pub(in crate::engine) sampler: SamplerState<CudaRuntime>,
     /// Tokens this lane has produced, which is also the next step's index.
     pub(in crate::engine) generated: usize,

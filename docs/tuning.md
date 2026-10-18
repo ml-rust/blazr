@@ -89,8 +89,7 @@ The sweep runs its requests one after another through a single executor. The swe
 | Context length         | `inference.max_context_len`              | unset      | Caps the context. The batched paged path uses `4096` when unset. The executor's shared block pool uses `num_ctx` when unset.                    |
 | Initial context        | `--num-ctx` (`run`, `generate`, `chat`, `bench`), `num_ctx` | `2048`     | Sets the initial KV cache allocation. The code comment says the cache grows up to the model maximum. `blazr serve` reads `num_ctx` from `config.yaml` and has no flag. |
 | Block size             | `inference.block_size`                   | `16`       | Sets the tokens per KV block in the paged path.                                                                                                 |
-| Pool blocks            | `inference.kv_pool_blocks`               | `0` (auto) | Sets the shared pool size for the batched paged path. Auto computes `max_context_len * max_batch_size / block_size`, with a minimum of `256`.   |
-| Single-sequence blocks | `inference.num_blocks`                   | `0` (auto) | Sets the block count for the single-sequence paged cache.                                                                                       |
+| Pool blocks            | `inference.kv_pool_blocks`               | `0` (auto) | Sets the shared KV pool size. The single-sequence and batched paged paths each allocate a pool of this size. Auto fits `max_batch_size` sequences at `max_context_len`, plus 20% and 64 blocks. |
 | Paged attention        | `inference.paged_attention`              | `false`    | Selects the paged KV path. Without it, blazr uses the non-paged KV path.                                                                        |
 
 ## Speculative decoding

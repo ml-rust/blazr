@@ -230,7 +230,6 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `max_batch_size`                     | integer  | `1`                 | Batch size. Values of 1 or less use the single-sequence path.                                                                |
 | `paged_attention`                    | boolean  | `false`             | Enables the paged KV cache. `run` and `generate` also take `--paged-attention`.                                              |
 | `block_size`                         | integer  | `16`                | Tokens per block for paged attention                                                                                         |
-| `num_blocks`                         | integer  | `0`                 | KV cache blocks to pre-allocate for paged attention                                                                          |
 | `kv_pool_blocks`                     | integer  | `0`                 | Blocks in the shared pool. `0` computes the count from `max_context_len` and `max_batch_size`.                               |
 | `prefix_cache`                       | boolean  | `false`             | Reuses KV blocks for repeated prompt prefixes. Requires `paged_attention`.                                                   |
 | `max_cached_blocks`                  | integer  | `10000`             | Cached prefix blocks to retain. Used when `prefix_cache` is `true`.                                                          |

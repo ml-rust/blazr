@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
+use boostr::inference::kv_cache::LayeredPagedKvCache;
 use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
 use boostr::inference::prefix_cache::{PrefixCache, PrefixCacheConfig};
 use boostr::model::LoadedModel;
@@ -58,6 +59,8 @@ pub struct Executor<R: Runtime<DType = DType>> {
     pub(crate) chat_template: ChatTemplate,
     /// Shared block allocator for paged attention (shared across all concurrent requests)
     pub(crate) shared_allocator: Option<Arc<std::sync::Mutex<CpuBlockAllocator>>>,
+    /// The paged KV cache over every block of `shared_allocator`, created on first use.
+    pub(crate) paged_pool: std::sync::OnceLock<LayeredPagedKvCache<R>>,
     /// Shared prefix cache for paged attention (persists across requests)
     pub(crate) prefix_cache: Option<std::sync::Mutex<PrefixCache<CpuBlockAllocator>>>,
     /// Model directory (for resolving relative draft model paths)
@@ -237,6 +240,7 @@ where
             num_ctx,
             chat_template,
             shared_allocator,
+            paged_pool: std::sync::OnceLock::new(),
             prefix_cache,
             model_dir: None,
             draft_model: std::sync::Mutex::new(None),

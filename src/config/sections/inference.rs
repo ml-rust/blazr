@@ -34,11 +34,6 @@ pub struct InferenceConfig {
     #[serde(default = "default_block_size")]
     pub block_size: usize,
 
-    /// Number of KV cache blocks to pre-allocate for paged attention.
-    /// If 0, auto-computed from max_context_len.
-    #[serde(default)]
-    pub num_blocks: usize,
-
     /// Enable prefix caching for paged attention.
     ///
     /// When enabled, reuses KV cache blocks for repeated prompt prefixes across requests.
@@ -179,7 +174,6 @@ impl Default for InferenceConfig {
             max_batch_size: default_max_batch_size(),
             paged_attention: false,
             block_size: default_block_size(),
-            num_blocks: 0,
             prefix_cache: false,
             max_cached_blocks: default_max_cached_blocks(),
             gpu_prefix_cache: false,

@@ -9,6 +9,7 @@ pub mod executor_load;
 pub(super) mod executor_multimodal;
 pub(super) mod executor_qwen35_vision;
 pub(super) mod generate_text;
+pub(super) mod paged_pool;
 pub mod pooling;
 pub(super) mod sampler_grammar;
 pub(super) mod sampler_step;

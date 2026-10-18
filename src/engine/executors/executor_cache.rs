@@ -3,9 +3,6 @@
 
 use anyhow::{anyhow, Result};
 
-use boostr::inference::kv_cache::LayeredPagedKvCache;
-use boostr::inference::memory::{BlockAllocator, CpuBlockAllocator};
-use boostr::inference::prefix_cache::PrefixCache;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -14,6 +11,99 @@ use boostr::{
 };
 
 use super::executor::Executor;
+use super::paged_pool::PoolLease;
+
+/// Lease the prompt blocks of `prompt_tokens`, reusing prefix cache blocks.
+///
+/// Returns the count of leading prompt tokens whose KV the reused blocks
+/// already hold. The MutexGuard drops inside this function, so a `stream!`
+/// generator can call it and stay `Send`.
+///
+/// # Errors
+///
+/// An error when the pool holds too few free blocks.
+pub(crate) fn prefix_cache_allocate(
+    lease: &mut PoolLease<'_>,
+    prompt_tokens: &[u32],
+) -> Result<usize> {
+    let cached = match lease.prefix_cache() {
+        Some(pc) => match pc.lock() {
+            Ok(mut cache) => {
+                let seq_id = uuid::Uuid::new_v4().as_u128() as u64;
+                cache
+                    .get_or_allocate_blocks(seq_id, prompt_tokens)
+                    .ok()
+                    .map(|result| (seq_id, result.cached_count(), result.into_blocks()))
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
+
+    let mut cached_blocks = 0;
+    if let Some((seq_id, count, blocks)) = cached {
+        lease.hold_prefix_blocks(seq_id, blocks);
+        cached_blocks = count;
+        if count > 0 {
+            crate::telemetry::record::record_prefix_cache_hit();
+            tracing::info!(
+                prefix_cache_hit = true,
+                cached_blocks = count,
+                total_prompt_tokens = prompt_tokens.len(),
+                "Prefix cache: {count} blocks reused",
+            );
+        } else {
+            crate::telemetry::record::record_prefix_cache_miss();
+        }
+    }
+    // The prefix cache covers every prompt block. Without it, or when it
+    // refuses, this allocates them all.
+    lease.cover(prompt_tokens.len())?;
+    Ok((cached_blocks * lease.block_size()).min(prompt_tokens.len()))
+}
+
+/// Synchronize GPU prefix cache after allocation.
+///
+/// Inserts new block hash → block ID mappings and increments reference counts.
+/// Called after [`prefix_cache_allocate`] on the CUDA path.
+#[cfg(feature = "cuda")]
+pub(crate) fn gpu_prefix_cache_insert(
+    gpu_cache: &Option<std::sync::Mutex<boostr::inference::prefix_cache::GpuPrefixCache>>,
+    prompt_tokens: &[u32],
+    block_size: usize,
+    blocks: &[boostr::inference::memory::BlockId],
+) {
+    let Some(ref gc) = gpu_cache else { return };
+    let Ok(mut cache) = gc.lock() else { return };
+    let hashes = boostr::inference::prefix_cache::GpuPrefixCache::compute_block_hashes(
+        prompt_tokens,
+        block_size,
+    );
+    for (i, &hash) in hashes.iter().enumerate() {
+        if i < blocks.len() {
+            cache.insert(hash, blocks[i]);
+            cache.inc_ref(hash);
+        }
+    }
+}
+
+/// Release GPU prefix cache references.
+#[cfg(feature = "cuda")]
+pub(crate) fn gpu_prefix_cache_release(
+    gpu_cache: &Option<std::sync::Mutex<boostr::inference::prefix_cache::GpuPrefixCache>>,
+    prompt_tokens: &[u32],
+    block_size: usize,
+) {
+    let Some(ref gc) = gpu_cache else { return };
+    let Ok(mut cache) = gc.lock() else { return };
+    let hashes = boostr::inference::prefix_cache::GpuPrefixCache::compute_block_hashes(
+        prompt_tokens,
+        block_size,
+    );
+    for &hash in &hashes {
+        cache.dec_ref(hash);
+    }
+}
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -30,144 +120,6 @@ where
         + ModelClient<R>
         + boostr::quant::traits::DequantOps<R>,
 {
-    /// Allocate blocks for paged KV cache, reusing prefix cache blocks when available.
-    ///
-    /// Returns `(cached_token_count, prefix_cache_seq_id)`.
-    /// The MutexGuard is acquired and released within this function, so it is
-    /// safe to call from inside a `stream!` generator without blocking Send.
-    pub(crate) fn prefix_cache_allocate(
-        prefix_cache: &Option<std::sync::Mutex<PrefixCache<CpuBlockAllocator>>>,
-        prompt_tokens: &[u32],
-        block_size: usize,
-        paged_cache: &mut LayeredPagedKvCache<R>,
-        allocator: &CpuBlockAllocator,
-    ) -> Result<(usize, Option<u64>)> {
-        let Some(ref pc) = prefix_cache else {
-            paged_cache
-                .allocate_blocks(prompt_tokens.len(), allocator)
-                .map_err(|e| anyhow!("Failed to allocate blocks for prefill: {}", e))?;
-            return Ok((0, None));
-        };
-
-        let Ok(mut cache) = pc.lock() else {
-            paged_cache
-                .allocate_blocks(prompt_tokens.len(), allocator)
-                .map_err(|e| anyhow!("Failed to allocate blocks for prefill: {}", e))?;
-            return Ok((0, None));
-        };
-
-        let seq_id = uuid::Uuid::new_v4().as_u128() as u64;
-        match cache.get_or_allocate_blocks(seq_id, prompt_tokens) {
-            Ok(result) => {
-                let cached = result.cached_count();
-                let blocks = result.into_blocks();
-
-                // Set the prefix cache's block IDs directly into paged cache.
-                // Cached blocks map to physical blocks with pre-computed KV values.
-                // New blocks (for uncached suffix) are freshly allocated.
-                let num_cache_blocks = blocks.len();
-                paged_cache.set_blocks(blocks);
-
-                if cached > 0 {
-                    crate::telemetry::record::record_prefix_cache_hit();
-                    tracing::info!(
-                        prefix_cache_hit = true,
-                        cached_blocks = cached,
-                        total_prompt_tokens = prompt_tokens.len(),
-                        "Prefix cache: {} blocks reused ({} tokens skip prefill KV compute)",
-                        cached,
-                        cached * block_size
-                    );
-                } else {
-                    crate::telemetry::record::record_prefix_cache_miss();
-                }
-                // Allocate additional blocks for decode tokens beyond what prefix cache covers
-                let prompt_blocks = prompt_tokens.len().div_ceil(block_size);
-                if num_cache_blocks < prompt_blocks {
-                    // The prefix cache covers every prompt block, so this branch is a
-                    // safeguard. It allocates the remaining blocks.
-                    let remaining = prompt_blocks - num_cache_blocks;
-                    let extra = allocator
-                        .allocate(remaining)
-                        .map_err(|e| anyhow!("Failed to allocate remaining blocks: {}", e))?;
-                    for bt_idx in 0..paged_cache.num_layers() {
-                        paged_cache
-                            .block_table_mut(bt_idx)
-                            .append_blocks(extra.clone());
-                    }
-                }
-                Ok((cached * block_size, Some(seq_id)))
-            }
-            Err(_) => {
-                drop(cache);
-                paged_cache
-                    .allocate_blocks(prompt_tokens.len(), allocator)
-                    .map_err(|e| anyhow!("Failed to allocate blocks for prefill: {}", e))?;
-                Ok((0, None))
-            }
-        }
-    }
-
-    /// Release prefix cache references and free blocks back to pool.
-    /// Safe to call from inside `stream!` — acquires and drops MutexGuard internally.
-    pub(crate) fn prefix_cache_release(
-        prefix_cache: &Option<std::sync::Mutex<PrefixCache<CpuBlockAllocator>>>,
-        seq_id: Option<u64>,
-        blocks: &[boostr::inference::memory::BlockId],
-        allocator: &CpuBlockAllocator,
-    ) {
-        if let (Some(ref pc), Some(sid)) = (prefix_cache, seq_id) {
-            if let Ok(mut cache) = pc.lock() {
-                let _ = cache.release_blocks(sid, blocks);
-            }
-        } else if !blocks.is_empty() {
-            let _ = allocator.free(blocks);
-        }
-    }
-
-    /// Synchronize GPU prefix cache after allocation.
-    ///
-    /// Inserts new block hash → block ID mappings and increments reference counts.
-    /// Called after `prefix_cache_allocate` on the CUDA path.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn gpu_prefix_cache_insert(
-        gpu_cache: &Option<std::sync::Mutex<boostr::inference::prefix_cache::GpuPrefixCache>>,
-        prompt_tokens: &[u32],
-        block_size: usize,
-        blocks: &[boostr::inference::memory::BlockId],
-    ) {
-        let Some(ref gc) = gpu_cache else { return };
-        let Ok(mut cache) = gc.lock() else { return };
-        let hashes = boostr::inference::prefix_cache::GpuPrefixCache::compute_block_hashes(
-            prompt_tokens,
-            block_size,
-        );
-        for (i, &hash) in hashes.iter().enumerate() {
-            if i < blocks.len() {
-                cache.insert(hash, blocks[i]);
-                cache.inc_ref(hash);
-            }
-        }
-    }
-
-    /// Release GPU prefix cache references.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn gpu_prefix_cache_release(
-        gpu_cache: &Option<std::sync::Mutex<boostr::inference::prefix_cache::GpuPrefixCache>>,
-        prompt_tokens: &[u32],
-        block_size: usize,
-    ) {
-        let Some(ref gc) = gpu_cache else { return };
-        let Ok(mut cache) = gc.lock() else { return };
-        let hashes = boostr::inference::prefix_cache::GpuPrefixCache::compute_block_hashes(
-            prompt_tokens,
-            block_size,
-        );
-        for &hash in &hashes {
-            cache.dec_ref(hash);
-        }
-    }
-
     /// Create input tensor from token IDs
     pub(crate) fn create_input_tensor(&self, tokens: &[u32]) -> Result<Tensor<R>> {
         let tokens_i64: Vec<i64> = tokens.iter().map(|&t| t as i64).collect();

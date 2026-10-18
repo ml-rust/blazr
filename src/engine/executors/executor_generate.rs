@@ -6,10 +6,7 @@
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use futures::Stream;
-use std::sync::Mutex;
 
-use boostr::inference::kv_cache::LayeredPagedKvCache;
-use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
 use boostr::inference::{LayeredKvCache, LayeredSsmState};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
@@ -24,25 +21,9 @@ use crate::tokenizer::token_piece;
 use super::types::{FinishReason, GeneratedToken};
 
 use super::executor::Executor;
+use super::executor_cache::prefix_cache_allocate;
 use super::executor_generate_qwen35::DecodeSetup;
-
-/// Clone the shared block allocator, confining the lock guard to this frame.
-///
-/// Deliberately NOT inlined into the `stream!` body: a `MutexGuard` held across
-/// a `?` inside an async generator becomes part of the generator's state, and
-/// `MutexGuard` is not `Send`, so the whole future stops being `Send` and
-/// `tokio::spawn` rejects it. Keeping the lock inside a plain fn means the
-/// guard is gone before the caller resumes.
-///
-/// A poisoned lock propagates rather than recovering: a panic mid-allocation
-/// can leave block accounting inconsistent, and handing out a double-allocated
-/// block would corrupt inference.
-fn clone_shared_allocator(shared: &Mutex<CpuBlockAllocator>) -> Result<CpuBlockAllocator> {
-    let guard = shared
-        .lock()
-        .map_err(|e| anyhow!("Block allocator lock poisoned: {e}"))?;
-    Ok(guard.clone())
-}
+use crate::engine::requests::kv_recompute::{block_ids, block_slots};
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -87,8 +68,8 @@ where
             }
 
             let max_seq_len = self.config.max_seq_len();
-            let max_tokens = gen_config.max_tokens.min(
-                max_seq_len.saturating_sub(prompt_tokens.len())
+            let max_tokens = crate::engine::token_budget(
+                gen_config.max_tokens, max_seq_len, prompt_tokens.len(),
             );
 
             let input = self.create_input_tensor(prompt_tokens)?;
@@ -145,65 +126,37 @@ where
                 }
                 tracing::info!(phase = "decode_end", backend = "mamba2");
             } else if self.config.inference.paged_attention {
-                // ── Llama path: Paged KV cache ──
-                let num_layers = self.model.num_layers();
-                let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
-                let head_dim = self.model.head_dim().unwrap_or(64);
-                let block_size = self.config.inference.block_size;
-                let kv_dtype = self.config.kv_cache_dtype()?;
+                // ── Llama path: the executor's paged KV pool ──
+                // Every block id of the shared allocator is a block of this pool.
+                let paged_cache = self.paged_pool()?;
+                let block_size = paged_cache.block_size();
+                // The lease returns its blocks when the stream ends or drops.
+                let mut lease = self.pool_lease()?;
+                let cached_token_count = prefix_cache_allocate(&mut lease, prompt_tokens)?;
 
-                // Use shared allocator if available, otherwise create per-request
-                let total_tokens = prompt_tokens.len() + max_tokens;
-                let num_blocks = if self.config.inference.num_blocks > 0 {
-                    self.config.inference.num_blocks
-                } else {
-                    BlockTable::blocks_needed(total_tokens, block_size) + 4
-                };
-
-                let allocator = if let Some(ref shared) = self.shared_allocator {
-                    clone_shared_allocator(shared)?
-                } else {
-                    CpuBlockAllocator::new(num_blocks, block_size)
-                };
-
-                let mut paged_cache = LayeredPagedKvCache::new(
-                    num_layers, num_blocks, block_size, num_kv_heads, head_dim, kv_dtype, &self.device,
-                )?;
-
-                // Prefix cache: get block IDs with KV reuse for cached prefixes.
-                // Helper returns result without holding MutexGuard across yield points.
-                let (cached_token_count, prefix_cache_seq_id) =
-                    Self::prefix_cache_allocate(
-                        &self.prefix_cache, prompt_tokens, block_size,
-                        &mut paged_cache, &allocator,
-                    )?;
-
-                // Sync with GPU prefix cache (insert block mappings)
                 #[cfg(feature = "cuda")]
                 {
-                    let bt = paged_cache.block_table(0);
-                    Self::gpu_prefix_cache_insert(
-                        &self.gpu_prefix_cache, prompt_tokens, block_size, &bt.blocks,
+                    super::executor_cache::gpu_prefix_cache_insert(
+                        &self.gpu_prefix_cache, prompt_tokens, block_size, lease.blocks(),
                     );
+                    lease.hold_gpu_prefix(super::paged_pool::GpuPrefixRelease {
+                        cache: &self.gpu_prefix_cache,
+                        prompt_tokens,
+                    });
                 }
 
-                // If prefix cache provided cached tokens, only prefill the uncached suffix
-                let prefill_start = cached_token_count.min(prompt_tokens.len());
+                // The prefill skips the cached prefix. The last prompt token
+                // always runs, so the prefill yields the first logits.
+                let prefill_start = cached_token_count.min(prompt_tokens.len() - 1);
                 let prefill_tokens = &prompt_tokens[prefill_start..];
-
-                let slot_mapping_vec = paged_cache.compute_slot_mapping(prefill_start, prefill_tokens.len())
-                    .map_err(|e| anyhow!("Failed to compute slot mapping: {}", e))?;
-                let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prefill_tokens.len()], &self.device)?;
-
-                let bt_vec = paged_cache.block_table_device_format(0);
-                let max_num_blocks = bt_vec.len();
-                let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, max_num_blocks], &self.device)?;
-
                 let seq_len_k = prompt_tokens.len();
-                paged_cache.set_seq_len(seq_len_k);
 
-                // Build input for only the uncached portion
-                let prefill_input = if prefill_start > 0 && !prefill_tokens.is_empty() {
+                let slot_mapping_vec = block_slots(lease.blocks(), block_size, prefill_start..seq_len_k);
+                let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prefill_tokens.len()], &self.device)?;
+                let bt_vec = block_ids(lease.blocks());
+                let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device)?;
+
+                let prefill_input = if prefill_start > 0 {
                     self.create_input_tensor(prefill_tokens)?
                 } else {
                     input.clone()
@@ -214,41 +167,38 @@ where
                     prompt_tokens = prompt_tokens.len(),
                     cached_tokens = prefill_start,
                     prefill_tokens = prefill_tokens.len(),
-                    num_blocks = num_blocks,
+                    num_blocks = bt_vec.len(),
                 );
                 let t0 = std::time::Instant::now();
                 let mut logits = self.model.forward_with_paged_kv_cache(
-                    &prefill_input, &paged_cache, &slot_mapping, &block_table_tensor,
+                    &prefill_input, paged_cache, &slot_mapping, &block_table_tensor,
                     seq_len_k, prefill_start, None, None,
                 ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
-                tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), prompt_tokens.len(), num_blocks);
+                tracing::info!("Paged prefill: {:?} (seq_len={}, blocks={})", t0.elapsed(), seq_len_k, bt_vec.len());
                 tracing::info!(phase = "prefill_end", backend = "paged");
                 tracing::info!(phase = "decode_start", backend = "paged", max_tokens = max_tokens);
+                let mut cur_seq_len = seq_len_k;
                 for i in 0..max_tokens {
                     let t1 = std::time::Instant::now();
 
                     let cur_logits = &logits;
                     let pending = self.sample_begin(cur_logits, &mut sampler, gen_config, None)?;
 
-                    let cur_seq_len = paged_cache.seq_len();
-                    paged_cache.allocate_blocks(1, &allocator)
-                        .map_err(|e| anyhow!("Failed to allocate block for decode: {}", e))?;
+                    let new_seq_len_k = cur_seq_len + 1;
+                    lease.cover(new_seq_len_k)?;
 
-                    let slot_vec = paged_cache.compute_slot_mapping(cur_seq_len, 1)
-                        .map_err(|e| anyhow!("Failed to compute decode slot mapping: {}", e))?;
+                    let slot_vec = block_slots(lease.blocks(), block_size, cur_seq_len..new_seq_len_k);
                     let slot_mapping = Tensor::from_slice(&slot_vec, &[1], &self.device)?;
 
-                    let bt_vec = paged_cache.block_table_device_format(0);
+                    let bt_vec = block_ids(lease.blocks());
                     let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device)?;
-
-                    let new_seq_len_k = cur_seq_len + 1;
-                    paged_cache.set_seq_len(new_seq_len_k);
 
                     let next_input = pending.tensor.reshape(&[1, 1])?;
                     let next_logits = self.model.forward_with_paged_kv_cache(
-                        &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
+                        &next_input, paged_cache, &slot_mapping, &block_table_tensor,
                         new_seq_len_k, cur_seq_len, None, None,
                     ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;
+                    cur_seq_len = new_seq_len_k;
                     let fwd_time = t1.elapsed();
 
                     let t2 = std::time::Instant::now();
@@ -261,18 +211,8 @@ where
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
-                // Release prefix cache references and free blocks
-                let bt = paged_cache.block_table(0);
-                let blocks_to_free: Vec<_> = bt.blocks.clone();
-                Self::prefix_cache_release(
-                    &self.prefix_cache, prefix_cache_seq_id,
-                    &blocks_to_free, &allocator,
-                );
-                #[cfg(feature = "cuda")]
-                Self::gpu_prefix_cache_release(
-                    &self.gpu_prefix_cache, prompt_tokens, block_size,
-                );
-                tracing::debug!("Freed {} blocks back to pool", blocks_to_free.len());
+                tracing::debug!("Freed {} blocks back to pool", lease.blocks().len());
+                drop(lease);
                 tracing::info!(phase = "decode_end", backend = "paged");
             } else {
                 // ── Llama path: contiguous KV cache ──

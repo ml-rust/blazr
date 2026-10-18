@@ -109,9 +109,8 @@ where
             }
             let plan = self.qwen35_image_plan(prompt_tokens, images)?;
             let max_seq_len = self.config.max_seq_len();
-            let max_tokens = gen_config
-                .max_tokens
-                .min(max_seq_len.saturating_sub(plan.seq_len()));
+            let max_tokens =
+                crate::engine::token_budget(gen_config.max_tokens, max_seq_len, plan.seq_len());
             let input = self.create_input_tensor(prompt_tokens)?;
             let sampler = self.sampler_state(prompt_tokens, gen_config)?;
             let setup = DecodeSetup {

@@ -97,8 +97,8 @@ where
             }
 
             let max_seq_len = self.config.max_seq_len();
-            let max_tokens = gen_config.max_tokens.min(
-                max_seq_len.saturating_sub(prompt_tokens.len())
+            let max_tokens = crate::engine::token_budget(
+                gen_config.max_tokens, max_seq_len, prompt_tokens.len(),
             );
 
             let client: R::Client = R::default_client(&self.device);

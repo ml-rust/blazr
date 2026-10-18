@@ -1,5 +1,5 @@
 [test-groups]
-heavy-model = { max-threads = 2 }
+heavy-model = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'binary(arch_reference) | binary(batch_decode_per_row)'

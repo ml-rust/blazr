@@ -5,11 +5,9 @@ use anyhow::Result;
 
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
-#[cfg(feature = "cuda")]
-use boostr::SamplingScratch;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, DeviceGrammarDfa, GrammarDfaOps, NormalizationOps,
-    Runtime, SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
+    Runtime, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use crate::config::GenerationConfig;
@@ -37,9 +35,15 @@ where
 {
     /// Sample a token, dispatching to either standard or mirostat sampling.
     ///
-    /// Returns (token_gpu_tensor, token_id). When mirostat is None, uses
-    /// the fused logits_to_token kernel. When Some, uses mirostat v2.
-    /// Optionally applies grammar DFA masking to constrain output.
+    /// Returns the `[1]` I64 token tensor and, for mirostat, the token id.
+    /// Without mirostat, the fused logits_to_token kernel samples with the
+    /// optional grammar mask. The caller reads that id later through a
+    /// pipelined copy.
+    ///
+    /// With `scratch`, the fused kernel writes into it, so a caller that
+    /// steps the same lane every step reuses one buffer. Mirostat ignores
+    /// `scratch`: its state update needs the full distribution on the host,
+    /// and it returns a freshly allocated tensor.
     pub(crate) fn sample_token_dispatch_with_grammar(
         &self,
         logits: &Tensor<R>,
@@ -47,53 +51,28 @@ where
         gen_config: &GenerationConfig,
         mirostat: &mut Option<MirostatState>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
+        scratch: Option<&SamplingScratch<R>>,
     ) -> Result<(Tensor<R>, Option<u32>)> {
         if let Some(ref mut ms) = mirostat {
             let (tensor, id) = self.mirostat_sample_on_device(logits, ms, gen_config)?;
-            Ok((tensor, Some(id)))
-        } else {
-            let tensor = self.logits_to_token_on_device_with_grammar(
-                logits,
-                recent_tokens,
-                gen_config,
-                gpu_grammar,
-            )?;
-            Ok((tensor, None)) // token ID read later via pipelined D2H
+            return Ok((tensor, Some(id)));
         }
-    }
-
-    /// Like [`Self::sample_token_dispatch_with_grammar`], but samples through
-    /// [`Self::logits_to_token_on_device_with_grammar_into`] on the
-    /// non-mirostat path, so a caller stepping the same lane every decode
-    /// step can reuse one [`SamplingScratch`] instead of allocating one per
-    /// step.
-    ///
-    /// Mirostat still pulls logits to the host and returns a freshly
-    /// allocated `[1]` I64 tensor: mirostat's state update needs the full
-    /// distribution on the host, so there is no per-step buffer to reuse.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn sample_token_dispatch_with_grammar_into(
-        &self,
-        logits: &Tensor<R>,
-        recent_tokens: &[u32],
-        gen_config: &GenerationConfig,
-        mirostat: &mut Option<MirostatState>,
-        gpu_grammar: Option<&DeviceGrammarDfa<R>>,
-        scratch: &SamplingScratch<R>,
-    ) -> Result<(Tensor<R>, Option<u32>)> {
-        if let Some(ref mut ms) = mirostat {
-            let (tensor, id) = self.mirostat_sample_on_device(logits, ms, gen_config)?;
-            Ok((tensor, Some(id)))
-        } else {
-            let tensor = self.logits_to_token_on_device_with_grammar_into(
+        let tensor = match scratch {
+            Some(scratch) => self.logits_to_token_on_device_with_grammar_into(
                 logits,
                 recent_tokens,
                 gen_config,
                 gpu_grammar,
                 scratch,
-            )?;
-            Ok((tensor, None)) // token ID read later via pipelined D2H
-        }
+            )?,
+            None => self.logits_to_token_on_device_with_grammar(
+                logits,
+                recent_tokens,
+                gen_config,
+                gpu_grammar,
+            )?,
+        };
+        Ok((tensor, None))
     }
 
     /// Sample a token using Mirostat v2 from logits on device.

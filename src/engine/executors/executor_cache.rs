@@ -84,8 +84,8 @@ where
                 // Allocate additional blocks for decode tokens beyond what prefix cache covers
                 let prompt_blocks = prompt_tokens.len().div_ceil(block_size);
                 if num_cache_blocks < prompt_blocks {
-                    // Prefix cache didn't cover all prompt blocks — should not happen
-                    // but allocate remaining just in case
+                    // The prefix cache covers every prompt block, so this branch is a
+                    // safeguard. It allocates the remaining blocks.
                     let remaining = prompt_blocks - num_cache_blocks;
                     let extra = allocator
                         .allocate(remaining)
@@ -202,6 +202,12 @@ where
         let v: Vec<i64> = token_gpu
             .to_vec_pipelined(event)
             .map_err(|e| anyhow!("Pipelined D2H copy failed: {}", e))?;
-        Ok(v[0] as u32)
+        v.first().map(|&id| id as u32).ok_or_else(|| {
+            anyhow!(
+                "token read returned no element from a tensor of shape {:?}; the sampler \
+                 must write a [1] I64 token",
+                token_gpu.shape()
+            )
+        })
     }
 }

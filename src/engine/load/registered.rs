@@ -167,33 +167,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use boostr::model::traits::Model;
-    use boostr::model::LoadedModel;
     use boostr::{CpuDevice, CpuRuntime};
 
-    use crate::config::BlazrConfig;
+    use crate::engine::test_support::tiny_executor;
 
     /// How long a fake load holds its blocking thread.
     const LOAD: Duration = Duration::from_millis(400);
     /// A ticker's period while a load is in flight.
     const TICK: Duration = Duration::from_millis(10);
-
-    /// A started executor over a tiny random llama.
-    fn tiny_executor() -> Result<Executor<CpuRuntime>> {
-        let device = CpuDevice::new();
-        let yaml = "model_type: llama\nvocab_size: 32\nhidden_size: 16\nnum_layers: 1\n\
-                    max_seq_len: 16\nintermediate_size: 32\nattention:\n  num_heads: 2\n";
-        let config: boostr::model::UniversalConfig = serde_saphyr::from_str(yaml)?;
-        let model = boostr::model::llama::Llama::<CpuRuntime>::from_config(&config, &device)?;
-        let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
-        Executor::new(
-            LoadedModel::Llama(Box::new(model)),
-            BlazrConfig::from_universal_with_dtype(config, "f32"),
-            tokenizer,
-            device,
-            16,
-        )
-    }
 
     /// A scheduler over a model directory that holds the model `m`.
     fn scheduler_with_m() -> (tempfile::TempDir, Scheduler<CpuRuntime>) {

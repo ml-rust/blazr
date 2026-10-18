@@ -18,12 +18,12 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
-use crate::engine::sampling::MirostatState;
 use crate::tokenizer::TokenTextStream;
 
 use super::types::{FinishReason, GeneratedToken};
 
 use super::executor::Executor;
+use super::sampler_step::SamplerState;
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -56,7 +56,7 @@ where
         gen_config: &'a GenerationConfig,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
-            // Verify model is multimodal
+            // Check that the model is multimodal
             let multimodal_model = match &*self.model {
                 boostr::model::LoadedModel::Multimodal(m) => m,
                 _ => {
@@ -80,7 +80,7 @@ where
             let vision_config = multimodal_model.config().vision.as_ref();
             let audio_config = multimodal_model.config().audio.as_ref();
 
-            // Validate: images require vision encoder, audio requires audio encoder
+            // Check inputs: images need a vision encoder, audio needs an audio encoder
             if !images.is_empty() && vision_config.is_none() {
                 yield Err(anyhow!(
                     "Request contains images but model has no vision encoder configured"
@@ -297,44 +297,30 @@ where
             tracing::info!(phase = "prefill_end", backend = "multimodal");
 
             // ── Autoregressive decode (text-only, same as regular generate) ──
-            let mut token_history: Vec<u32> = prompt_tokens.to_vec();
-            let mut text = TokenTextStream::new(self.tokenizer(), prompt_tokens);
-            let mut mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
-                Some(MirostatState::new(gen_config.mirostat_tau, gen_config.mirostat_eta, gen_config.seed))
-            } else {
-                None
+            // This path applies no grammar, so the sampler carries no DFA.
+            let mut sampler = SamplerState {
+                token_history: prompt_tokens.to_vec(),
+                mirostat: Self::mirostat_state(gen_config),
+                grammar_dfa: None,
+                device_grammar: None,
+                text: TokenTextStream::new(self.tokenizer(), prompt_tokens),
             };
 
             tracing::info!(phase = "decode_start", backend = "multimodal", max_tokens = max_tokens);
             for i in 0..max_tokens {
                 let cur_logits = &logits;
-                let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(
-                    cur_logits, &token_history, gen_config, &mut mirostat, None,
-                )?;
-                let event = token_gpu.record_event()
-                    .map_err(|e| anyhow!("Record event failed: {}", e))?;
+                let pending = self.sample_begin(cur_logits, &mut sampler, gen_config, None)?;
 
-                let next_input = token_gpu.reshape(&[1, 1])?;
+                let next_input = pending.tensor.reshape(&[1, 1])?;
                 let position = kv_cache.seq_len();
                 let next_logits = llm.forward_with_kv_cache(&next_input, &mut kv_cache, position)
                     .map_err(|e| anyhow!("Decode forward failed: {}", e))?;
 
-                let next_token = miro_id.map_or_else(
-                    || Self::read_token_id(&token_gpu, event),
-                    Ok,
-                )?;
-                token_history.push(next_token);
+                let next_token = self.sample_finish(&pending, &mut sampler)?;
 
-                let is_last = i + 1 == max_tokens;
-                let finish = if self.tokenizer.is_eos(next_token) {
-                    Some(FinishReason::Eos)
-                } else if is_last {
-                    Some(FinishReason::Length)
-                } else {
-                    None
-                };
+                let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                yield Ok(self.make_token(next_token, &mut sampler.text, cur_logits, gen_config, finish)?);
                 if finish == Some(FinishReason::Eos) { break; }
                 logits = next_logits;
             }

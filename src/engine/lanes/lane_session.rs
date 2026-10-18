@@ -28,7 +28,7 @@ use crate::config::GenerationConfig;
 
 use super::lane_prefill::PendingPrefill;
 use crate::engine::executor::Executor;
-use crate::engine::executor_generate_qwen35::SamplerState;
+use crate::engine::sampler_step::SamplerState;
 use crate::engine::types::FinishReason;
 
 /// One admitted sequence's decode state, held beside its lane.
@@ -213,29 +213,12 @@ impl Qwen35LaneSession {
         scratch: &SamplingScratch<CudaRuntime>,
         request: &mut LaneRequest,
     ) -> Result<u32> {
-        let (token_gpu, mirostat_id) = exec.sample_token_dispatch_with_grammar_into(
+        let token_id = exec.sample_step(
             logits,
-            &request.sampler.token_history,
+            &mut request.sampler,
             &request.gen_config,
-            &mut request.sampler.mirostat,
-            request.sampler.device_grammar.as_ref(),
-            scratch,
+            Some(scratch),
         )?;
-        let token_id = match mirostat_id {
-            Some(id) => id,
-            None => {
-                let event = token_gpu
-                    .record_event()
-                    .map_err(|e| anyhow!("Record event failed: {}", e))?;
-                Executor::<CudaRuntime>::read_token_id(&token_gpu, event)?
-            }
-        };
-        request.sampler.token_history.push(token_id);
-        exec.advance_grammar_state(
-            &mut request.sampler.grammar_dfa,
-            &mut request.sampler.device_grammar,
-            token_id,
-        );
         request.generated += 1;
         Ok(token_id)
     }

@@ -184,10 +184,9 @@ mod tests {
 
     /// A llama model with a tiny config: a model that takes no adapter.
     fn llama(device: &CpuDevice) -> LoadedModel<CpuRuntime> {
-        let yaml = "model_type: llama\nvocab_size: 32\nhidden_size: 16\nnum_layers: 1\n\
-                    max_seq_len: 16\nintermediate_size: 32\nattention:\n  num_heads: 2\n";
         let config: boostr::model::UniversalConfig =
-            serde_saphyr::from_str(yaml).expect("config parses");
+            serde_saphyr::from_str(crate::engine::test_support::TINY_LLAMA_YAML)
+                .expect("config parses");
         let model =
             boostr::model::llama::Llama::<CpuRuntime>::from_config(&config, device).expect("llama");
         LoadedModel::Llama(Box::new(model))

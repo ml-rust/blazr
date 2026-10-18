@@ -3,6 +3,7 @@
 pub(super) mod gen_types;
 pub(super) mod generation;
 pub(super) mod reasoning;
+pub(super) mod stop_stream;
 pub(super) mod streaming;
 
 pub use reasoning::{

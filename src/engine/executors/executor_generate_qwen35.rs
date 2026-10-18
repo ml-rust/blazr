@@ -22,21 +22,8 @@ use boostr::{
 use crate::config::GenerationConfig;
 
 use super::executor::Executor;
+use super::sampler_step::SamplerState;
 use super::types::{FinishReason, GeneratedToken};
-use crate::engine::grammar::GrammarDfa;
-use crate::engine::sampling::MirostatState;
-use crate::tokenizer::TokenTextStream;
-
-/// Sampling state one request carries through its decode loop.
-pub(in crate::engine) struct SamplerState<R: Runtime<DType = DType>> {
-    /// Prompt ids, extended with each sampled id for repetition penalty.
-    pub token_history: Vec<u32>,
-    pub mirostat: Option<MirostatState>,
-    pub grammar_dfa: Option<GrammarDfa>,
-    pub device_grammar: Option<boostr::DeviceGrammarDfa<R>>,
-    /// The request's text decoder, primed with the prompt.
-    pub text: TokenTextStream,
-}
 
 /// Per-request state `generate` builds before it picks a decode arm.
 pub(in crate::engine) struct DecodeSetup<R: Runtime<DType = DType>> {
@@ -218,16 +205,9 @@ where
             let DecodeSetup {
                 input,
                 max_tokens,
-                sampler,
+                mut sampler,
                 plan,
             } = setup;
-            let SamplerState {
-                mut token_history,
-                mut mirostat,
-                mut grammar_dfa,
-                mut device_grammar,
-                mut text,
-            } = sampler;
 
             let prompt_rows = plan.as_ref().map_or(prompt_tokens.len(), Qwen35PromptPlan::seq_len);
             let max_seq_len = self.config.max_seq_len();
@@ -246,28 +226,21 @@ where
                 let t1 = std::time::Instant::now();
 
                 let cur_logits = &logits;
-                let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(cur_logits, &token_history, gen_config, &mut mirostat, device_grammar.as_ref())?;
-                let event = token_gpu.record_event()
-                    .map_err(|e| anyhow!("Record event failed: {}", e))?;
+                let pending = self.sample_begin(cur_logits, &mut sampler, gen_config, None)?;
 
-                let next_input = token_gpu.reshape(&[1, 1])?;
+                let next_input = pending.tensor.reshape(&[1, 1])?;
                 let rope_pos = kv_cache.seq_len() - rope_lag;
                 let next_logits = self.model.forward_qwen35(&next_input, &mut kv_cache, &mut gdn_state, rope_pos)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 let fwd_time = t1.elapsed();
 
                 let t2 = std::time::Instant::now();
-                let next_token = miro_id.map_or_else(
-                    || Self::read_token_id(&token_gpu, event),
-                    Ok,
-                )?;
-                token_history.push(next_token);
-                self.advance_grammar_state(&mut grammar_dfa, &mut device_grammar, next_token);
+                let next_token = self.sample_finish(&pending, &mut sampler)?;
                 tracing::trace!("Token {}: id={} fwd_launch={:?} sync={:?} total={:?}", i+1, next_token, fwd_time, t2.elapsed(), t1.elapsed());
 
                 let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                yield Ok(self.make_token(next_token, &mut sampler.text, cur_logits, gen_config, finish)?);
                 if finish == Some(FinishReason::Eos) { break; }
                 logits = next_logits;
             }

@@ -19,13 +19,12 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
-use crate::engine::sampling::MirostatState;
-use crate::tokenizer::{token_piece, token_piece_bytes, TokenTextStream};
+use crate::tokenizer::token_piece;
 
 use super::types::{FinishReason, GeneratedToken};
 
 use super::executor::Executor;
-use super::executor_generate_qwen35::{DecodeSetup, SamplerState};
+use super::executor_generate_qwen35::DecodeSetup;
 
 /// Clone the shared block allocator, confining the lock guard to this frame.
 ///
@@ -61,95 +60,6 @@ where
         + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
-    /// Whether `next_token` ends generation, and why.
-    ///
-    /// Shared by the contiguous-KV and qwen35 decode loops so eos/length
-    /// policy can't drift between them.
-    pub(in crate::engine) fn decode_finish_reason(
-        &self,
-        next_token: u32,
-        step: usize,
-        max_tokens: usize,
-    ) -> Option<FinishReason> {
-        if self.tokenizer.is_eos(next_token) {
-            Some(FinishReason::Eos)
-        } else if step + 1 == max_tokens {
-            Some(FinishReason::Length)
-        } else {
-            None
-        }
-    }
-
-    /// Advance the CPU grammar DFA by `next_token`'s decoded bytes, then sync
-    /// the device-side DFA state used for on-device logit masking.
-    ///
-    /// Shared by the contiguous-KV and qwen35 decode loops.
-    pub(in crate::engine) fn advance_grammar_state(
-        &self,
-        grammar_dfa: &mut Option<crate::engine::grammar::GrammarDfa>,
-        device_grammar: &mut Option<boostr::DeviceGrammarDfa<R>>,
-        next_token: u32,
-    ) {
-        if let Some(ref mut dfa) = grammar_dfa {
-            for byte in token_piece_bytes(self.tokenizer(), next_token) {
-                dfa.advance(byte);
-            }
-            if let Some(ref mut dg) = device_grammar {
-                dg.current_state = dfa.current_state() as u32;
-            }
-        }
-    }
-
-    /// Repetition history, mirostat state and grammar DFAs for one request.
-    pub(in crate::engine) fn sampler_state(
-        &self,
-        prompt_tokens: &[u32],
-        gen_config: &GenerationConfig,
-    ) -> Result<SamplerState<R>> {
-        // Token history for repetition penalty
-        let token_history: Vec<u32> = prompt_tokens.to_vec();
-
-        // Mirostat state (if enabled)
-        let mirostat: Option<MirostatState> = if gen_config.mirostat_mode >= 2 {
-            Some(MirostatState::new(
-                gen_config.mirostat_tau,
-                gen_config.mirostat_eta,
-                gen_config.seed,
-            ))
-        } else {
-            None
-        };
-
-        // Grammar DFA (if enabled) — compile to CPU DFA for state tracking,
-        // and build a DeviceGrammarDfa for on-device logit masking
-        let mut grammar_dfa: Option<crate::engine::grammar::GrammarDfa> = None;
-        let mut device_grammar: Option<boostr::DeviceGrammarDfa<R>> = None;
-        if let Some(ref grammar) = gen_config.grammar {
-            match crate::engine::grammar::compile_grammar_to_dfa(grammar) {
-                Ok(dfa) => {
-                    tracing::info!("Grammar DFA compiled: {} states", dfa.num_states());
-                    // Build vocab byte representations for the device DFA
-                    let vocab_size = self.vocab_size();
-                    let vocab_bytes: Vec<Vec<u8>> = (0..vocab_size)
-                        .map(|i| token_piece_bytes(self.tokenizer(), i as u32))
-                        .collect();
-                    device_grammar = Some(dfa.to_device::<R>(&vocab_bytes, &self.device)?);
-                    grammar_dfa = Some(dfa);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to compile grammar DFA: {}", e);
-                }
-            }
-        }
-        Ok(SamplerState {
-            token_history,
-            mirostat,
-            grammar_dfa,
-            device_grammar,
-            text: TokenTextStream::new(self.tokenizer(), prompt_tokens),
-        })
-    }
-
     /// Generate from already-encoded prompt ids.
     ///
     /// The ids are the caller's — the handler that validated them against its
@@ -183,13 +93,7 @@ where
 
             let input = self.create_input_tensor(prompt_tokens)?;
 
-            let SamplerState {
-                mut token_history,
-                mut mirostat,
-                mut grammar_dfa,
-                mut device_grammar,
-                mut text,
-            } = self.sampler_state(prompt_tokens, gen_config)?;
+            let mut sampler = self.sampler_state(prompt_tokens, gen_config)?;
 
             if self.model.needs_gdn_state() {
                 // ── qwen35 path: KV cache (attention layers) + GDN state ──
@@ -198,13 +102,7 @@ where
                 let setup = DecodeSetup {
                     input,
                     max_tokens,
-                    sampler: SamplerState {
-                        token_history,
-                        mirostat,
-                        grammar_dfa,
-                        device_grammar,
-                        text,
-                    },
+                    sampler,
                     plan: None,
                 };
                 let inner = self.generate_qwen35(prompt_tokens, gen_config, setup);
@@ -231,24 +129,17 @@ where
                 tracing::info!(phase = "decode_start", backend = "mamba2", max_tokens = max_tokens);
                 for i in 0..max_tokens {
                     let cur_logits = &logits;
-                    let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(cur_logits, &token_history, gen_config, &mut mirostat, device_grammar.as_ref())?;
-                    let event = token_gpu.record_event()
-                        .map_err(|e| anyhow!("Record event failed: {}", e))?;
+                    let pending = self.sample_begin(cur_logits, &mut sampler, gen_config, None)?;
 
-                    let next_input = token_gpu.reshape(&[1, 1])?;
+                    let next_input = pending.tensor.reshape(&[1, 1])?;
                     let next_logits = self.model.forward_with_ssm_state(&next_input, &mut ssm_state)
                         .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
 
-                    let next_token = miro_id.map_or_else(
-                        || Self::read_token_id(&token_gpu, event),
-                        Ok,
-                    )?;
-                    token_history.push(next_token);
-                    self.advance_grammar_state(&mut grammar_dfa, &mut device_grammar, next_token);
+                    let next_token = self.sample_finish(&pending, &mut sampler)?;
 
                     let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                    yield Ok(self.make_token(next_token, &mut sampler.text, cur_logits, gen_config, finish)?);
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
@@ -337,9 +228,7 @@ where
                     let t1 = std::time::Instant::now();
 
                     let cur_logits = &logits;
-                    let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(cur_logits, &token_history, gen_config, &mut mirostat, device_grammar.as_ref())?;
-                    let event = token_gpu.record_event()
-                        .map_err(|e| anyhow!("Record event failed: {}", e))?;
+                    let pending = self.sample_begin(cur_logits, &mut sampler, gen_config, None)?;
 
                     let cur_seq_len = paged_cache.seq_len();
                     paged_cache.allocate_blocks(1, &allocator)
@@ -355,7 +244,7 @@ where
                     let new_seq_len_k = cur_seq_len + 1;
                     paged_cache.set_seq_len(new_seq_len_k);
 
-                    let next_input = token_gpu.reshape(&[1, 1])?;
+                    let next_input = pending.tensor.reshape(&[1, 1])?;
                     let next_logits = self.model.forward_with_paged_kv_cache(
                         &next_input, &paged_cache, &slot_mapping, &block_table_tensor,
                         new_seq_len_k, cur_seq_len, None, None,
@@ -363,17 +252,12 @@ where
                     let fwd_time = t1.elapsed();
 
                     let t2 = std::time::Instant::now();
-                    let next_token = miro_id.map_or_else(
-                        || Self::read_token_id(&token_gpu, event),
-                        Ok,
-                    )?;
-                    token_history.push(next_token);
-                    self.advance_grammar_state(&mut grammar_dfa, &mut device_grammar, next_token);
+                    let next_token = self.sample_finish(&pending, &mut sampler)?;
                     tracing::info!("Paged token {}: fwd_launch={:?} sync={:?} total={:?}", i+1, fwd_time, t2.elapsed(), t1.elapsed());
 
                     let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                    yield Ok(self.make_token(next_token, &mut sampler.text, cur_logits, gen_config, finish)?);
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }
@@ -421,27 +305,20 @@ where
                     let t1 = std::time::Instant::now();
 
                     let cur_logits = &logits;
-                    let (token_gpu, miro_id) = self.sample_token_dispatch_with_grammar(cur_logits, &token_history, gen_config, &mut mirostat, device_grammar.as_ref())?;
-                    let event = token_gpu.record_event()
-                        .map_err(|e| anyhow!("Record event failed: {}", e))?;
+                    let pending = self.sample_begin(cur_logits, &mut sampler, gen_config, None)?;
 
-                    let next_input = token_gpu.reshape(&[1, 1])?;
+                    let next_input = pending.tensor.reshape(&[1, 1])?;
                     let position = kv_cache.seq_len();
                     let next_logits = self.forward_contiguous(&next_input, &mut kv_cache, position, None)?;
                     let fwd_time = t1.elapsed();
 
                     let t2 = std::time::Instant::now();
-                    let next_token = miro_id.map_or_else(
-                        || Self::read_token_id(&token_gpu, event),
-                        Ok,
-                    )?;
-                    token_history.push(next_token);
-                    self.advance_grammar_state(&mut grammar_dfa, &mut device_grammar, next_token);
+                    let next_token = self.sample_finish(&pending, &mut sampler)?;
                     tracing::trace!("Token {}: id={} fwd_launch={:?} sync={:?} total={:?}", i+1, next_token, fwd_time, t2.elapsed(), t1.elapsed());
 
                     let finish = self.decode_finish_reason(next_token, i, max_tokens);
 
-                    yield Ok(self.make_token(next_token, &mut text, cur_logits, gen_config, finish)?);
+                    yield Ok(self.make_token(next_token, &mut sampler.text, cur_logits, gen_config, finish)?);
                     if finish == Some(FinishReason::Eos) { break; }
                     logits = next_logits;
                 }

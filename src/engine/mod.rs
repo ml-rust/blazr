@@ -17,6 +17,8 @@ pub(crate) mod load;
 pub mod lora;
 mod parallel;
 mod requests;
+#[cfg(test)]
+mod test_support;
 
 pub use decoding::*;
 pub use executors::*;

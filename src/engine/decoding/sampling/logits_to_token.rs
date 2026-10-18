@@ -5,11 +5,9 @@ use anyhow::{anyhow, Result};
 
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
-#[cfg(feature = "cuda")]
-use boostr::SamplingScratch;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, DeviceGrammarDfa, GrammarDfaOps, NormalizationOps,
-    Runtime, SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
+    Runtime, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
 use crate::config::GenerationConfig;
@@ -86,7 +84,6 @@ where
     /// Like [`Self::logits_to_token_on_device_with_grammar`], but samples
     /// through [`SamplingOps::logits_to_token_into`], writing the token into
     /// `scratch.output` instead of allocating.
-    #[cfg(feature = "cuda")]
     pub(crate) fn logits_to_token_on_device_with_grammar_into(
         &self,
         logits: &Tensor<R>,

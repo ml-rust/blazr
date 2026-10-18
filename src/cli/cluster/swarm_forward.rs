@@ -8,6 +8,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::engine::host_read::to_host_f32;
 use crate::runtime::ServerRuntime;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,6 +32,18 @@ pub fn serialize_activation(hidden: &[f32], prev_mlp: Option<&[f32]>) -> Vec<u8>
     buf
 }
 
+/// Native-endian `f32` values of `bytes`, which need no alignment.
+///
+/// `bytes.len()` must be a multiple of four. A trailing partial value drops.
+fn f32s_from_ne_bytes(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_ne_bytes(*c))
+        .collect()
+}
+
 /// Deserialize a hidden state and optional MLP residual from a byte buffer.
 ///
 /// Returns `(hidden_f32, Option<mlp_f32>)`.
@@ -49,10 +62,10 @@ pub fn deserialize_activation(bytes: &[u8]) -> Result<(Vec<f32>, Option<Vec<f32>
         );
     }
     let hidden_bytes = &bytes[8..8 + hidden_n * 4];
-    let hidden: Vec<f32> = bytemuck::cast_slice::<u8, f32>(hidden_bytes).to_vec();
+    let hidden = f32s_from_ne_bytes(hidden_bytes);
     let prev_mlp = if mlp_n > 0 {
         let mlp_bytes = &bytes[8 + hidden_n * 4..8 + (hidden_n + mlp_n) * 4];
-        Some(bytemuck::cast_slice::<u8, f32>(mlp_bytes).to_vec())
+        Some(f32s_from_ne_bytes(mlp_bytes))
     } else {
         None
     };
@@ -194,7 +207,7 @@ fn run_forward(
     _ssm_state: &Arc<Option<std::sync::Mutex<boostr::inference::LayeredSsmState<ServerRuntime>>>>,
 ) -> Result<Vec<u8>> {
     use boostr::autograd::Var;
-    use boostr::Tensor;
+    use boostr::{Tensor, TypeConversionOps};
 
     // --- Decode input ---
     let (hidden_var, prev_mlp_var): (Var<ServerRuntime>, Option<Var<ServerRuntime>>) =
@@ -227,18 +240,26 @@ fn run_forward(
                     hidden_size
                 );
             }
-            let hidden_tensor = Tensor::<ServerRuntime>::from_slice(
-                &hidden_f32,
-                &[batch_size, seq_len, hidden_size],
-                device,
+            // The wire carries f32. A half-precision model takes its own dtype.
+            let client = <ServerRuntime as boostr::Runtime>::default_client(device);
+            let hidden_tensor = client.cast(
+                &Tensor::<ServerRuntime>::from_slice(
+                    &hidden_f32,
+                    &[batch_size, seq_len, hidden_size],
+                    device,
+                )?,
+                model.dtype(),
             )?;
             let hidden_var = Var::new(hidden_tensor, false);
             let mlp_var = match prev_mlp_f32 {
                 Some(mlp_f32) => {
-                    let mlp_tensor = Tensor::<ServerRuntime>::from_slice(
-                        &mlp_f32,
-                        &[batch_size, seq_len, hidden_size],
-                        device,
+                    let mlp_tensor = client.cast(
+                        &Tensor::<ServerRuntime>::from_slice(
+                            &mlp_f32,
+                            &[batch_size, seq_len, hidden_size],
+                            device,
+                        )?,
+                        model.dtype(),
                     )?;
                     Some(Var::new(mlp_tensor, false))
                 }
@@ -273,12 +294,49 @@ fn run_forward(
     if !has_next_rank {
         // Last stage: apply norm + lm_head, output raw f32 logits
         let logits = model.forward_head(hidden_out, prev_mlp_out)?;
-        let logits_f32: Vec<f32> = logits.to_vec();
+        let logits_f32 = to_host_f32(&logits)?;
         Ok(bytemuck::cast_slice::<f32, u8>(&logits_f32).to_vec())
     } else {
         // Not the last stage: serialize hidden state + prev_mlp_out and forward to next stage
-        let hidden_f32: Vec<f32> = hidden_out.tensor().to_vec();
-        let mlp_f32: Option<Vec<f32>> = prev_mlp_out.as_ref().map(|v| v.tensor().to_vec());
+        let hidden_f32 = to_host_f32(hidden_out.tensor())?;
+        let mlp_f32 = prev_mlp_out
+            .as_ref()
+            .map(|v| to_host_f32(v.tensor()))
+            .transpose()?;
         Ok(serialize_activation(&hidden_f32, mlp_f32.as_deref()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_activation_round_trips() {
+        let hidden = [1.0f32, -2.5, 3.25];
+        let mlp = [0.5f32, 4.0];
+        let bytes = serialize_activation(&hidden, Some(&mlp));
+        let (h, m) = deserialize_activation(&bytes).unwrap();
+        assert_eq!(h, hidden);
+        assert_eq!(m.as_deref(), Some(&mlp[..]));
+    }
+
+    #[test]
+    fn a_misaligned_buffer_decodes_without_panic() {
+        let bytes = serialize_activation(&[7.0f32, 8.0], None);
+        // A copy that starts one byte into its allocation is not 4-byte aligned.
+        let mut shifted = vec![0u8];
+        shifted.extend_from_slice(&bytes);
+        let (h, m) = deserialize_activation(&shifted[1..]).unwrap();
+        assert_eq!(h, [7.0, 8.0]);
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn a_truncated_buffer_is_an_error() {
+        let mut bytes = serialize_activation(&[1.0f32, 2.0], None);
+        bytes.truncate(bytes.len() - 1);
+        assert!(deserialize_activation(&bytes).is_err());
+        assert!(deserialize_activation(&bytes[..4]).is_err());
     }
 }

@@ -627,10 +627,11 @@ curl http://localhost:8080/v1/messages/count_tokens \
 | Field             | Type                               | Default  | Meaning                                                                  |
 | ----------------- | ---------------------------------- | -------- | ------------------------------------------------------------------------ |
 | `model`           | string                             | required | Model name.                                                              |
-| `input`           | string, array of strings, or parts | required | Text to embed. Images are accepted only by a registered vision embedder. |
-| `encoding_format` | string                             | `float`  | `float` or `base64`.                                                     |
+| `input`           | string, strings, token ids, or parts | required | Text, token ids (`int[]` or `int[][]`), or parts. Token ids skip tokenization and must be below the vocabulary size. Images need a registered vision embedder. |
+| `encoding_format` | string                             | `float`  | `float` or `base64`. Any other value returns `400`.                      |
 | `pooling`         | string                             | `mean`   | `mean`, `cls`, `last`, or `none`.                                        |
-| `normalize`       | boolean                            | `false`  | L2-normalize each vector.                                                |
+| `normalize`       | boolean                            | `true`   | L2-normalize each vector.                                                |
+| `dimensions`      | integer                            | none     | Keep the first `dimensions` values of each vector, then apply `normalize`. Must be from 1 to the model dimension. Not allowed with `pooling` `none`. Quality holds only for Matryoshka-trained models. |
 | `user`            | string                             | none     | Caller identifier.                                                       |
 
 Image input needs a vision embedder registered for the model with `--vision-model NAME=PATH`. Without one, the server returns `400`.

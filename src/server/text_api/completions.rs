@@ -14,12 +14,12 @@ use serde::{Deserialize, Serialize};
 use crate::server::generation::{
     admit_constraint, apply_keep_alive, convert_logprobs, decode_context_prefix,
     encode_with_allowed_special, error_response, overloaded_response, policy_error_response,
-    record_generation_metrics, resolve_constraint, stream_with_stop_sequences,
-    validate_generation_params, HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams,
-    Usage,
+    record_generation_metrics, resolve_constraint, validate_generation_params, HasSamplingFields,
+    LogprobResult, ResponseFormat, SamplingParams, Usage,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
 use crate::server::scheduled::generate_text_routed;
+use crate::server::scheduled_stream::stream_routed;
 use crate::server::streaming::{create_completion_stream, StreamToken};
 
 /// Text completion endpoint
@@ -84,7 +84,6 @@ pub async fn completions(
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
     let placement = state.route(executor, &prompt_tokens);
-    let executor = Arc::clone(&placement.executor);
 
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
@@ -93,9 +92,8 @@ pub async fn completions(
 
         let slot = DecodeSlot::enter();
         tokio::spawn(async move {
-            let _placement = placement;
             let _guards = (permit, slot);
-            stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await;
+            stream_routed(&placement, prompt_tokens, gen_config, tx).await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);

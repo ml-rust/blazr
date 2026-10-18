@@ -50,7 +50,26 @@ The OpenAI-style error event has this body:
 data: {"error":{"message":"...","type":"server_error"}}
 ```
 
-Streaming responses do not return `logprobs`. Tool calls are parsed only in non-streaming chat responses.
+With batching on, a streamed text request runs in the continuous batch, as a non-streamed one does. Requests with images or audio stream from the executor. Both paths give the same text, finish reason and logprobs.
+
+Tool calls are parsed only in non-streaming chat responses.
+
+### Streaming logprobs
+
+With `logprobs` set, each completions and chat chunk carries `choices[0].logprobs`. Without it the member is absent. Infill and Anthropic streams send no logprobs.
+
+- `logprobs.content` holds one entry per chunk: the token that chunk carries.
+- An entry has `token`, `logprob`, `bytes` (the UTF-8 bytes of `token`), and `top_logprobs`. Each `top_logprobs` item has `token`, `logprob`, and `bytes`. Non-streaming responses use the same entry.
+- A stop-sequence prefix or a partial reasoning tag holds text back. The chunk for that token then has an empty `delta`, or a `delta.text` of `""`, and still carries the token's entry. The held text arrives in a later chunk.
+- Each token's entry appears once. The final chunk carries the last token's entry beside `finish_reason`.
+
+```json
+{"id":"chatcmpl-6b1d2e3f-0000-4000-8000-000000000002","object":"chat.completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[{"index":0,"delta":{"content":"Blue"},"logprobs":{"content":[{"token":"Blue","logprob":-0.12,"bytes":[66,108,117,101],"top_logprobs":[{"token":"Blue","logprob":-0.12,"bytes":[66,108,117,101]}]}]}}]}
+```
+
+```json
+{"id":"cmpl-3f2a9c1e-0000-4000-8000-000000000001","object":"text_completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[{"index":0,"delta":{"text":" Paris"},"finish_reason":null,"logprobs":{"content":[{"token":" Paris","logprob":-0.31,"bytes":[32,80,97,114,105,115],"top_logprobs":[]}]}}]}
+```
 
 ## Endpoint index
 
@@ -188,7 +207,7 @@ Special tokens in `prompt` encode as their literal text by default. Name a token
 | `choices[].text`          | Generated text.                                               |
 | `choices[].index`         | Choice index.                                                 |
 | `choices[].finish_reason` | `stop` or `length`.                                           |
-| `choices[].logprobs`      | Present when `logprobs` is `true` on the single-request path. |
+| `choices[].logprobs`      | Present when `logprobs` is `true`.                            |
 | `usage`                   | Token counts and timing. See [Usage](#usage).                 |
 | `done_reason`             | Finish reason of the last choice.                             |
 
@@ -236,7 +255,7 @@ With `"stream": true`, each event has this shape. The stream ends with `data: [D
 }
 ```
 
-The final chunk sets `finish_reason` to `stop` or `length`.
+The final chunk sets `finish_reason` to `stop` or `length`. See [Streaming logprobs](#streaming-logprobs) for `logprobs`.
 
 ```bash
 curl -N http://localhost:8080/v1/completions \
@@ -290,7 +309,7 @@ Generates an assistant reply from a message list.
 | `model`                   | Model name from the request.                                                             |
 | `choices[].message`       | Assistant message with `role`, `content`, `reasoning_content`, and `tool_calls`.         |
 | `choices[].finish_reason` | `stop`, `length`, or `tool_calls`.                                                       |
-| `choices[].logprobs`      | Present when `logprobs` is `true` on the single-request path.                            |
+| `choices[].logprobs`      | Present when `logprobs` is `true`.                                                       |
 | `thinking`                | First choice reasoning. Present when `think` is `true` and the model produced reasoning. |
 | `usage`                   | Token counts and timing. See [Usage](#usage).                                            |
 | `done_reason`             | Finish reason of the last choice.                                                        |
@@ -339,7 +358,7 @@ Example values are illustrative.
 
 ### Streaming chunk
 
-Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`, `content`, or `reasoning_content`, and only the fields with a value appear.
+Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`, `content`, or `reasoning_content`, and only the fields with a value appear. `finish_reason` appears only on the final chunk. See [Streaming logprobs](#streaming-logprobs) for `logprobs`.
 
 ```json
 {
@@ -347,9 +366,7 @@ Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`
   "object": "chat.completion.chunk",
   "created": 1767225600,
   "model": "llama-3.2-1b",
-  "choices": [
-    { "index": 0, "delta": { "content": "Blue" }, "finish_reason": null }
-  ]
+  "choices": [{ "index": 0, "delta": { "content": "Blue" } }]
 }
 ```
 

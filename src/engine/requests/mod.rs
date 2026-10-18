@@ -5,7 +5,7 @@ mod batch_emit;
 pub mod batch_engine;
 mod batch_prefill;
 #[cfg(test)]
-mod batch_test_rig;
+pub(crate) mod batch_test_rig;
 pub(in crate::engine) mod kv_recompute;
 pub mod latency_window;
 pub(super) mod queue_depth;

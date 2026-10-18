@@ -21,12 +21,12 @@ use crate::model::chat_template::{
 };
 use crate::server::chat_vision::{decode_image_sources, image_route, ImageRoute};
 use crate::server::generation::{
-    admit_constraint, overloaded_response, record_generation_metrics,
-    stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
-    stream_with_stop_sequences, validate_generation_params, HasSamplingFields,
+    admit_constraint, overloaded_response, record_generation_metrics, validate_generation_params,
+    HasSamplingFields,
 };
 use crate::server::handlers::{classify_lookup, AppState, DecodeSlot};
 use crate::server::reasoning::ReasoningParser;
+use crate::server::route_stream::stream_for_media;
 use crate::server::scheduled::generate_text_routed;
 use crate::server::streaming::StreamToken;
 
@@ -132,34 +132,8 @@ pub async fn messages(
 
         let slot = DecodeSlot::enter();
         tokio::spawn(async move {
-            let _placement = placement;
             let _guards = (permit, slot);
-            match route {
-                ImageRoute::Tower => {
-                    stream_images_with_stop_sequences(
-                        executor,
-                        prompt_tokens,
-                        media.images,
-                        gen_config,
-                        tx,
-                    )
-                    .await
-                }
-                ImageRoute::Multimodal => {
-                    stream_multimodal_with_stop_sequences(
-                        executor,
-                        prompt_tokens,
-                        media.images,
-                        media.audio,
-                        gen_config,
-                        tx,
-                    )
-                    .await
-                }
-                ImageRoute::Text => {
-                    stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await
-                }
-            }
+            stream_for_media(&placement, route, prompt_tokens, media, gen_config, tx).await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);

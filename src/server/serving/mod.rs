@@ -5,6 +5,7 @@ pub(super) mod config_watch;
 pub(super) mod lora;
 pub mod metrics;
 pub(super) mod scheduled;
+pub(super) mod scheduled_stream;
 pub(super) mod startup;
 pub(super) mod tls;
 

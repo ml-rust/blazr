@@ -251,11 +251,7 @@ mod tests {
     use crate::server::reasoning::ReasoningTags;
 
     fn token(text: &str, finish: Option<FinishReason>) -> StreamToken {
-        StreamToken {
-            text: text.to_string(),
-            finish_reason: finish,
-            error: None,
-        }
+        StreamToken::text(text.to_string(), finish)
     }
 
     fn names(events: &[(&'static str, Value)]) -> Vec<&'static str> {

@@ -12,7 +12,15 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### Added
+
+- **Streaming logprobs** — completions and chat stream chunks now carry `choices[0].logprobs` when the request sets `logprobs`. Each chunk holds the entry of the token it carries. A token whose text a stop-sequence prefix or a reasoning tag holds back still sends its entry in its own chunk.
+- **Logprob bytes** — each logprob entry and `top_logprobs` item now has `bytes`, the UTF-8 bytes of its token, in streaming and non-streaming responses.
+
 ### Fixed
+
+- **Streaming token metrics** — streamed requests now count their prompt and generated tokens and record tokens per second, as non-streamed requests do.
+- **Streaming finish** — a stream whose generation ends without a finish token now closes with `finish_reason` `length`, as the non-streaming response reports it.
 
 - **Logprobs on GPU** — `logprobs` requests no longer crash the server on half-precision GPU logits. The last logits row casts to F32 on the device before its host copy. Dynamic temperature, DRY, typical sampling, speculative decoding and the swarm and disaggregated stages read their logits and activations the same way. `logit_bias` now applies to BF16 and F16 logits.
 - **Constrained output** — `grammar`, `response_format` `json_schema` and `json_object`, and `/v1/responses` `text.format` now constrain the output. Before, most grammars and every schema decoded unconstrained. boostr compiles each one to a DFA that masks the logits on the device. Schema properties come out in declared order.
@@ -32,6 +40,7 @@ preview on crates.io that shares no code with it.
 
 ### Changed
 
+- **Streaming uses continuous batching** — with batching on, streamed completions, chat, infill and Anthropic messages requests now run in the batch engine. Before, they decoded one sequence at a time beside the batch. Requests with images or audio still stream from the executor. A client that disconnects cancels its batched request and frees its KV blocks.
 - **`json_object` mode** — `response_format` `json_object` now constrains the output to one JSON object. It no longer generates up to three times until the text parses.
 - **`grammar` beside `response_format`** — a request that sets both, with a `response_format` other than `text`, is now a `400`. Before, `grammar` won. An empty `grammar` sets no constraint.
 - **Constrained requests skip speculative decoding** — a constrained request decodes through the sampler, because the speculative path applies no mask. `run --graphs` decodes eagerly with a grammar.

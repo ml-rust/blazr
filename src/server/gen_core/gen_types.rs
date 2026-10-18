@@ -11,7 +11,7 @@ use boostr::inference::grammar::json_schema::unwrap_response_format;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Constraint;
-use crate::engine::{parse_keep_alive, GeneratedToken};
+use crate::engine::{parse_keep_alive, GeneratedToken, TokenLogprob};
 use crate::server::handlers::AppState;
 
 /// OpenAI response_format parameter
@@ -117,23 +117,35 @@ pub fn convert_logprobs(tokens: &[GeneratedToken]) -> LogprobResult {
     LogprobResult {
         content: tokens
             .iter()
-            .map(|t| LogprobEntry {
-                token: t.text.clone(),
-                logprob: t.logprob.unwrap_or(f32::NEG_INFINITY),
-                top_logprobs: t
-                    .top_logprobs
-                    .as_ref()
-                    .map(|tops| {
-                        tops.iter()
-                            .map(|tl| TopLogprob {
-                                token: tl.text.clone(),
-                                logprob: tl.logprob,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            })
+            .map(|t| logprob_entry(&t.text, t.logprob, t.top_logprobs.as_deref()))
             .collect(),
+    }
+}
+
+/// The API entry of one token: its text, logprob, UTF-8 bytes and top
+/// alternatives. The streaming and non-streaming responses both build it here.
+///
+/// A missing logprob reads as negative infinity.
+pub fn logprob_entry(
+    text: &str,
+    logprob: Option<f32>,
+    top: Option<&[TokenLogprob]>,
+) -> LogprobEntry {
+    LogprobEntry {
+        token: text.to_string(),
+        logprob: logprob.unwrap_or(f32::NEG_INFINITY),
+        bytes: text.as_bytes().to_vec(),
+        top_logprobs: top
+            .map(|tops| {
+                tops.iter()
+                    .map(|tl| TopLogprob {
+                        token: tl.text.clone(),
+                        logprob: tl.logprob,
+                        bytes: tl.text.as_bytes().to_vec(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -236,6 +248,8 @@ pub struct LogprobResult {
 pub struct LogprobEntry {
     pub token: String,
     pub logprob: f32,
+    /// The UTF-8 bytes of `token`.
+    pub bytes: Vec<u8>,
     pub top_logprobs: Vec<TopLogprob>,
 }
 
@@ -244,6 +258,8 @@ pub struct LogprobEntry {
 pub struct TopLogprob {
     pub token: String,
     pub logprob: f32,
+    /// The UTF-8 bytes of `token`.
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Serialize)]

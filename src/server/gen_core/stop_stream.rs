@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
+use super::stream_metrics::StreamMetrics;
 use super::streaming::StreamToken;
 use crate::config::GenerationConfig;
-use crate::engine::StopMatcher;
+use crate::engine::{FinishReason, StopMatcher};
 use crate::runtime::ServerRuntime;
-use crate::server::metrics;
 
 /// Stream generation tokens with stop sequence checking.
 ///
@@ -25,7 +25,7 @@ pub async fn stream_with_stop_sequences(
     tx: tokio::sync::mpsc::Sender<StreamToken>,
 ) {
     let stream = executor.generate(&prompt_tokens, &gen_config);
-    forward_with_stop_sequences(stream, &gen_config.stop_sequences, "Generation", tx).await;
+    forward_with_stop_sequences(stream, prompt_tokens.len(), &gen_config, "Generation", tx).await;
 }
 
 /// Same as `stream_with_stop_sequences` over `generate_multimodal`, with the
@@ -42,7 +42,8 @@ pub async fn stream_multimodal_with_stop_sequences(
         executor.generate_multimodal(&prompt_tokens, &images, &audio_segments, &gen_config);
     forward_with_stop_sequences(
         stream,
-        &gen_config.stop_sequences,
+        prompt_tokens.len(),
+        &gen_config,
         "Multimodal generation",
         tx,
     )
@@ -59,79 +60,67 @@ pub async fn stream_images_with_stop_sequences(
     tx: tokio::sync::mpsc::Sender<StreamToken>,
 ) {
     let stream = executor.generate_with_images(&prompt_tokens, &images, &gen_config);
-    forward_with_stop_sequences(stream, &gen_config.stop_sequences, "Image generation", tx).await;
+    forward_with_stop_sequences(
+        stream,
+        prompt_tokens.len(),
+        &gen_config,
+        "Image generation",
+        tx,
+    )
+    .await;
 }
 
 /// Forward `stream` to `tx`, cutting the text at the first stop sequence.
 /// `label` names the path in the error log.
+///
+/// With `gen_config.logprobs` set, each item carries its engine token's
+/// logprobs. A token the matcher holds back then sends an empty-text item,
+/// so its logprob goes out when it arrives. Without logprobs it sends nothing.
+///
+/// A stream that ends with no finish token closes with `Length`, as the
+/// non-streaming collector reads it.
 async fn forward_with_stop_sequences<S>(
     stream: S,
-    stop_sequences: &[String],
+    prompt_len: usize,
+    gen_config: &GenerationConfig,
     label: &str,
     tx: tokio::sync::mpsc::Sender<StreamToken>,
 ) where
     S: futures::Stream<Item = anyhow::Result<crate::engine::GeneratedToken>>,
 {
     let mut stream = std::pin::pin!(stream);
-    let mut matcher = StopMatcher::new(stop_sequences);
+    let mut matcher = StopMatcher::new(&gen_config.stop_sequences);
     let mut ended = false;
-    let start = std::time::Instant::now();
-    let mut last_token_time = start;
-    let mut token_count = 0usize;
+    let mut metrics = StreamMetrics::start(prompt_len);
 
     while let Some(result) = stream.next().await {
         match result {
             Ok(token) => {
-                token_count += 1;
-                // The first token closes the TTFT. Each later one is an ITL sample.
-                if token_count == 1 {
-                    metrics::record_ttft(start.elapsed().as_secs_f64());
-                } else {
-                    metrics::record_itl(last_token_time.elapsed().as_secs_f64());
-                }
-                last_token_time = std::time::Instant::now();
+                metrics.token();
 
                 // A match ends with `Stop`. The last token carries the
                 // held-back text, which is not a stop.
                 let cut = matcher.cut_token(&token.text, token.finish_reason);
+                let held = cut.text.is_empty() && !token.text.is_empty();
+                let item = StreamToken::text(cut.text, cut.finish)
+                    .with_logprobs(&token, gen_config.logprobs);
                 if cut.finish.is_some() {
-                    let _ = tx
-                        .send(StreamToken {
-                            text: cut.text,
-                            finish_reason: cut.finish,
-                            error: None,
-                        })
-                        .await;
+                    let _ = tx.send(item).await;
                     ended = true;
                     break;
                 }
 
-                // A token held back by the matcher sends nothing.
-                if cut.text.is_empty() && !token.text.is_empty() {
+                if held && item.logprob.is_none() {
                     continue;
                 }
-                if tx
-                    .send(StreamToken {
-                        text: cut.text,
-                        finish_reason: None,
-                        error: None,
-                    })
-                    .await
-                    .is_err()
-                {
+                if tx.send(item).await.is_err() {
                     ended = true;
                     break;
                 }
             }
             Err(e) => {
                 tracing::error!("{} error during streaming: {}", label, e);
-                let _ = tx
-                    .send(StreamToken {
-                        text: String::new(),
-                        finish_reason: None,
-                        error: Some(e.to_string()),
-                    })
-                    .await;
+                let _ = tx.send(StreamToken::error(e.to_string())).await;
                 return;
             }
         }
@@ -139,19 +128,11 @@ async fn forward_with_stop_sequences<S>(
     if !ended {
         // The stream ended without a final token: flush the held-back text.
         let tail = matcher.finish();
-        if !tail.is_empty() {
-            let _ = tx
-                .send(StreamToken {
-                    text: tail,
-                    finish_reason: None,
-                    error: None,
-                })
-                .await;
-        }
+        let _ = tx
+            .send(StreamToken::text(tail, Some(FinishReason::Length)))
+            .await;
     }
-    if token_count > 0 {
-        metrics::record_e2e(start.elapsed().as_secs_f64());
-    }
+    metrics.finish();
 }
 
 #[cfg(test)]
@@ -172,19 +153,95 @@ mod tests {
         })
     }
 
+    /// Run the forwarder over `tokens` and collect every item it sends.
+    async fn forward_items(
+        tokens: Vec<anyhow::Result<crate::engine::GeneratedToken>>,
+        stops: &[&str],
+        logprobs: bool,
+    ) -> Vec<StreamToken> {
+        let gen_config = GenerationConfig {
+            stop_sequences: stops.iter().map(|s| s.to_string()).collect(),
+            logprobs,
+            ..GenerationConfig::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let stream = futures::stream::iter(tokens);
+        forward_with_stop_sequences(stream, 3, &gen_config, "Test", tx).await;
+        let mut out = Vec::new();
+        while let Some(t) = rx.recv().await {
+            out.push(t);
+        }
+        out
+    }
+
     /// Run the forwarder over `tokens` and collect what the client receives.
     async fn forward(
         tokens: Vec<anyhow::Result<crate::engine::GeneratedToken>>,
         stops: &[&str],
     ) -> Vec<(String, Option<FinishReason>)> {
-        let stops: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        forward_with_stop_sequences(futures::stream::iter(tokens), &stops, "Test", tx).await;
-        let mut out = Vec::new();
-        while let Some(t) = rx.recv().await {
-            out.push((t.text, t.finish_reason));
-        }
-        out
+        forward_items(tokens, stops, false)
+            .await
+            .into_iter()
+            .map(|t| (t.text, t.finish_reason))
+            .collect()
+    }
+
+    fn with_logprob(id: u32, text: &str) -> anyhow::Result<crate::engine::GeneratedToken> {
+        let mut token = tok(text, None)?;
+        token.token_id = id;
+        token.logprob = Some(-(id as f32));
+        Ok(token)
+    }
+
+    /// `E` and `N` start the stop `END`, so the matcher holds their text.
+    /// Their items still go out, empty, each with its own logprob.
+    #[tokio::test]
+    async fn held_back_tokens_send_their_logprobs_when_asked() {
+        let tokens = || {
+            vec![
+                with_logprob(1, "a"),
+                with_logprob(2, "E"),
+                with_logprob(3, "N"),
+                with_logprob(4, "x"),
+            ]
+        };
+        let out = forward_items(tokens(), &["END"], true).await;
+        let got: Vec<(String, Option<u32>, Option<f32>)> = out
+            .iter()
+            .map(|t| {
+                let lp = t.logprob.as_ref();
+                (
+                    t.text.clone(),
+                    lp.map(|l| l.token_id),
+                    lp.map(|l| l.logprob),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), Some(1), Some(-1.0)),
+                (String::new(), Some(2), Some(-2.0)),
+                (String::new(), Some(3), Some(-3.0)),
+                ("ENx".to_string(), Some(4), Some(-4.0)),
+                (String::new(), None, None),
+            ]
+        );
+        assert_eq!(
+            out.last().and_then(|t| t.finish_reason),
+            Some(FinishReason::Length)
+        );
+
+        let plain = forward_items(tokens(), &["END"], false).await;
+        assert!(plain
+            .iter()
+            .all(|t| t.logprob.is_none() && t.top_logprobs.is_none()));
+        let texts: Vec<&str> = plain.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["a", "ENx", ""],
+            "held tokens send nothing without logprobs"
+        );
     }
 
     #[tokio::test]
@@ -241,5 +298,6 @@ mod tests {
         let out = forward(vec![tok("x EN", None)], &["END"]).await;
         let text: String = out.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(text, "x EN");
+        assert_eq!(out.last().and_then(|(_, r)| *r), Some(FinishReason::Length));
     }
 }

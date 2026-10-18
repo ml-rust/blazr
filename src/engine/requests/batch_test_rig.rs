@@ -1,5 +1,5 @@
-//! The batching engine over a tiny CPU llama, shared by the engine's unit
-//! tests, with the single-sequence runs those tests compare against.
+//! The batching engine over a tiny CPU llama, shared by the engine's and
+//! the server's unit tests, with the single-sequence runs they compare against.
 
 use std::sync::Arc;
 
@@ -23,21 +23,21 @@ pub(super) const SEED: u64 = 0x5eed;
 /// Ticks a test allows before it calls the engine stuck.
 const TICK_LIMIT: usize = 64;
 /// A pool large enough that no sequence is preempted.
-pub(super) const POOL: PagedPool = PagedPool {
+pub(crate) const POOL: PagedPool = PagedPool {
     block_size: 4,
     blocks: 16,
 };
 /// The context of [`rig`]'s tiny llama.
 pub(super) const TINY_CTX: usize = 16;
 
-pub(super) struct Rig {
+pub(crate) struct Rig {
     pub executor: Arc<Executor<CpuRuntime>>,
     pub scheduler: Arc<RequestScheduler>,
     pub engine: BatchEngine<CpuRuntime>,
 }
 
 /// A batching engine over the seeded tiny llama, admitting two sequences.
-pub(super) fn rig(pool: PagedPool) -> Result<Rig> {
+pub(crate) fn rig(pool: PagedPool) -> Result<Rig> {
     rig_on(seeded_executor(SEED, Some(pool))?, pool, TINY_CTX)
 }
 
@@ -68,7 +68,7 @@ pub(super) fn rig_on(
 }
 
 /// Greedy decoding with no repetition penalty.
-pub(super) fn greedy(max_tokens: usize) -> GenerationConfig {
+pub(crate) fn greedy(max_tokens: usize) -> GenerationConfig {
     GenerationConfig {
         max_tokens,
         repeat_penalty: 1.0,
@@ -77,7 +77,7 @@ pub(super) fn greedy(max_tokens: usize) -> GenerationConfig {
 }
 
 /// The tokens `prompt` produces alone through the single-sequence loop.
-pub(super) async fn alone_tokens(
+pub(crate) async fn alone_tokens(
     executor: &Executor<CpuRuntime>,
     prompt: &[u32],
     cfg: &GenerationConfig,
@@ -100,8 +100,13 @@ pub(super) async fn alone(
     Ok(tokens.into_iter().map(|t| t.token_id).collect())
 }
 
+/// Run one engine step.
+pub(crate) async fn tick(rig: &mut Rig) {
+    rig.engine.tick().await;
+}
+
 /// Tick until the scheduler holds no work.
-pub(super) async fn drain(rig: &mut Rig) -> Result<()> {
+pub(crate) async fn drain(rig: &mut Rig) -> Result<()> {
     for _ in 0..TICK_LIMIT {
         if !rig.scheduler.has_work() {
             return Ok(());
@@ -146,7 +151,7 @@ pub(super) fn outcome(tokens: &[GeneratedToken]) -> (String, FinishReason, usize
 }
 
 /// Free blocks in the rig's scheduler pool.
-pub(super) fn free_blocks(rig: &Rig) -> Result<usize> {
+pub(crate) fn free_blocks(rig: &Rig) -> Result<usize> {
     rig.scheduler
         .block_stats()
         .map(|stats| stats.free_blocks)

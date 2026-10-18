@@ -22,6 +22,16 @@ pub struct BatchedGenerationResult {
     pub token_logprobs: Option<Vec<GeneratedToken>>,
 }
 
+/// The batching scheduler that serves text on `route`, or `None` when its
+/// executor generates one sequence at a time.
+///
+/// The streaming and non-streaming text paths both route by this. A route
+/// carries a scheduler only for the start model with batching on. The
+/// speculative and graph decoders run only on the executor path.
+pub fn batching_scheduler(route: &Route) -> Option<&dyn GenerationScheduler> {
+    route.scheduler.as_deref()
+}
+
 /// Generate `prompt_tokens` on `route` and return the whole text.
 ///
 /// # Errors
@@ -32,9 +42,9 @@ pub async fn generate_text_routed(
     prompt_tokens: &[u32],
     gen_config: &GenerationConfig,
 ) -> anyhow::Result<GenerationResult> {
-    match &route.scheduler {
+    match batching_scheduler(route) {
         Some(scheduler) => {
-            let r = generate_via_scheduler(scheduler.as_ref(), prompt_tokens.to_vec(), gen_config)
+            let r = generate_via_scheduler(scheduler, prompt_tokens.to_vec(), gen_config)
                 .await
                 .map_err(anyhow::Error::msg)?;
             Ok(GenerationResult {

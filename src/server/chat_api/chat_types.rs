@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::tool_choice::ToolChoice;
+use super::tool_constraint::chat_constraint;
 use super::tools::{ChatRequestMessage, ChatResponseMessage, Tool};
 use crate::config::{Constraint, ReasoningFormat};
 use crate::model::chat_template::RenderOptions;
@@ -19,8 +21,8 @@ pub struct ChatRequest {
     pub messages: Vec<ChatRequestMessage>,
     #[serde(default)]
     pub tools: Option<Vec<Tool>>,
+    /// `none`, `auto`, `required`, or a named function. See [`ToolChoice`].
     #[serde(default)]
-    #[allow(dead_code)]
     pub tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
@@ -113,20 +115,32 @@ impl ChatRequest {
     ///
     /// `think` sets `enable_thinking`, `reasoning_effort` passes through, and
     /// `chat_template_kwargs` adds any other variable the template reads.
-    /// Tools reach the template only when it renders them itself.
-    pub fn render_options(&self, native_tools: bool) -> RenderOptions {
+    /// Tools reach the template only when it renders them itself. `tools` is
+    /// the list the model sees: [`ToolChoice::visible`].
+    ///
+    /// # Errors
+    ///
+    /// A tool that does not serialize is an error naming the tool.
+    /// The handler answers 400.
+    pub fn render_options(
+        &self,
+        native_tools: bool,
+        tools: &[Tool],
+    ) -> Result<RenderOptions, String> {
         let mut options = RenderOptions::default();
-        if native_tools {
-            options.tools = self
-                .tools
-                .as_ref()
-                .filter(|tools| !tools.is_empty())
-                .map(|tools| {
-                    tools
-                        .iter()
-                        .filter_map(|t| serde_json::to_value(t).ok())
-                        .collect()
-                });
+        if native_tools && !tools.is_empty() {
+            let rendered = tools
+                .iter()
+                .map(|t| {
+                    serde_json::to_value(t).map_err(|e| {
+                        format!(
+                            "tool {:?} does not serialize: {e}. Correct the tool definition",
+                            t.function.name
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            options.tools = Some(rendered);
         }
         if let Some(kwargs) = &self.chat_template_kwargs {
             options
@@ -143,7 +157,7 @@ impl ChatRequest {
                 .extra
                 .insert("reasoning_effort".to_string(), effort.clone().into());
         }
-        options
+        Ok(options)
     }
 }
 
@@ -179,9 +193,16 @@ impl HasSamplingFields for ChatRequest {
 }
 
 impl ChatRequest {
-    /// The constraint `grammar` and `response_format` ask for. See [`resolve_constraint`].
-    pub fn constraint(&self) -> Result<Option<Constraint>, String> {
-        resolve_constraint(self.grammar.as_deref(), self.response_format.as_ref())
+    /// The constraint `grammar`, `response_format` and a forced `choice` ask for.
+    /// See [`resolve_constraint`] and [`chat_constraint`].
+    pub fn constraint(&self, choice: &ToolChoice) -> Result<Option<Constraint>, String> {
+        chat_constraint(
+            choice,
+            self.tools.as_deref().unwrap_or(&[]),
+            self.grammar.as_deref(),
+            self.response_format.as_ref(),
+            resolve_constraint(self.grammar.as_deref(), self.response_format.as_ref()),
+        )
     }
 }
 
@@ -206,4 +227,60 @@ pub struct ChatChoice {
     pub finish_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<LogprobResult>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tool_choice::ToolMode;
+    use super::*;
+    use serde_json::json;
+
+    fn request(extra: serde_json::Value) -> ChatRequest {
+        let mut body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "weather"}}],
+        });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            body.extend(extra.clone());
+        }
+        serde_json::from_value(body).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn tool_choice_reads_as_a_json_value_in_every_form() {
+        for value in [
+            json!("none"),
+            json!("auto"),
+            json!("required"),
+            json!({"type": "function", "function": {"name": "weather"}}),
+        ] {
+            let parsed = request(json!({ "tool_choice": value.clone() }));
+            assert_eq!(parsed.tool_choice, Some(value));
+        }
+        assert!(request(json!({})).tool_choice.is_none());
+    }
+
+    #[test]
+    fn hidden_tools_do_not_reach_the_template() {
+        let req = request(json!({}));
+        let tools = req.tools.clone().unwrap_or_default();
+        let shown = req.render_options(true, &tools).unwrap();
+        assert_eq!(shown.tools.map(|t| t.len()), Some(1));
+        let none = ToolChoice::Mode(ToolMode::None);
+        let hidden = req.render_options(true, none.visible(&tools)).unwrap();
+        assert!(hidden.tools.is_none());
+    }
+
+    #[test]
+    fn a_forced_choice_sets_the_constraint() {
+        let req = request(json!({}));
+        let required = ToolChoice::Mode(ToolMode::Required);
+        assert!(matches!(
+            req.constraint(&required),
+            Ok(Some(Constraint::JsonSchema(_)))
+        ));
+        let auto = ToolChoice::Mode(ToolMode::Auto);
+        assert_eq!(req.constraint(&auto), Ok(None));
+    }
 }

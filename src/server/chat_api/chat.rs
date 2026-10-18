@@ -13,7 +13,9 @@ use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
 use super::chat_vision::{decode_request_media, image_route, ImageRoute};
 use super::route_stream::stream_for_media;
 use super::tool_calls::extract_tool_calls;
-use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg};
+use super::tool_choice::ToolChoice;
+use super::tool_stream::create_tool_call_stream;
+use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg, Tool};
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, ChatTemplate};
 use crate::server::chat_stream::create_chat_stream;
 use crate::server::generation::{
@@ -56,6 +58,17 @@ pub async fn chat_completions(
         );
     }
 
+    // `tool_choice` decides which tools the model sees and whether it must call one.
+    let tool_choice =
+        match ToolChoice::parse(request.tool_choice.as_ref(), request.tools.as_deref()) {
+            Ok(choice) => choice,
+            Err(message) => {
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+            }
+        };
+    let visible_tools: &[Tool] = tool_choice.visible(request.tools.as_deref().unwrap_or(&[]));
+    let has_tools = !visible_tools.is_empty();
+
     let load_start = Instant::now();
     let executor =
         match select_executor(&state, &request.model, request.lora_adapter.as_deref()).await {
@@ -75,9 +88,7 @@ pub async fn chat_completions(
         }
     };
 
-    let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
-
-    // The request may name a built-in format; otherwise the model's template.
+    // The request can name a built-in format. Otherwise the model's template applies.
     let override_template = match request.template.as_deref().map(named_template) {
         Some(Ok(template)) => Some(template),
         Some(Err(message)) => {
@@ -94,7 +105,12 @@ pub async fn chat_completions(
     let tools_system_prompt = if native_tools {
         None
     } else {
-        request.tools.as_deref().and_then(build_tools_system_prompt)
+        match build_tools_system_prompt(visible_tools, tool_choice.forces_call()) {
+            Ok(prompt) => prompt,
+            Err(message) => {
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+            }
+        }
     };
 
     // Decode the media parts, then pick the path that serves them: the
@@ -125,7 +141,7 @@ pub async fn chat_completions(
     // caller's text is refused. The ids double as the token-budget count.
     let (prompt, prompt_tokens) = if request.raw.unwrap_or(false) {
         // Raw mode inserts no delimiters of its own, so nothing in the caller's
-        // text may become a control token.
+        // text can become a control token.
         let raw_prompt = format!(
             "{}{}",
             context_prefix,
@@ -161,7 +177,12 @@ pub async fn chat_completions(
                 .iter()
                 .map(|m| request_msg_to_chat_msg(m, native_tools, route.image_marker())),
         );
-        let options = request.render_options(native_tools);
+        let options = match request.render_options(native_tools, visible_tools) {
+            Ok(options) => options,
+            Err(message) => {
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+            }
+        };
         match encode_chat_prompt_with_markers(
             template,
             executor.tokenizer(),
@@ -185,7 +206,9 @@ pub async fn chat_completions(
     let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
-    if let Err(e) = admit_constraint(&state, &mut gen_config, request.constraint()).await {
+    if let Err(e) =
+        admit_constraint(&state, &mut gen_config, request.constraint(&tool_choice)).await
+    {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
     let reasoning_format = request
@@ -216,7 +239,14 @@ pub async fn chat_completions(
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let parser = ReasoningParser::for_output(reasoning_format, &prompt);
-        create_chat_stream(id, model_name, Box::pin(rx_stream), parser).into_response()
+        let rx_stream = Box::pin(rx_stream);
+        if tool_choice.forces_call() {
+            // A forced call has no tool-call deltas until the output ends.
+            create_tool_call_stream(id, model_name, rx_stream, parser, visible_tools.to_vec())
+                .into_response()
+        } else {
+            create_chat_stream(id, model_name, rx_stream, parser).into_response()
+        }
     } else {
         let _slot = DecodeSlot::enter();
         let _permit = permit;
@@ -237,7 +267,7 @@ pub async fn chat_completions(
                 iter_config.seed = Some(s.wrapping_add(i as u64));
             }
 
-            // The media route picks the generator; text may go through the
+            // The media route picks the generator. Text can go through the
             // batching scheduler.
             let gen_result = if route == ImageRoute::Tower {
                 executor
@@ -277,7 +307,7 @@ pub async fn chat_completions(
 
                     // Extract tool calls if tools were provided
                     let (final_content, tool_calls) = if has_tools {
-                        extract_tool_calls(&content)
+                        extract_tool_calls(&content, visible_tools)
                     } else {
                         (Some(content), None)
                     };

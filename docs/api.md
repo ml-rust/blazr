@@ -52,7 +52,7 @@ data: {"error":{"message":"...","type":"server_error"}}
 
 With batching on, a streamed text request runs in the continuous batch, as a non-streamed one does. Requests with images or audio stream from the executor. Both paths give the same text, finish reason and logprobs.
 
-Tool calls are parsed only in non-streaming chat responses.
+Tool calls stream as `delta.tool_calls` only when `tool_choice` is `required` or a named function. See [Tools](#tools).
 
 ### Streaming logprobs
 
@@ -277,7 +277,7 @@ Generates an assistant reply from a message list.
 | `template`                                                          | string            | model template | Built-in template name or `raw`. See [Chat templates](#chat-templates).                      |
 | `raw`                                                               | boolean           | `false`        | Join message text with newlines and skip the template.                                       |
 | `tools`                                                             | array             | none           | Tool definitions. See [Tools](#tools).                                                       |
-| `tool_choice`                                                       | any               | none           | Accepted and not applied.                                                                    |
+| `tool_choice`                                                       | string or object  | `auto`         | `none`, `auto`, `required`, or a named function. See [Tools](#tools).                        |
 | `think`                                                             | boolean           | `false`        | Sets the template variable `enable_thinking`. Returns `thinking` on non-streaming responses. |
 | `reasoning_effort`                                                  | string            | none           | Sets the template variable `reasoning_effort`.                                               |
 | `chat_template_kwargs`                                              | object            | none           | Extra template variables. Passed to the template as given.                                   |
@@ -418,6 +418,20 @@ Tool definitions use the OpenAI shape.
 - A built-in template receives a system prompt that lists the tools.
 - The model calls a tool with `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`. The server also reads an XML form and a bare JSON object with `name` and `arguments`.
 - A parsed call returns `finish_reason` `tool_calls`. `message.content` holds the text before the first call. It is `null` when that text is empty.
+- The server drops a call whose name no declared tool has.
+
+`tool_choice` values:
+
+| Value | Effect |
+| ----- | ------ |
+| `"auto"` (default) | The model decides. |
+| `"none"` | The model sees no tools and the server parses no call. |
+| `"required"` | The output is constrained to one JSON call to any declared tool. |
+| `{"type":"function","function":{"name":"..."}}` | The output is constrained to one JSON call to that tool. |
+
+- A forced call follows the `parameters` schema of the tool. A schema keyword the grammar cannot enforce returns 400.
+- `tool_choice` without `tools`, an invalid value, or an unknown function name returns 400.
+- A forced call beside `grammar` or a `response_format` other than `text` returns 400.
 
 Each returned call has this shape. The server generates `id`.
 
@@ -434,7 +448,7 @@ Each returned call has this shape. The server generates `id`.
 
 Send the result back as a `tool` message with `tool_call_id` set to the call `id`.
 
-Tool calls appear only in non-streaming responses.
+Streaming responses carry tool calls only for a forced `tool_choice`. The server buffers the output and sends one `delta.tool_calls` chunk, then `finish_reason` `tool_calls`. Logprobs are not sent. With `auto`, a streamed call arrives as `delta.content` text and is not parsed.
 
 ### Reasoning output
 

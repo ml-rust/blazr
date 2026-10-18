@@ -1,6 +1,6 @@
 //! Tool calls parsed out of model output.
 
-use super::tools::{ToolCall, ToolCallFunction};
+use super::tools::{Tool, ToolCall, ToolCallFunction};
 
 /// Extract tool calls from model-generated text.
 ///
@@ -8,7 +8,19 @@ use super::tools::{ToolCall, ToolCallFunction};
 /// 1. `<tool_call>{"name": "fn", "arguments": {...}}</tool_call>`
 /// 2. `<tool_call>\n<function=fn>\n<parameter=k>\nv\n</parameter>\n</function>\n</tool_call>`
 /// 3. `{"name": "fn", "arguments": {...}}` (bare JSON object with name+arguments keys)
-pub fn extract_tool_calls(text: &str) -> (Option<String>, Option<Vec<ToolCall>>) {
+///
+/// A call whose name is not in `declared` is dropped. Its text stays in the
+/// content. An empty `declared` keeps every call.
+pub fn extract_tool_calls(
+    text: &str,
+    declared: &[Tool],
+) -> (Option<String>, Option<Vec<ToolCall>>) {
+    let is_declared = |call: &ToolCall| {
+        declared.is_empty()
+            || declared
+                .iter()
+                .any(|t| t.function.name == call.function.name)
+    };
     let mut calls = Vec::new();
     let tag_start = "<tool_call>";
     let tag_end = "</tool_call>";
@@ -19,8 +31,8 @@ pub fn extract_tool_calls(text: &str) -> (Option<String>, Option<Vec<ToolCall>>)
             let after_tag = &search[start + tag_start.len()..];
             if let Some(end) = after_tag.find(tag_end) {
                 let body = after_tag[..end].trim();
-                if let Some(call) = parse_tool_call_json(body).or_else(|| parse_tool_call_xml(body))
-                {
+                let parsed = parse_tool_call_json(body).or_else(|| parse_tool_call_xml(body));
+                if let Some(call) = parsed.filter(is_declared) {
                     calls.push(call);
                 }
                 search = &after_tag[end + tag_end.len()..];
@@ -42,6 +54,11 @@ pub fn extract_tool_calls(text: &str) -> (Option<String>, Option<Vec<ToolCall>>)
             };
             return (content, Some(calls));
         }
+    }
+
+    // A whole text that is one call, the shape a forced tool call has.
+    if let Some(call) = parse_tool_call_json(text.trim()).filter(is_declared) {
+        return (None, Some(vec![call]));
     }
 
     // Bare JSON object with "name" and "arguments" keys: scan backwards for
@@ -70,7 +87,7 @@ pub fn extract_tool_calls(text: &str) -> (Option<String>, Option<Vec<ToolCall>>)
         }
         if let Some(end) = end_pos {
             let json_str = &candidate[..end];
-            if let Some(call) = parse_tool_call_json(json_str) {
+            if let Some(call) = parse_tool_call_json(json_str).filter(is_declared) {
                 let content_before = text[..start].trim();
                 let content = if content_before.is_empty() {
                     None
@@ -119,7 +136,7 @@ fn parse_tool_call_json(json_str: &str) -> Option<ToolCall> {
 
 /// Parse the `<function=name><parameter=k>v</parameter></function>` spelling.
 ///
-/// A parameter value that parses as JSON is kept as that value; any other is
+/// A parameter value that parses as JSON is kept as that value. Any other is
 /// a string. The result is the same `arguments` JSON object the JSON spelling
 /// carries.
 fn parse_tool_call_xml(body: &str) -> Option<ToolCall> {
@@ -168,7 +185,7 @@ mod tests {
     fn test_extract_tool_calls_tagged() {
         let text = r#"I'll look that up for you.
 <tool_call>{"name": "get_weather", "arguments": {"city": "London"}}</tool_call>"#;
-        let (content, calls) = extract_tool_calls(text);
+        let (content, calls) = extract_tool_calls(text, &[]);
         assert_eq!(content.as_deref(), Some("I'll look that up for you."));
         let calls = calls.unwrap();
         assert_eq!(calls.len(), 1);
@@ -181,7 +198,7 @@ mod tests {
     fn test_extract_tool_calls_multiple_tags() {
         let text = r#"<tool_call>{"name": "fn_a", "arguments": {}}</tool_call>
 <tool_call>{"name": "fn_b", "arguments": {"x": 1}}</tool_call>"#;
-        let (content, calls) = extract_tool_calls(text);
+        let (content, calls) = extract_tool_calls(text, &[]);
         let calls = calls.unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "fn_a");
@@ -193,7 +210,7 @@ mod tests {
     fn test_extract_tool_calls_bare_json() {
         let text = r#"Sure, let me check.
 {"name": "search", "arguments": {"query": "rust lang"}}"#;
-        let (content, calls) = extract_tool_calls(text);
+        let (content, calls) = extract_tool_calls(text, &[]);
         assert_eq!(content.as_deref(), Some("Sure, let me check."));
         let calls = calls.unwrap();
         assert_eq!(calls.len(), 1);
@@ -203,7 +220,7 @@ mod tests {
     #[test]
     fn test_extract_tool_calls_no_tools() {
         let text = "Just a regular response with no tool calls.";
-        let (content, calls) = extract_tool_calls(text);
+        let (content, calls) = extract_tool_calls(text, &[]);
         assert_eq!(content.as_deref(), Some(text));
         assert!(calls.is_none());
     }
@@ -211,7 +228,7 @@ mod tests {
     #[test]
     fn test_extract_tool_calls_invalid_json_ignored() {
         let text = r#"<tool_call>not valid json</tool_call>"#;
-        let (content, calls) = extract_tool_calls(text);
+        let (content, calls) = extract_tool_calls(text, &[]);
         assert!(calls.is_none());
         assert!(content.is_some());
     }
@@ -219,7 +236,7 @@ mod tests {
     #[test]
     fn test_extract_tool_calls_function_xml() {
         let text = "Checking.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n<parameter=note>\nline one\nline two\n</parameter>\n</function>\n</tool_call>";
-        let (content, calls) = extract_tool_calls(text);
+        let (content, calls) = extract_tool_calls(text, &[]);
         assert_eq!(content.as_deref(), Some("Checking."));
         let calls = calls.unwrap();
         assert_eq!(calls.len(), 1);
@@ -232,9 +249,60 @@ mod tests {
 
     #[test]
     fn test_function_xml_without_parameters() {
-        let (_, calls) = extract_tool_calls("<tool_call><function=ping></function></tool_call>");
+        let (_, calls) =
+            extract_tool_calls("<tool_call><function=ping></function></tool_call>", &[]);
         let calls = calls.unwrap();
         assert_eq!(calls[0].function.name, "ping");
         assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    fn declared(names: &[&str]) -> Vec<Tool> {
+        names
+            .iter()
+            .map(|name| Tool {
+                r#type: "function".to_string(),
+                function: super::super::tools::ToolFunction {
+                    name: name.to_string(),
+                    description: None,
+                    parameters: None,
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_undeclared_name_is_dropped_in_every_spelling() {
+        let tools = declared(&["known"]);
+        let tagged = r#"<tool_call>{"name": "ghost", "arguments": {}}</tool_call>"#;
+        let bare = r#"{"name": "ghost", "arguments": {}}"#;
+        let xml = "<tool_call><function=ghost></function></tool_call>";
+        for text in [tagged, bare, xml] {
+            let (content, calls) = extract_tool_calls(text, &tools);
+            assert!(calls.is_none(), "{text}");
+            assert_eq!(content.as_deref(), Some(text));
+        }
+    }
+
+    #[test]
+    fn a_declared_call_survives_beside_an_undeclared_one() {
+        let tools = declared(&["known"]);
+        let text = r#"<tool_call>{"name": "ghost", "arguments": {}}</tool_call>
+<tool_call>{"name": "known", "arguments": {"x": 1}}</tool_call>"#;
+        let (_, calls) = extract_tool_calls(text, &tools);
+        let calls = calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "known");
+    }
+
+    #[test]
+    fn a_whole_text_call_has_no_content() {
+        let tools = declared(&["known"]);
+        let text = r#"  {"name":"known","arguments":{"note":"a {b} c"}}"#;
+        let (content, calls) = extract_tool_calls(text, &tools);
+        assert!(content.is_none());
+        assert_eq!(
+            calls.unwrap()[0].function.arguments,
+            r#"{"note":"a {b} c"}"#
+        );
     }
 }

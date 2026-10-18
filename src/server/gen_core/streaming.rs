@@ -75,7 +75,7 @@ impl StreamToken {
 }
 
 /// Build an SSE error event from an error message
-pub(super) fn error_event(err: &str) -> Option<Event> {
+pub(in crate::server) fn error_event(err: &str) -> Option<Event> {
     let payload = serde_json::json!({
         "error": {
             "message": err,

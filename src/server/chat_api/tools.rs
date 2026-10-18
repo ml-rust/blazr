@@ -78,9 +78,20 @@ pub struct ChatResponseMessage {
 }
 
 /// Build a system prompt that describes available tools to the model.
-pub fn build_tools_system_prompt(tools: &[Tool]) -> Option<String> {
+///
+/// With `bare_json` set, the prompt asks for one bare JSON object, the shape
+/// a forced tool call is constrained to. Otherwise it asks for `<tool_call>` tags.
+///
+/// # Errors
+///
+/// A tool parameter schema that does not serialize is an error naming the tool.
+/// The handler answers 400.
+pub fn build_tools_system_prompt(
+    tools: &[Tool],
+    bare_json: bool,
+) -> Result<Option<String>, String> {
     if tools.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut prompt = String::from("You have access to the following tools:\n\n");
     for tool in tools {
@@ -90,16 +101,28 @@ pub fn build_tools_system_prompt(tools: &[Tool]) -> Option<String> {
         }
         prompt.push('\n');
         if let Some(ref params) = tool.function.parameters {
-            if let Ok(json) = serde_json::to_string_pretty(params) {
-                prompt.push_str(&format!("  Parameters: {}\n", json));
-            }
+            let json = serde_json::to_string_pretty(params).map_err(|e| {
+                format!(
+                    "tool {:?} has parameters that do not serialize: {e}. \
+                     Correct the parameters schema",
+                    tool.function.name
+                )
+            })?;
+            prompt.push_str(&format!("  Parameters: {}\n", json));
         }
     }
-    prompt.push_str(
-        "\nTo call a tool, respond with: \
-         <tool_call>{\"name\": \"function_name\", \"arguments\": {...}}</tool_call>",
-    );
-    Some(prompt)
+    if bare_json {
+        prompt.push_str(
+            "\nTo call a tool, respond with only this JSON object: \
+             {\"name\": \"function_name\", \"arguments\": {...}}",
+        );
+    } else {
+        prompt.push_str(
+            "\nTo call a tool, respond with: \
+             <tool_call>{\"name\": \"function_name\", \"arguments\": {...}}</tool_call>",
+        );
+    }
+    Ok(Some(prompt))
 }
 
 /// Extract text from a MessageContent (for chat template formatting).

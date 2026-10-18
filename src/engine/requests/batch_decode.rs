@@ -1,6 +1,7 @@
 //! Batched decode step for continuous batching
 //!
-//! Contains the core logic for batched single-token decoding.
+//! Contains the core logic for batched single-token decoding. Each row
+//! samples through its own sequence's sampler state.
 
 use anyhow::{anyhow, Result};
 
@@ -13,7 +14,9 @@ use boostr::{
     SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
+use super::kv_recompute::{block_ids, block_slot, recompute_kv};
 use super::request_scheduler::RequestScheduler;
+use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;
 use crate::engine::types::{FinishReason, GeneratedToken};
 
@@ -31,12 +34,17 @@ pub(in crate::engine) struct DecodeSeqData {
 /// Concatenates all decode sequence tokens into one input tensor [N, 1], builds a
 /// single padded block table [N, max_num_blocks], and runs ONE forward pass. The
 /// output logits [N, 1, vocab_size] are then split per sequence for sampling.
+///
+/// A sequence `seqs` marks stale first refills its KV blocks from its
+/// history, in forwards of at most `chunk_size` tokens.
 pub(in crate::engine) async fn process_decode_batch<R: Runtime<DType = DType>>(
     executor: &Executor<R>,
     scheduler: &RequestScheduler,
     paged_cache: &LayeredPagedKvCache<R>,
+    seqs: &mut BatchSeqs<R>,
     decode_seqs: &[SequenceId],
     batch: &ScheduledBatch,
+    chunk_size: usize,
 ) -> Result<()>
 where
     R::Client: TensorOps<R>
@@ -70,25 +78,30 @@ where
             None => continue,
         };
 
-        // gen_config is looked up later during sampling (not needed for the forward pass)
-        // but we still check it exists so we don't run a forward pass for an unserviceable seq.
-        if scheduler.get_gen_config(seq_id).is_none() {
-            continue;
+        if !seqs.contains(seq_id) {
+            return Err(anyhow!(
+                "sequence {seq_id} reached batched decode with no sampler state. A sequence \
+                 must pass prefill in this engine before it decodes."
+            ));
         }
 
         let seq_len = token_history.len();
         let last_token = *token_history.last().unwrap_or(&0);
 
         let token_pos = seq_len - 1;
-        let block_idx = token_pos / block_size;
-        let block_offset = token_pos % block_size;
-        let slot = if block_idx < blocks.len() {
-            (blocks[block_idx] as i32) * (block_size as i32) + (block_offset as i32)
-        } else {
-            -1
-        };
-
-        let block_table: Vec<i32> = blocks.iter().map(|&b| b as i32).collect();
+        // A resumed sequence's blocks are new: refill every position before
+        // the one this step writes.
+        if seqs.take_stale(seq_id) {
+            recompute_kv(
+                executor,
+                paged_cache,
+                &token_history[..token_pos],
+                blocks,
+                chunk_size,
+            )?;
+        }
+        let slot = block_slot(blocks, block_size, token_pos);
+        let block_table = block_ids(blocks);
 
         seq_data.push(DecodeSeqData {
             seq_id,
@@ -171,21 +184,12 @@ where
             .narrow(0, batch_idx, 1)
             .map_err(|e| anyhow!("narrow logits for seq {}: {}", seq_id, e))?;
 
-        let token_history = match scheduler.get_token_history(seq_id) {
-            Some(h) => h,
-            None => continue,
-        };
-        let gen_config = match scheduler.get_gen_config(seq_id) {
-            Some(gc) => gc,
-            None => continue,
-        };
+        // A request cancelled during the forward produces nothing more.
+        if !scheduler.is_live(seq_id) {
+            continue;
+        }
 
-        let token_gpu =
-            executor.logits_to_token_on_device(&seq_logits, &token_history, &gen_config)?;
-        let event = token_gpu
-            .record_event()
-            .map_err(|e| anyhow!("record event failed for seq {}: {}", seq_id, e))?;
-        let token_id = Executor::<R>::read_token_id(&token_gpu, event)?;
+        let token_id = seqs.sample(executor, seq_id, &seq_logits)?;
 
         let is_eos = executor.tokenizer().is_eos(token_id);
         let finished = scheduler.append_token(seq_id, token_id)?;
@@ -218,6 +222,7 @@ where
         scheduler.append_to_history(seq_id, token_id);
 
         if finish.is_some() {
+            seqs.end_seq(seq_id);
             scheduler.finish_sequence(seq_id)?;
         }
     }

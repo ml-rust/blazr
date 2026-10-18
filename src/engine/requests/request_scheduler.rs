@@ -199,7 +199,7 @@ impl RequestScheduler {
                 .inner
                 .lock()
                 .map_err(|e| anyhow!("scheduler lock: {e}"))?;
-            // Only finish if still tracked (might already be finished via append_token)
+            // Only finish if still tracked (can already be finished via append_token)
             if sched.has_sequence(seq_id) {
                 if let Some(state) = sched.get_sequence_state(seq_id) {
                     if state != SequenceState::Finished {
@@ -252,6 +252,12 @@ impl RequestScheduler {
     /// Get the prompt tokens for a sequence
     pub fn get_prompt_tokens(&self, seq_id: SequenceId) -> Option<Vec<u32>> {
         self.registry.prompt_tokens(seq_id)
+    }
+
+    /// Whether `seq_id`'s request is still carried. A finished or cancelled
+    /// request is not.
+    pub fn is_live(&self, seq_id: SequenceId) -> bool {
+        self.registry.contains(seq_id)
     }
 
     /// Get block table for a sequence from the inner scheduler

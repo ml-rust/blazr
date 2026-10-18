@@ -44,16 +44,7 @@ where
     ///
     /// Returns `[1]` I64 tensor on device. All decode paths (greedy, greedy+penalties,
     /// non-greedy) return the same type, enabling uniform pipelined decode.
-    pub(crate) fn logits_to_token_on_device(
-        &self,
-        logits: &Tensor<R>,
-        recent_tokens: &[u32],
-        gen_config: &GenerationConfig,
-    ) -> Result<Tensor<R>> {
-        self.logits_to_token_on_device_with_grammar(logits, recent_tokens, gen_config, None)
-    }
-
-    /// Like `logits_to_token_on_device` but with optional device-side grammar DFA masking.
+    /// With `gpu_grammar`, the device-side grammar DFA masks the logits first.
     pub(crate) fn logits_to_token_on_device_with_grammar(
         &self,
         logits: &Tensor<R>,
@@ -120,10 +111,9 @@ where
     /// already applied, the penalty-window tensors, and the temperature to
     /// sample at.
     ///
-    /// Every step in this chain (the DRY/typical rewrite, the grammar mask,
-    /// the logit bias, and the penalty-window tensors) still allocates when
-    /// it runs — this only shares the logic between the allocating and the
-    /// `_into` callers, it does not remove those allocations.
+    /// The DRY/typical rewrite, the grammar mask, the logit bias and the
+    /// penalty-window tensors allocate. This function shares those steps
+    /// between the allocating and the `_into` callers.
     fn prepare_logits_to_token(
         &self,
         logits: &Tensor<R>,

@@ -1,9 +1,10 @@
 //! One request's sampling state and the per-token sampling step.
 //!
-//! Every single-sequence decode loop and every decode lane samples through
-//! [`Executor::sample_begin`] and [`Executor::sample_finish`]. A step picks
-//! the sampling path, samples on the device, reads back the token id, pushes
-//! it into the repetition history and advances the grammar.
+//! Every single-sequence decode loop, every decode lane and every
+//! continuous-batching row samples through [`Executor::sample_begin`] and
+//! [`Executor::sample_finish`]. A step picks the sampling path, samples on
+//! the device, reads back the token id, pushes it into the repetition history
+//! and advances the grammar.
 //!
 //! The step comes in two halves so a decode loop can enqueue the next forward
 //! between them. The forward then runs while the token id copies to the host.
@@ -172,8 +173,7 @@ where
     /// Sample one token from `logits` and record it in `state`.
     ///
     /// Runs [`Self::sample_begin`] then [`Self::sample_finish`] with no work
-    /// between them. The decode lanes call it, and they build with `cuda` only.
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    /// between them. The decode lanes and the continuous batching engine call it.
     pub(in crate::engine) fn sample_step(
         &self,
         logits: &Tensor<R>,

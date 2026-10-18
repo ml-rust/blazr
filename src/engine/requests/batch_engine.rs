@@ -2,6 +2,9 @@
 //!
 //! Runs the scheduling loop: pulls batches from RequestScheduler,
 //! executes batched forward passes, and streams tokens back to callers.
+//!
+//! Each sequence samples through its own sampler state, so grammar,
+//! mirostat and the penalties apply as in the single-sequence loop.
 
 use std::sync::Arc;
 
@@ -18,7 +21,10 @@ use boostr::{
 };
 
 use super::batch_decode::process_decode_batch;
+use super::kv_recompute::{block_ids, block_slots};
 use super::request_scheduler::RequestScheduler;
+use super::seq_sampler::BatchSeqs;
+use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 use crate::engine::types::FinishReason;
 
@@ -32,6 +38,8 @@ pub struct BatchEngine<R: Runtime<DType = DType>> {
     /// `with_prefill_chunk_size`, in which case `process_batch` falls back
     /// to `inference.prefill_chunk_size` from the executor's config.
     prefill_chunk_size: Option<usize>,
+    /// Sampling state of every sequence past its first prefill.
+    seqs: BatchSeqs<R>,
 }
 
 impl<R: Runtime<DType = DType>> BatchEngine<R>
@@ -92,11 +100,13 @@ where
             None
         };
 
+        let seqs = BatchSeqs::new(executor.vocab_size(), executor.device())?;
         Ok(Self {
             executor,
             scheduler,
             paged_cache,
             prefill_chunk_size: None,
+            seqs,
         })
     }
 
@@ -108,8 +118,7 @@ where
         self
     }
 
-    /// Run the continuous batching loop. This is the main scheduling loop
-    /// that should be spawned as a background task.
+    /// Run the continuous batching loop. Spawn it as a background task.
     pub async fn run(mut self) {
         let mut notify_rx = match self.scheduler.take_notify_rx() {
             Some(rx) => rx,
@@ -136,30 +145,51 @@ where
             // Drain any additional notifications
             while notify_rx.try_recv().is_ok() {}
 
-            // Schedule a batch
-            match self.scheduler.schedule_batch() {
-                Ok(Some(batch)) => {
-                    if let Err(e) = self.process_batch(&batch).await {
-                        tracing::error!("BatchEngine: batch processing error: {}", e);
-                        // Abort all sequences in the failed batch
-                        for seq_id in batch.all_sequences() {
-                            let _ = self.scheduler.finish_sequence(seq_id);
+            self.tick().await;
+        }
+    }
+
+    /// Schedule and process one batch, then drop the state of every
+    /// sequence that ended.
+    async fn tick(&mut self) {
+        match self.scheduler.schedule_batch() {
+            Ok(Some(batch)) => {
+                if let Err(e) = self.process_batch(&batch).await {
+                    tracing::error!("BatchEngine: batch processing error: {:#}", e);
+                    // End every sequence in the failed batch and tell its caller.
+                    for seq_id in batch.all_sequences() {
+                        self.seqs.end_seq(seq_id);
+                        if let Some(tx) = self.scheduler.get_token_sender(seq_id) {
+                            let err = anyhow!(
+                                "the batch this request ran in failed: {e:#}. Retry the request."
+                            );
+                            let _ = tx.send(Err(err)).await;
                         }
+                        let _ = self.scheduler.finish_sequence(seq_id);
                     }
                 }
-                Ok(None) => {
-                    // No work available, yield and wait
-                    tokio::task::yield_now().await;
-                }
-                Err(e) => {
-                    tracing::error!("BatchEngine: scheduling error: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
             }
-
-            // Periodic cleanup
-            self.scheduler.cleanup_finished();
+            Ok(None) => {
+                // No work available, yield and wait
+                tokio::task::yield_now().await;
+            }
+            Err(e) => {
+                tracing::error!("BatchEngine: scheduling error: {}", e);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
         }
+
+        // Periodic cleanup. A cancelled request leaves the registry, so its
+        // sampler state ends here.
+        self.scheduler.cleanup_finished();
+        let scheduler = &self.scheduler;
+        self.seqs.end_gone(|seq_id| scheduler.is_live(seq_id));
+    }
+
+    /// The prefill chunk size in force: the engine's own, else the config's.
+    fn chunk_size(&self) -> usize {
+        self.prefill_chunk_size
+            .unwrap_or(self.executor.config().inference.prefill_chunk_size)
     }
 
     /// Process a single scheduled batch with optional chunked prefill.
@@ -167,19 +197,23 @@ where
     /// When `prefill_chunk_size > 0`, prefill is split into chunks. Between
     /// chunks, pending decode steps run to keep latency low for active sequences.
     async fn process_batch(&mut self, batch: &ScheduledBatch) -> Result<()> {
-        let chunk_size = self
-            .prefill_chunk_size
-            .unwrap_or(self.executor.config().inference.prefill_chunk_size);
+        let chunk_size = self.chunk_size();
+
+        // Preempted sequences lost their KV blocks. Their next decode refills them.
+        self.seqs.mark_stale(&batch.preempted_sequences);
 
         // Process prefill sequences
         for &seq_id in &batch.prefill_sequences {
-            if chunk_size > 0 {
+            let ended = if chunk_size > 0 {
                 self.process_prefill_chunked(seq_id, batch, chunk_size)
-                    .await?;
+                    .await?
             } else {
-                self.process_prefill(seq_id, batch).await?;
+                self.process_prefill(seq_id, batch).await?
+            };
+            // A sequence that ended on its first token is no longer running.
+            if !ended {
+                self.scheduler.prefill_complete(seq_id)?;
             }
-            self.scheduler.prefill_complete(seq_id)?;
         }
 
         // Process decode sequences (batched single-token generation)
@@ -190,13 +224,15 @@ where
         Ok(())
     }
 
-    /// Chunked prefill: process prompt in chunks, interleaving decode steps
+    /// Chunked prefill: process prompt in chunks, interleaving decode steps.
+    ///
+    /// Returns whether the sequence ended on its first token.
     async fn process_prefill_chunked(
         &mut self,
         seq_id: SequenceId,
         batch: &ScheduledBatch,
         chunk_size: usize,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let prompt_tokens = self
             .scheduler
             .get_prompt_tokens(seq_id)
@@ -237,22 +273,10 @@ where
             let end = (processed + chunk_size).min(total);
             let chunk = &prompt_tokens[processed..end];
 
-            // Build slot mapping for this chunk
-            let slot_mapping_vec: Vec<i32> = (processed..end)
-                .map(|i| {
-                    let block_idx = i / block_size;
-                    let block_offset = i % block_size;
-                    if block_idx < blocks.len() {
-                        (blocks[block_idx] as i32) * (block_size as i32) + (block_offset as i32)
-                    } else {
-                        -1
-                    }
-                })
-                .collect();
-
+            let slot_mapping_vec = block_slots(&blocks, block_size, processed..end);
             let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[chunk.len()], &device)?;
 
-            let bt_vec: Vec<i32> = blocks.iter().map(|&b| b as i32).collect();
+            let bt_vec = block_ids(&blocks);
             let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &device)?;
 
             let input = self.executor.create_input_tensor(chunk)?;
@@ -297,14 +321,24 @@ where
 
         // Sample first token from final chunk's logits
         let logits = logits.ok_or_else(|| anyhow!("no logits produced during prefill"))?;
-        let token_history = prompt_tokens.clone();
-        let token_gpu =
-            self.executor
-                .logits_to_token_on_device(&logits, &token_history, &gen_config)?;
-        let event = token_gpu
-            .record_event()
-            .map_err(|e| anyhow!("record event failed: {}", e))?;
-        let token_id = Executor::<R>::read_token_id(&token_gpu, event)?;
+        self.first_token(seq_id, &prompt_tokens, gen_config, &logits)
+            .await
+    }
+
+    /// Sample `seq_id`'s first token from its prefill logits and stream it.
+    ///
+    /// The sequence's sampler state starts here, from its prompt and its
+    /// request's config. Returns whether the sequence ended.
+    async fn first_token(
+        &mut self,
+        seq_id: SequenceId,
+        prompt_tokens: &[u32],
+        gen_config: GenerationConfig,
+        logits: &Tensor<R>,
+    ) -> Result<bool> {
+        self.seqs
+            .begin(&self.executor, seq_id, prompt_tokens, gen_config)?;
+        let token_id = self.seqs.sample(&self.executor, seq_id, logits)?;
 
         let is_eos = self.executor.tokenizer().is_eos(token_id);
         let finish = if is_eos {
@@ -334,15 +368,22 @@ where
         }
 
         self.scheduler.append_to_history(seq_id, token_id);
-        if finished || finish == Some(FinishReason::Eos) {
+        let ended = finished || is_eos;
+        if ended {
+            self.seqs.end_seq(seq_id);
             self.scheduler.finish_sequence(seq_id)?;
         }
-
-        Ok(())
+        Ok(ended)
     }
 
-    /// Process a single prefill sequence
-    async fn process_prefill(&mut self, seq_id: SequenceId, batch: &ScheduledBatch) -> Result<()> {
+    /// Process a single prefill sequence.
+    ///
+    /// Returns whether the sequence ended on its first token.
+    async fn process_prefill(
+        &mut self,
+        seq_id: SequenceId,
+        batch: &ScheduledBatch,
+    ) -> Result<bool> {
         let prompt_tokens = self
             .scheduler
             .get_prompt_tokens(seq_id)
@@ -383,23 +424,12 @@ where
         }
 
         // Build slot mapping only for uncached tokens
-        let slot_mapping_vec: Vec<i32> = (prefill_start..prompt_tokens.len())
-            .map(|i| {
-                let block_idx = i / block_size;
-                let block_offset = i % block_size;
-                if block_idx < blocks.len() {
-                    (blocks[block_idx] as i32) * (block_size as i32) + (block_offset as i32)
-                } else {
-                    -1
-                }
-            })
-            .collect();
-
+        let slot_mapping_vec = block_slots(blocks, block_size, prefill_start..prompt_tokens.len());
         let device = self.executor.device();
         let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[prefill_tokens.len()], device)?;
 
         // Build block table tensor
-        let bt_vec: Vec<i32> = blocks.iter().map(|&b| b as i32).collect();
+        let bt_vec = block_ids(blocks);
         let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], device)?;
 
         // Create input tensor for uncached tokens only
@@ -421,52 +451,8 @@ where
             )
             .map_err(|e| anyhow!("prefill forward failed: {}", e))?;
 
-        // Sample first token
-        let token_history = prompt_tokens.clone();
-        let token_gpu =
-            self.executor
-                .logits_to_token_on_device(&logits, &token_history, &gen_config)?;
-        let event = token_gpu
-            .record_event()
-            .map_err(|e| anyhow!("record event failed: {}", e))?;
-        let token_id = Executor::<R>::read_token_id(&token_gpu, event)?;
-
-        let is_eos = self.executor.tokenizer().is_eos(token_id);
-        let finish = if is_eos {
-            Some(FinishReason::Eos)
-        } else {
-            None
-        };
-
-        // Track in scheduler
-        let finished = self.scheduler.append_token(seq_id, token_id)?;
-
-        // Send token to caller
-        let text = self.scheduler.token_text(
-            seq_id,
-            self.executor.tokenizer(),
-            token_id,
-            is_eos,
-            finished,
-        );
-        if let Some(tx) = self.scheduler.get_token_sender(seq_id) {
-            let token = crate::engine::types::GeneratedToken {
-                token_id,
-                text,
-                logprob: None,
-                top_logprobs: None,
-                finish_reason: finish,
-            };
-            let _ = tx.send(Ok(token)).await;
-        }
-
-        self.scheduler.append_to_history(seq_id, token_id);
-
-        if finished || finish == Some(FinishReason::Eos) {
-            self.scheduler.finish_sequence(seq_id)?;
-        }
-
-        Ok(())
+        self.first_token(seq_id, &prompt_tokens, gen_config, &logits)
+            .await
     }
 
     /// Process decode step for multiple sequences (true batched single-token generation).
@@ -478,6 +464,7 @@ where
         decode_seqs: &[SequenceId],
         batch: &ScheduledBatch,
     ) -> Result<()> {
+        let chunk_size = self.chunk_size();
         let paged_cache = self
             .paged_cache
             .as_ref()
@@ -486,9 +473,324 @@ where
             &self.executor,
             &self.scheduler,
             paged_cache,
+            &mut self.seqs,
             decode_seqs,
             batch,
+            chunk_size,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boostr::inference::memory::CpuBlockAllocator;
+    use boostr::inference::scheduler::SchedulerConfig;
+    use boostr::CpuRuntime;
+    use futures::StreamExt;
+
+    use crate::engine::requests::request_registry::RequestHandle;
+    use crate::engine::test_support::{seeded_executor, PagedPool};
+    use crate::engine::types::GeneratedToken;
+    use crate::tokenizer::token_piece_bytes;
+
+    const SEED: u64 = 0x5eed;
+    /// Ticks a test allows before it calls the engine stuck.
+    const TICK_LIMIT: usize = 64;
+    /// A pool large enough that no sequence is preempted.
+    const POOL: PagedPool = PagedPool {
+        block_size: 4,
+        blocks: 16,
+    };
+    /// One digit from each pair, so the model picks within the grammar.
+    ///
+    /// The DFA builder expands only the `root` rule, with literals and
+    /// character classes. A rule reference matches any ASCII byte.
+    const THREE_DIGITS: &str = "root ::= [12] [34] [56]";
+
+    struct Rig {
+        executor: Arc<Executor<CpuRuntime>>,
+        scheduler: Arc<RequestScheduler>,
+        engine: BatchEngine<CpuRuntime>,
+    }
+
+    /// A batching engine over the seeded tiny llama, admitting two sequences.
+    fn rig(pool: PagedPool) -> Result<Rig> {
+        let executor = Arc::new(seeded_executor(SEED, Some(pool))?);
+        let config = SchedulerConfig {
+            max_batch_size: 2,
+            max_batch_tokens: 4096,
+            max_seq_len: 16,
+            block_size: pool.block_size,
+            ..Default::default()
+        };
+        let allocator = CpuBlockAllocator::new(pool.blocks, pool.block_size);
+        let scheduler = RequestScheduler::new(allocator, config);
+        let engine = BatchEngine::new(Arc::clone(&executor), Arc::clone(&scheduler))?
+            .with_prefill_chunk_size(0);
+        Ok(Rig {
+            executor,
+            scheduler,
+            engine,
+        })
+    }
+
+    fn greedy(max_tokens: usize) -> GenerationConfig {
+        GenerationConfig {
+            max_tokens,
+            repeat_penalty: 1.0,
+            ..GenerationConfig::greedy()
+        }
+    }
+
+    fn grammar(rule: &str, max_tokens: usize) -> GenerationConfig {
+        GenerationConfig {
+            grammar: Some(rule.to_string()),
+            ..greedy(max_tokens)
+        }
+    }
+
+    fn mirostat(seed: u64, max_tokens: usize) -> GenerationConfig {
+        GenerationConfig {
+            max_tokens,
+            mirostat_mode: 2,
+            seed: Some(seed),
+            repeat_penalty: 1.0,
+            ..GenerationConfig::default()
+        }
+    }
+
+    /// The ids `prompt` produces alone through the single-sequence loop.
+    async fn alone(
+        executor: &Executor<CpuRuntime>,
+        prompt: &[u32],
+        cfg: &GenerationConfig,
+    ) -> Result<Vec<u32>> {
+        let mut stream = std::pin::pin!(executor.generate(prompt, cfg));
+        let mut ids = Vec::new();
+        while let Some(item) = stream.next().await {
+            ids.push(item?.token_id);
+        }
+        Ok(ids)
+    }
+
+    /// Tick until the scheduler holds no work.
+    async fn drain(rig: &mut Rig) -> Result<()> {
+        for _ in 0..TICK_LIMIT {
+            if !rig.scheduler.has_work() {
+                return Ok(());
+            }
+            rig.engine.tick().await;
+        }
+        Err(anyhow!(
+            "the batch engine still had work after {TICK_LIMIT} ticks"
+        ))
+    }
+
+    /// Every item `handle` received so far.
+    fn received(handle: &mut RequestHandle) -> Vec<Result<GeneratedToken>> {
+        let mut items = Vec::new();
+        while let Ok(item) = handle.token_rx.try_recv() {
+            items.push(item);
+        }
+        items
+    }
+
+    /// The ids `handle` received so far. A streamed error fails the call.
+    fn ids(handle: &mut RequestHandle) -> Result<Vec<u32>> {
+        received(handle)
+            .into_iter()
+            .map(|item| item.map(|t| t.token_id))
+            .collect()
+    }
+
+    /// The bytes `ids` decode to.
+    fn text(executor: &Executor<CpuRuntime>, ids: &[u32]) -> String {
+        let bytes: Vec<u8> = ids
+            .iter()
+            .flat_map(|&id| token_piece_bytes(executor.tokenizer(), id))
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Whether `text` is one digit from each pair of `pairs`.
+    fn one_of_each(text: &str, pairs: &[[char; 2]]) -> bool {
+        text.chars().count() == pairs.len()
+            && text.chars().zip(pairs).all(|(c, pair)| pair.contains(&c))
+    }
+
+    #[tokio::test]
+    async fn a_grammar_request_matches_its_unbatched_run() -> Result<()> {
+        let mut rig = rig(POOL)?;
+        let prompt = [1, 2, 3];
+        let cfg = grammar(THREE_DIGITS, 3);
+        let expected = alone(&rig.executor, &prompt, &cfg).await?;
+
+        let mut handle = rig.scheduler.submit(prompt.to_vec(), cfg)?;
+        drain(&mut rig).await?;
+        let got = ids(&mut handle)?;
+
+        assert_eq!(got, expected);
+        let produced = text(&rig.executor, &got);
+        assert!(
+            one_of_each(&produced, &[['1', '2'], ['3', '4'], ['5', '6']]),
+            "batched output {produced:?} breaks the grammar"
+        );
+        assert_eq!(
+            rig.engine.seqs.len(),
+            0,
+            "a finished sequence keeps its state"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_grammar_row_and_a_greedy_row_keep_their_own_sampling() -> Result<()> {
+        let mut rig = rig(POOL)?;
+        let (constrained, plain) = ([1, 2, 3], [7, 8, 9, 10]);
+        let (constrained_cfg, plain_cfg) = (grammar(THREE_DIGITS, 3), greedy(3));
+        let constrained_alone = alone(&rig.executor, &constrained, &constrained_cfg).await?;
+        let plain_alone = alone(&rig.executor, &plain, &plain_cfg).await?;
+
+        let mut a = rig
+            .scheduler
+            .submit(constrained.to_vec(), constrained_cfg)?;
+        let mut b = rig.scheduler.submit(plain.to_vec(), plain_cfg)?;
+        rig.engine.tick().await;
+        assert_eq!(
+            rig.engine.seqs.len(),
+            2,
+            "both sequences prefill in one batch"
+        );
+        drain(&mut rig).await?;
+
+        assert_eq!(ids(&mut a)?, constrained_alone);
+        assert_eq!(ids(&mut b)?, plain_alone);
+        assert_eq!(rig.engine.seqs.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mirostat_rows_match_their_unbatched_runs() -> Result<()> {
+        let mut rig = rig(POOL)?;
+        let prompt = [1, 2, 3];
+        let (first_cfg, second_cfg) = (mirostat(7, 4), mirostat(11, 4));
+        let first_alone = alone(&rig.executor, &prompt, &first_cfg).await?;
+        let second_alone = alone(&rig.executor, &prompt, &second_cfg).await?;
+
+        let mut first = rig.scheduler.submit(prompt.to_vec(), first_cfg)?;
+        let mut second = rig.scheduler.submit(prompt.to_vec(), second_cfg)?;
+        drain(&mut rig).await?;
+
+        assert_eq!(ids(&mut first)?, first_alone);
+        assert_eq!(ids(&mut second)?, second_alone);
+        assert_eq!(rig.engine.seqs.len(), 0);
+        Ok(())
+    }
+
+    /// The batched rows sample into a shared scratch. The single-sequence
+    /// loop allocates. A seeded draw must not tell them apart.
+    #[tokio::test]
+    async fn seeded_sampling_rows_match_their_unbatched_runs() -> Result<()> {
+        let mut rig = rig(POOL)?;
+        let prompt = [2, 4, 6];
+        let seeded = |seed| GenerationConfig {
+            max_tokens: 4,
+            temperature: 1.0,
+            seed: Some(seed),
+            frequency_penalty: 0.5,
+            ..GenerationConfig::default()
+        };
+        let (first_cfg, second_cfg) = (seeded(3), seeded(9));
+        let first_alone = alone(&rig.executor, &prompt, &first_cfg).await?;
+        let second_alone = alone(&rig.executor, &prompt, &second_cfg).await?;
+
+        let mut first = rig.scheduler.submit(prompt.to_vec(), first_cfg)?;
+        let mut second = rig.scheduler.submit(prompt.to_vec(), second_cfg)?;
+        drain(&mut rig).await?;
+
+        assert_eq!(ids(&mut first)?, first_alone);
+        assert_eq!(ids(&mut second)?, second_alone);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_batch_ends_the_state_and_reports_the_error() -> Result<()> {
+        let mut rig = rig(POOL)?;
+        let mut handle = rig.scheduler.submit(vec![1, 2, 3], greedy(4))?;
+        rig.engine.tick().await;
+        assert_eq!(rig.engine.seqs.len(), 1);
+
+        // The next decode step fails: the engine has no KV cache to run on.
+        rig.engine.paged_cache = None;
+        rig.engine.tick().await;
+
+        assert_eq!(rig.engine.seqs.len(), 0);
+        assert!(!rig.scheduler.is_live(handle.seq_id));
+        let items = received(&mut handle);
+        assert!(
+            matches!(items.first(), Some(Ok(_))),
+            "the prefill token arrives"
+        );
+        assert!(
+            items.last().is_some_and(|item| item.is_err()),
+            "the caller hears the batch error"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_ends_its_state() -> Result<()> {
+        let mut rig = rig(POOL)?;
+        let handle = rig.scheduler.submit(vec![1, 2, 3], greedy(4))?;
+        rig.engine.tick().await;
+        assert_eq!(rig.engine.seqs.len(), 1);
+
+        rig.scheduler.cancel(handle.seq_id)?;
+        rig.engine.tick().await;
+        assert_eq!(rig.engine.seqs.len(), 0);
+        Ok(())
+    }
+
+    /// Three blocks of four: after both prefills the pool is empty, so the
+    /// second sequence is preempted and resumed on fresh blocks. The first
+    /// finishes in that step and frees the blocks the second grows into.
+    #[tokio::test]
+    async fn a_preempted_grammar_sequence_resumes_with_its_state_and_kv() -> Result<()> {
+        let mut rig = rig(PagedPool {
+            block_size: 4,
+            blocks: 3,
+        })?;
+        let rule = "root ::= [12] [34] [56] [78]";
+        let (short, long) = ([1, 2, 3], [4, 5, 6]);
+        let (short_cfg, long_cfg) = (greedy(2), grammar(rule, 4));
+        let short_alone = alone(&rig.executor, &short, &short_cfg).await?;
+        let long_alone = alone(&rig.executor, &long, &long_cfg).await?;
+
+        let mut a = rig.scheduler.submit(short.to_vec(), short_cfg)?;
+        let mut b = rig.scheduler.submit(long.to_vec(), long_cfg)?;
+        drain(&mut rig).await?;
+
+        let preemptions = rig
+            .scheduler
+            .stats()
+            .map_or(0, |stats| stats.total_preemptions);
+        assert!(preemptions >= 1, "the pool must force a preemption");
+        assert!(
+            rig.engine.seqs.recomputes >= 1,
+            "the resumed sequence refills its KV"
+        );
+
+        assert_eq!(ids(&mut a)?, short_alone);
+        let long_ids = ids(&mut b)?;
+        assert_eq!(long_ids, long_alone);
+        let produced = text(&rig.executor, &long_ids);
+        assert!(
+            one_of_each(&produced, &[['1', '2'], ['3', '4'], ['5', '6'], ['7', '8']]),
+            "the grammar state did not survive preemption: {produced:?}"
+        );
+        assert_eq!(rig.engine.seqs.len(), 0);
+        Ok(())
     }
 }

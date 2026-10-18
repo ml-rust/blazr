@@ -2,10 +2,12 @@
 
 pub mod batch_decode;
 pub mod batch_engine;
+mod kv_recompute;
 pub mod latency_window;
 pub(super) mod queue_depth;
 pub mod request_registry;
 pub mod request_scheduler;
+mod seq_sampler;
 pub mod slo_policy;
 pub mod slots;
 

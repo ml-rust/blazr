@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, Weak};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
@@ -26,6 +26,9 @@ use crate::tokenizer::{AnyTokenizer, TokenTextStream};
 const TOKEN_CHANNEL_CAPACITY: usize = 32;
 
 /// Handle returned to callers when submitting a request.
+///
+/// Dropping the handle cancels its request through the scheduler that
+/// queued it. A request that already finished is not touched.
 pub struct RequestHandle {
     /// Sequence ID for tracking
     pub seq_id: SequenceId,
@@ -33,6 +36,39 @@ pub struct RequestHandle {
     pub token_rx: mpsc::Receiver<Result<GeneratedToken>>,
     /// Notified when generation is complete
     pub done_rx: oneshot::Receiver<()>,
+    /// The scheduler `Drop` cancels through. `None` when no scheduler
+    /// carries the request.
+    canceller: Option<Weak<dyn CancelRequest>>,
+}
+
+impl RequestHandle {
+    /// Cancel the request through `canceller` when this handle drops.
+    pub fn cancel_on_drop(mut self, canceller: Weak<dyn CancelRequest>) -> Self {
+        self.canceller = Some(canceller);
+        self
+    }
+}
+
+impl Drop for RequestHandle {
+    /// A dropped handle means the caller stopped listening, so the request
+    /// stops producing. The cancel never awaits, and it holds each lock
+    /// only for one short update.
+    fn drop(&mut self) {
+        let Some(canceller) = self.canceller.take().and_then(|weak| weak.upgrade()) else {
+            return;
+        };
+        canceller.cancel_request(self.seq_id);
+    }
+}
+
+/// A scheduler a dropped [`RequestHandle`] cancels through.
+pub trait CancelRequest: Send + Sync {
+    /// Stop `seq_id` and free what it holds.
+    ///
+    /// `Drop` calls this, so it must not block on an await or on a lock
+    /// another task holds for long. A second call, or a call for a
+    /// finished request, must be a no-op.
+    fn cancel_request(&self, seq_id: SequenceId);
 }
 
 /// The scheduler interface the HTTP handlers use.
@@ -130,17 +166,18 @@ impl RequestRegistry {
             seq_id,
             token_rx,
             done_rx,
+            canceller: None,
         })
     }
 
-    /// Drop `seq_id`'s state without signalling its caller.
+    /// Drop `seq_id`'s state without signalling its caller. Returns
+    /// whether the request was still carried.
     ///
     /// # Errors
     ///
     /// An error when the registry lock is poisoned.
-    pub fn remove(&self, seq_id: SequenceId) -> Result<()> {
-        self.lock_meta()?.remove(&seq_id);
-        Ok(())
+    pub fn remove(&self, seq_id: SequenceId) -> Result<bool> {
+        Ok(self.lock_meta()?.remove(&seq_id).is_some())
     }
 
     /// Signal `seq_id`'s caller that generation ended, then drop its state.
@@ -303,10 +340,10 @@ mod tests {
     async fn finish_signals_the_caller_and_drops_the_state() {
         let registry = RequestRegistry::new();
         let id = registry.next_id();
-        let handle = registry.insert(id, vec![1], config()).expect("insert");
+        let mut handle = registry.insert(id, vec![1], config()).expect("insert");
         registry.finish(id).expect("finish");
         assert!(!registry.contains(id));
-        assert!(handle.done_rx.await.is_ok());
+        assert!((&mut handle.done_rx).await.is_ok());
         assert!(registry.token_sender(id).is_none());
     }
 

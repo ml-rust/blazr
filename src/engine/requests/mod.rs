@@ -9,6 +9,7 @@ mod batch_test_rig;
 pub(in crate::engine) mod kv_recompute;
 pub mod latency_window;
 pub(super) mod queue_depth;
+mod request_cancel;
 pub mod request_registry;
 pub mod request_scheduler;
 mod seq_sampler;
@@ -17,7 +18,7 @@ pub mod slots;
 
 pub use batch_engine::BatchEngine;
 pub use queue_depth::{QueueDepth, Waiting};
-pub use request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
+pub use request_registry::{CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry};
 pub use request_scheduler::RequestScheduler;
 pub use slo_policy::SloBatchPolicy;
 pub use slots::SlotManager;

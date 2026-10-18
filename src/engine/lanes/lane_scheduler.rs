@@ -15,7 +15,7 @@
 //! [`LaneEngine`]: super::lane_engine::LaneEngine
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::mpsc;
@@ -24,7 +24,9 @@ use boostr::inference::scheduler::SequenceId;
 
 use crate::config::GenerationConfig;
 use crate::engine::queue_depth::QueueDepth;
-use crate::engine::request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
+use crate::engine::request_registry::{
+    CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry,
+};
 use crate::engine::slo_policy::SloBatchPolicy;
 
 /// Wakeups the driver can miss without blocking a submitting handler.
@@ -47,6 +49,8 @@ pub struct LaneScheduler {
     queue_depth: QueueDepth,
     /// Holds lane filling while a P95 latency target is breached.
     slo_policy: Option<Arc<SloBatchPolicy>>,
+    /// This scheduler, for the handles it hands out to cancel through.
+    me: Weak<LaneScheduler>,
 }
 
 impl LaneScheduler {
@@ -75,7 +79,7 @@ impl LaneScheduler {
             ));
         }
         let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
-        Ok(Arc::new(Self {
+        Ok(Arc::new_cyclic(|me| Self {
             registry: RequestRegistry::new(),
             waiting: Mutex::new(VecDeque::new()),
             lanes,
@@ -83,6 +87,7 @@ impl LaneScheduler {
             notify_rx: Mutex::new(Some(notify_rx)),
             queue_depth: QueueDepth::new(),
             slo_policy,
+            me: me.clone(),
         }))
     }
 
@@ -104,13 +109,15 @@ impl LaneScheduler {
             self.queue_depth.set(waiting.len());
         }
         let _ = self.notify_tx.try_send(());
-        Ok(handle)
+        let canceller: Weak<dyn CancelRequest> = self.me.clone();
+        Ok(handle.cancel_on_drop(canceller))
     }
 
     /// Drop a request: out of the queue, out of the registry.
     ///
     /// A request already in a lane keeps that lane until the driver's next
-    /// step finds its channel gone and releases it.
+    /// step finds its channel gone and releases it. A second call is a
+    /// no-op. A dropped [`RequestHandle`] calls this.
     ///
     /// # Errors
     ///
@@ -121,7 +128,7 @@ impl LaneScheduler {
             waiting.retain(|&id| id != seq_id);
             self.queue_depth.set(waiting.len());
         }
-        self.registry.remove(seq_id)
+        self.registry.remove(seq_id).map(|_| ())
     }
 
     /// The oldest waiting request, removed from the queue.
@@ -168,6 +175,14 @@ impl LaneScheduler {
         self.waiting
             .lock()
             .map_err(|e| anyhow!("lane scheduler queue lock is poisoned: {e}; restart the server"))
+    }
+}
+
+impl CancelRequest for LaneScheduler {
+    fn cancel_request(&self, seq_id: SequenceId) {
+        if let Err(e) = self.cancel(seq_id) {
+            tracing::error!(seq_id, "cancelling a dropped lane request failed: {e:#}");
+        }
     }
 }
 

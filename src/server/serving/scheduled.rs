@@ -63,6 +63,9 @@ pub async fn generate_text_routed(
 /// The scheduler's engine applies the stop sequences and builds the
 /// logprobs, so the text arrives cut and no second stop pass runs here.
 ///
+/// Dropping this future, on a timeout or a disconnect, drops the request's
+/// handle. The handle's `Drop` cancels the request in the scheduler.
+///
 /// # Errors
 ///
 /// An error string when the submit or the generation fails.
@@ -196,6 +199,75 @@ mod tests {
             &[],
         );
         assert_eq!(count, Some(2.0), "{rendered}");
+    }
+
+    /// A future the timeout drops cancels its request: queued, it leaves the
+    /// queue at once. Running, it leaves at the engine's next schedule. Both
+    /// times every KV block is free again.
+    #[tokio::test]
+    async fn a_timed_out_request_is_cancelled_and_frees_its_blocks() {
+        const BLOCKS: usize = 64;
+        let config = SchedulerConfig {
+            max_batch_size: 2,
+            block_size: 4,
+            ..Default::default()
+        };
+        let scheduler = RequestScheduler::new(CpuBlockAllocator::new(BLOCKS, 4), config);
+        let free = |s: &RequestScheduler| s.block_stats().map(|b| b.free_blocks);
+        let gen_config = GenerationConfig {
+            max_tokens: 32,
+            ..GenerationConfig::default()
+        };
+
+        // Queued: nothing schedules it, so the timeout drops it in the queue.
+        let queued = tokio::time::timeout(
+            Duration::from_millis(20),
+            generate_via_scheduler(scheduler.as_ref(), vec![5, 6, 7], &gen_config),
+        )
+        .await;
+        assert!(queued.is_err(), "no token arrives, so the timeout fires");
+        assert!(!scheduler.has_work(), "the queued request is gone");
+        assert_eq!(scheduler.queue_depth(), 0);
+        assert_eq!(free(scheduler.as_ref()), Some(BLOCKS));
+
+        // Running: admitted with blocks, one token streamed, then dropped.
+        let driver = Arc::clone(&scheduler);
+        let feed = tokio::spawn(async move {
+            let seq_id = loop {
+                if let Some(batch) = driver.schedule_batch().ok().flatten() {
+                    break batch.prefill_sequences[0];
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            };
+            if let Some(tx) = driver.get_token_sender(seq_id) {
+                let _ = tx.send(Ok(token(1, None))).await;
+            }
+            seq_id
+        });
+        let running = tokio::time::timeout(
+            Duration::from_millis(50),
+            generate_via_scheduler(scheduler.as_ref(), vec![5, 6, 7], &gen_config),
+        )
+        .await;
+        let seq_id = feed.await.expect("the feed task runs");
+        assert!(
+            running.is_err(),
+            "the stream never finishes, so the timeout fires"
+        );
+        assert!(
+            !scheduler.is_live(seq_id),
+            "the drop marks the request cancelled"
+        );
+        assert!(
+            free(scheduler.as_ref()).is_some_and(|f| f < BLOCKS),
+            "the engine still holds its blocks"
+        );
+
+        // The engine's next schedule drops it before it builds a batch.
+        let next = scheduler.schedule_batch().expect("schedule");
+        assert!(next.is_none(), "the cancelled request takes no slot");
+        assert!(!scheduler.has_work());
+        assert_eq!(free(scheduler.as_ref()), Some(BLOCKS));
     }
 
     /// A request whose TTFT, ITL and end-to-end time break `server.slo`

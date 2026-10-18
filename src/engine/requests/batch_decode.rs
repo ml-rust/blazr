@@ -17,6 +17,7 @@ use boostr::{
 
 use super::batch_emit::emit_token;
 use super::kv_recompute::{block_ids, block_slot, recompute_kv};
+use super::request_cancel::{end_cancelled, CancelPhase};
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;
@@ -70,6 +71,11 @@ where
     let mut seq_data: Vec<DecodeSeqData> = Vec::with_capacity(decode_seqs.len());
 
     for &seq_id in decode_seqs {
+        // A cancelled row leaves before the forward, so it takes no slot.
+        if !scheduler.is_live(seq_id) {
+            end_cancelled(scheduler, seqs, seq_id, CancelPhase::Decode)?;
+            continue;
+        }
         let token_history = match scheduler.get_token_history(seq_id) {
             Some(h) => h,
             None => continue,
@@ -162,6 +168,7 @@ where
     let rope_positions = Tensor::from_slice(&positions_flat, &[n], device)?;
 
     // Single batched forward pass — model dispatches paged decode attention per (batch, head).
+    seqs.count_forward();
     let batch_logits = executor
         .model()
         .forward_with_paged_kv_cache(
@@ -185,12 +192,16 @@ where
             .narrow(0, batch_idx, 1)
             .map_err(|e| anyhow!("narrow logits for seq {}: {}", seq_id, e))?;
 
-        // A request cancelled during the forward produces nothing more.
-        if !scheduler.is_live(seq_id) {
-            continue;
-        }
-
-        emit_token(executor, scheduler, seqs, seq_id, &seq_logits).await?;
+        // A request cancelled during the forward ends here, with no token.
+        emit_token(
+            executor,
+            scheduler,
+            seqs,
+            seq_id,
+            &seq_logits,
+            CancelPhase::Decode,
+        )
+        .await?;
     }
 
     Ok(())

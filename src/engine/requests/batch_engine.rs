@@ -23,6 +23,7 @@ use boostr::{
 };
 
 use super::batch_decode::process_decode_batch;
+use super::request_cancel::{end_cancelled, CancelPhase};
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;
@@ -39,6 +40,10 @@ pub struct BatchEngine<R: Runtime<DType = DType>> {
     prefill_chunk_size: Option<usize>,
     /// Sampling state of every sequence past its first prefill.
     pub(super) seqs: BatchSeqs<R>,
+    /// Runs after each prefill chunk with the tokens prefilled so far, so a
+    /// test can act between chunks.
+    #[cfg(test)]
+    pub(super) after_chunk: Option<Box<dyn FnMut(usize) + Send>>,
 }
 
 impl<R: Runtime<DType = DType>> BatchEngine<R>
@@ -95,6 +100,8 @@ where
             paged_cache,
             prefill_chunk_size: None,
             seqs,
+            #[cfg(test)]
+            after_chunk: None,
         })
     }
 
@@ -141,10 +148,11 @@ where
         tracing::info!("BatchEngine: continuous batching loop started");
 
         loop {
-            // Wait for new work or process existing work
-            if !self.scheduler.has_work() {
+            // Wait for new work or process existing work. A wakeup goes back
+            // to the check, so a cancel that leaves no work sleeps again.
+            if !self.has_live_work() {
                 match notify_rx.recv().await {
-                    Some(()) => {}
+                    Some(()) => continue,
                     None => {
                         tracing::info!("BatchEngine: notify channel closed, shutting down");
                         break;
@@ -157,6 +165,16 @@ where
 
             self.tick().await;
         }
+    }
+
+    /// Drop every cancelled sequence, then report whether work remains.
+    pub(super) fn has_live_work(&mut self) -> bool {
+        if let Err(e) = self.scheduler.reap_cancelled() {
+            tracing::error!("BatchEngine: dropping cancelled requests failed: {e:#}");
+        }
+        let scheduler = &self.scheduler;
+        self.seqs.end_gone(|seq_id| scheduler.is_live(seq_id));
+        self.scheduler.has_work()
     }
 
     /// Schedule and process one batch, then drop the state of every
@@ -173,9 +191,15 @@ where
                             let err = anyhow!(
                                 "the batch this request ran in failed: {e:#}. Retry the request."
                             );
+                            // A caller that already left needs no error.
                             let _ = tx.send(Err(err)).await;
                         }
-                        let _ = self.scheduler.finish_sequence(seq_id);
+                        if let Err(e) = self.scheduler.finish_sequence(seq_id) {
+                            tracing::error!(
+                                seq_id,
+                                "BatchEngine: ending a sequence of a failed batch failed: {e:#}"
+                            );
+                        }
                     }
                 }
             }
@@ -214,6 +238,16 @@ where
 
         // Process prefill sequences
         for &seq_id in &batch.prefill_sequences {
+            // A sequence cancelled after admission skips its prefill forward.
+            if !self.scheduler.is_live(seq_id) {
+                end_cancelled(
+                    &self.scheduler,
+                    &mut self.seqs,
+                    seq_id,
+                    CancelPhase::Prefill,
+                )?;
+                continue;
+            }
             let ended = if chunk_size > 0 {
                 self.process_prefill_chunked(seq_id, batch, chunk_size)
                     .await?

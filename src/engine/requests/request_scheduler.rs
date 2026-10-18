@@ -6,9 +6,9 @@
 //! - A scheduling loop that produces batches for the executor
 //!
 //! The per-request metadata and channels live in [`RequestRegistry`], shared
-//! with the other schedulers.
+//! with the other schedulers. Cancellation lives in `request_cancel`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
@@ -20,7 +20,8 @@ use boostr::inference::scheduler::{
 };
 
 use super::queue_depth::QueueDepth;
-use super::request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
+use super::request_cancel::PendingCancels;
+use super::request_registry::{CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry};
 use super::slo_policy::SloBatchPolicy;
 use crate::config::GenerationConfig;
 use crate::engine::types::{FinishReason, GeneratedToken};
@@ -47,11 +48,15 @@ pub struct InferenceRequest {
 /// the lifecycle of inference requests in a continuous batching loop.
 pub struct RequestScheduler {
     /// Inner boostr scheduler (protected by mutex for multi-threaded access)
-    inner: Mutex<SequenceScheduler<CpuBlockAllocator>>,
+    pub(super) inner: Mutex<SequenceScheduler<CpuBlockAllocator>>,
     /// Per-sequence metadata (gen config, token channels)
-    registry: RequestRegistry,
+    pub(super) registry: RequestRegistry,
+    /// Running requests cancelled since the engine last dropped them.
+    pub(super) cancels: PendingCancels,
+    /// This scheduler, for the handles it hands out to cancel through.
+    me: Weak<RequestScheduler>,
     /// Channel to notify the scheduling loop of new work
-    notify_tx: mpsc::Sender<()>,
+    pub(super) notify_tx: mpsc::Sender<()>,
     /// Receiver end (held by the scheduling loop)
     notify_rx: Mutex<Option<mpsc::Receiver<()>>>,
     /// Waiting plus preempted sequences, published as `blazr_queue_depth`.
@@ -92,7 +97,7 @@ impl RequestScheduler {
         let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
         let max_batch_size = config.max_batch_size;
         // A sequence longer than the pool or the batch token budget never
-        // schedules again, so neither may be exceeded.
+        // schedules again, so a prompt must fit both.
         let pool_tokens = allocator.total_blocks().saturating_mul(config.block_size);
         let context_len = config
             .max_seq_len
@@ -102,9 +107,11 @@ impl RequestScheduler {
         if let Some(cache) = prefix_cache {
             scheduler = scheduler.with_prefix_cache(cache);
         }
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
             inner: Mutex::new(scheduler),
             registry: RequestRegistry::new(),
+            cancels: PendingCancels::new(),
+            me: me.clone(),
             notify_tx,
             notify_rx: Mutex::new(Some(notify_rx)),
             queue_depth: QueueDepth::new(),
@@ -115,7 +122,7 @@ impl RequestScheduler {
     }
 
     /// Publish the waiting count of `sched` as this scheduler's queue depth.
-    fn publish_depth(&self, sched: &SequenceScheduler<CpuBlockAllocator>) {
+    pub(super) fn publish_depth(&self, sched: &SequenceScheduler<CpuBlockAllocator>) {
         let stats = sched.stats();
         self.queue_depth
             .set(stats.waiting_count + stats.preempted_count);
@@ -161,34 +168,28 @@ impl RequestScheduler {
         let request = SequenceRequest::new(seq_id, prompt_tokens.clone())
             .with_max_tokens(gen_config.max_tokens);
 
-        {
-            let mut sched = self
-                .inner
-                .lock()
-                .map_err(|e| anyhow!("scheduler lock: {e}"))?;
-            sched.add_request(request).map_err(|e| anyhow!("{e}"))?;
-            self.publish_depth(&sched);
-        }
-
+        // The registry entry comes first: the engine reads the prompt from it
+        // as soon as the sequence can be scheduled.
         let handle = self.registry.insert(seq_id, prompt_tokens, gen_config)?;
+        let queued = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow!("scheduler lock: {e}"))
+            .and_then(|mut sched| {
+                sched.add_request(request).map_err(|e| anyhow!("{e}"))?;
+                self.publish_depth(&sched);
+                Ok(())
+            });
+        if let Err(e) = queued {
+            self.registry.remove(seq_id)?;
+            return Err(e);
+        }
 
         // Wake the scheduling loop
         let _ = self.notify_tx.try_send(());
 
-        Ok(handle)
-    }
-
-    /// Cancel a pending or running request
-    pub fn cancel(&self, seq_id: SequenceId) -> Result<()> {
-        {
-            let mut sched = self
-                .inner
-                .lock()
-                .map_err(|e| anyhow!("scheduler lock: {e}"))?;
-            sched.abort_sequence(seq_id).map_err(|e| anyhow!("{e}"))?;
-            self.publish_depth(&sched);
-        }
-        self.registry.remove(seq_id)
+        let canceller: Weak<dyn CancelRequest> = self.me.clone();
+        Ok(handle.cancel_on_drop(canceller))
     }
 
     /// Schedule the next batch of work. Called by the scheduling loop.
@@ -196,17 +197,23 @@ impl RequestScheduler {
     ///
     /// With an SLO policy, a P95 breach stops the batch from growing past
     /// the sequences already running.
+    ///
+    /// Every cancelled request leaves the scheduler first, under the same
+    /// lock, so a cancelled request is never admitted or resumed.
     pub fn schedule_batch(&self) -> Result<Option<ScheduledBatch>> {
         let mut sched = self
             .inner
             .lock()
             .map_err(|e| anyhow!("scheduler lock: {e}"))?;
+        let aborted = self.abort_marked(&mut sched)?;
         let limit = match &self.slo_policy {
             Some(policy) => policy.batch_limit(sched.stats().running_count, self.max_batch_size),
             None => self.max_batch_size,
         };
         let batch = sched.schedule_with_limit(limit).map_err(|e| anyhow!("{e}"));
         self.publish_depth(&sched);
+        drop(sched);
+        self.forget_all(aborted)?;
         batch
     }
 
@@ -292,9 +299,9 @@ impl RequestScheduler {
     }
 
     /// Whether `seq_id`'s request is still carried. A finished or cancelled
-    /// request is not.
+    /// request is not, even before the engine drops it.
     pub fn is_live(&self, seq_id: SequenceId) -> bool {
-        self.registry.contains(seq_id)
+        self.registry.contains(seq_id) && !self.cancels.contains(seq_id)
     }
 
     /// Get block table for a sequence from the inner scheduler

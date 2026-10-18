@@ -14,6 +14,7 @@ use boostr::{
     SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
+use super::request_cancel::{end_cancelled, CancelPhase};
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;
@@ -27,6 +28,10 @@ use crate::engine::types::{FinishReason, GeneratedToken};
 /// that finishes frees its sampler state, its KV blocks and its request at
 /// once, so no later step decodes for it. Returns whether it ended.
 ///
+/// A cancelled sequence ends before it samples. A send to a closed channel
+/// ends the sequence as a cancel in `phase`. Either way nothing decodes
+/// for it again.
+///
 /// # Errors
 ///
 /// An error when the sample, the logprobs or the scheduler update fails.
@@ -36,6 +41,7 @@ pub(super) async fn emit_token<R: Runtime<DType = DType>>(
     seqs: &mut BatchSeqs<R>,
     seq_id: SequenceId,
     logits: &Tensor<R>,
+    phase: CancelPhase,
 ) -> Result<bool>
 where
     R::Client: TensorOps<R>
@@ -51,6 +57,10 @@ where
         + ModelClient<R>
         + boostr::quant::traits::DequantOps<R>,
 {
+    if !scheduler.is_live(seq_id) {
+        end_cancelled(scheduler, seqs, seq_id, phase)?;
+        return Ok(true);
+    }
     let sampled = seqs.sample(executor, seq_id, logits)?;
 
     // The scheduler also ends a sequence that fills its context. The
@@ -59,15 +69,21 @@ where
     let finish = sampled.finish.or(full.then_some(FinishReason::Length));
     let cut = scheduler.token_text(seq_id, executor.tokenizer(), sampled.id, finish);
 
-    if let Some(tx) = scheduler.get_token_sender(seq_id) {
-        let token = GeneratedToken {
-            token_id: sampled.id,
-            text: cut.text,
-            logprob: sampled.logprob,
-            top_logprobs: sampled.top_logprobs,
-            finish_reason: cut.finish,
-        };
-        let _ = tx.send(Ok(token)).await;
+    let token = GeneratedToken {
+        token_id: sampled.id,
+        text: cut.text,
+        logprob: sampled.logprob,
+        top_logprobs: sampled.top_logprobs,
+        finish_reason: cut.finish,
+    };
+    let delivered = match scheduler.get_token_sender(seq_id) {
+        Some(tx) => tx.send(Ok(token)).await.is_ok(),
+        None => false,
+    };
+    if !delivered {
+        // The caller stopped listening: no later step decodes for it.
+        end_cancelled(scheduler, seqs, seq_id, phase)?;
+        return Ok(true);
     }
     scheduler.append_to_history(seq_id, sampled.id);
 

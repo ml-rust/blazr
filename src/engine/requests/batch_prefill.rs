@@ -17,6 +17,7 @@ use boostr::{
 use super::batch_emit::emit_token;
 use super::batch_engine::BatchEngine;
 use super::kv_recompute::{block_ids, block_slots};
+use super::request_cancel::{end_cancelled, CancelPhase};
 use crate::config::GenerationConfig;
 
 impl<R: Runtime<DType = DType>> BatchEngine<R>
@@ -70,8 +71,7 @@ where
         let blocks = batch
             .block_tables
             .get(&seq_id)
-            .ok_or_else(|| anyhow!("block table for seq {} not found", seq_id))?
-            .clone();
+            .ok_or_else(|| anyhow!("block table for seq {} not found", seq_id))?;
 
         let device = self.executor.device().clone();
 
@@ -81,13 +81,23 @@ where
         let mut logits = None;
 
         while processed < total {
+            // A sequence cancelled between chunks stops here and frees its blocks.
+            if !self.scheduler.is_live(seq_id) {
+                end_cancelled(
+                    &self.scheduler,
+                    &mut self.seqs,
+                    seq_id,
+                    CancelPhase::Prefill,
+                )?;
+                return Ok(true);
+            }
             let end = (processed + chunk_size).min(total);
             let chunk = &prompt_tokens[processed..end];
 
-            let slot_mapping_vec = block_slots(&blocks, block_size, processed..end);
+            let slot_mapping_vec = block_slots(blocks, block_size, processed..end);
             let slot_mapping = Tensor::from_slice(&slot_mapping_vec, &[chunk.len()], &device)?;
 
-            let bt_vec = block_ids(&blocks);
+            let bt_vec = block_ids(blocks);
             let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &device)?;
 
             let input = self.executor.create_input_tensor(chunk)?;
@@ -97,6 +107,7 @@ where
                 .as_ref()
                 .ok_or_else(|| anyhow!("paged cache not initialized"))?;
 
+            self.seqs.count_forward();
             logits = Some(
                 self.executor
                     .model()
@@ -116,6 +127,10 @@ where
             );
 
             processed = end;
+            #[cfg(test)]
+            if let Some(hook) = self.after_chunk.as_mut() {
+                hook(processed);
+            }
 
             // Between chunks, run pending decode steps for other sequences
             if processed < total && !batch.decode_sequences.is_empty() {
@@ -155,6 +170,7 @@ where
             &mut self.seqs,
             seq_id,
             logits,
+            CancelPhase::Prefill,
         )
         .await
     }
@@ -219,6 +235,7 @@ where
         let input = self.executor.create_input_tensor(prefill_tokens)?;
 
         // Run prefill forward pass starting from cached offset
+        self.seqs.count_forward();
         let logits = self
             .executor
             .model()

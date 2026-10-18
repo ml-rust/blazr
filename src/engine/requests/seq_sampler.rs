@@ -61,6 +61,9 @@ pub(in crate::engine) struct BatchSeqs<R: Runtime<DType = DType>> {
     /// KV recomputes this engine ran, for the preemption tests.
     #[cfg(test)]
     pub(super) recomputes: usize,
+    /// Prefill and decode forwards this engine ran, for the cancel tests.
+    #[cfg(test)]
+    pub(super) forwards: usize,
 }
 
 impl<R: Runtime<DType = DType>> BatchSeqs<R> {
@@ -78,6 +81,8 @@ impl<R: Runtime<DType = DType>> BatchSeqs<R> {
             scratch,
             #[cfg(test)]
             recomputes: 0,
+            #[cfg(test)]
+            forwards: 0,
         })
     }
 
@@ -125,6 +130,15 @@ impl<R: Runtime<DType = DType>> BatchSeqs<R> {
             self.recomputes += 1;
         }
         stale
+    }
+
+    /// Count one prefill or decode forward for the cancel tests. A no-op
+    /// outside tests.
+    pub(in crate::engine) fn count_forward(&mut self) {
+        #[cfg(test)]
+        {
+            self.forwards += 1;
+        }
     }
 
     /// Sequences that hold a state, for the cleanup tests.

@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use super::metrics;
 use crate::config::GenerationConfig;
-use crate::engine::{FinishReason, GenerationResult, GenerationScheduler};
+use crate::engine::{FinishReason, GeneratedToken, GenerationResult, GenerationScheduler};
 use crate::server::handlers::Route;
 
 /// Result of a batched generation via the configured scheduler
@@ -18,6 +18,8 @@ pub struct BatchedGenerationResult {
     pub finish_reason: FinishReason,
     /// Time from submit to the first token.
     pub prompt_eval_duration_ms: u64,
+    /// Every token with its logprobs, when the request asked for them.
+    pub token_logprobs: Option<Vec<GeneratedToken>>,
 }
 
 /// Generate `prompt_tokens` on `route` and return the whole text.
@@ -41,7 +43,7 @@ pub async fn generate_text_routed(
                 completion_tokens: r.completion_tokens,
                 finish_reason: r.finish_reason,
                 prompt_eval_duration_ms: r.prompt_eval_duration_ms,
-                token_logprobs: None,
+                token_logprobs: r.token_logprobs,
             })
         }
         None => {
@@ -57,6 +59,9 @@ pub async fn generate_text_routed(
 ///
 /// The first token's arrival sets the prompt eval time. Each later token
 /// records one inter-token latency sample.
+///
+/// The scheduler's engine applies the stop sequences and builds the
+/// logprobs, so the text arrives cut and no second stop pass runs here.
 ///
 /// # Errors
 ///
@@ -78,6 +83,7 @@ pub async fn generate_via_scheduler(
     let mut finish = FinishReason::Length;
     let mut prompt_eval_ms = 0u64;
     let mut last_token = start;
+    let mut token_logprobs = gen_config.logprobs.then(Vec::new);
 
     while let Some(result) = handle.token_rx.recv().await {
         match result {
@@ -91,7 +97,11 @@ pub async fn generate_via_scheduler(
                 last_token = now;
                 text.push_str(&token.text);
                 completion_tokens += 1;
-                if let Some(reason) = token.finish_reason {
+                let finish_reason = token.finish_reason;
+                if let Some(tokens) = token_logprobs.as_mut() {
+                    tokens.push(token);
+                }
+                if let Some(reason) = finish_reason {
                     finish = reason;
                     break;
                 }
@@ -108,6 +118,7 @@ pub async fn generate_via_scheduler(
         completion_tokens,
         finish_reason: finish,
         prompt_eval_duration_ms: prompt_eval_ms,
+        token_logprobs,
     })
 }
 

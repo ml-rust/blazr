@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
 
-use boostr::inference::memory::CpuBlockAllocator;
+use boostr::inference::memory::{BlockAllocator, CpuBlockAllocator};
 use boostr::inference::prefix_cache::PrefixCache;
 use boostr::inference::scheduler::{
     ScheduledBatch, SchedulerConfig, SequenceId, SequenceRequest, SequenceScheduler, SequenceState,
@@ -23,7 +23,8 @@ use super::queue_depth::QueueDepth;
 use super::request_registry::{GenerationScheduler, RequestHandle, RequestRegistry};
 use super::slo_policy::SloBatchPolicy;
 use crate::config::GenerationConfig;
-use crate::engine::types::GeneratedToken;
+use crate::engine::types::{FinishReason, GeneratedToken};
+use crate::engine::{token_budget, StopCut};
 
 /// Wakeups the scheduling loop can miss without blocking a submitting handler.
 const NOTIFY_CHANNEL_CAPACITY: usize = 64;
@@ -59,6 +60,10 @@ pub struct RequestScheduler {
     slo_policy: Option<Arc<SloBatchPolicy>>,
     /// `SchedulerConfig::max_batch_size`, the cap the policy sizes against.
     max_batch_size: usize,
+    /// The most tokens one sequence holds: the least of
+    /// `SchedulerConfig::max_seq_len`, `max_batch_tokens` and the token
+    /// slots of the whole block pool.
+    context_len: usize,
 }
 
 impl RequestScheduler {
@@ -86,6 +91,13 @@ impl RequestScheduler {
     ) -> Arc<Self> {
         let (notify_tx, notify_rx) = mpsc::channel(NOTIFY_CHANNEL_CAPACITY);
         let max_batch_size = config.max_batch_size;
+        // A sequence longer than the pool or the batch token budget never
+        // schedules again, so neither may be exceeded.
+        let pool_tokens = allocator.total_blocks().saturating_mul(config.block_size);
+        let context_len = config
+            .max_seq_len
+            .min(pool_tokens)
+            .min(config.max_batch_tokens);
         let mut scheduler = SequenceScheduler::new(allocator, config);
         if let Some(cache) = prefix_cache {
             scheduler = scheduler.with_prefix_cache(cache);
@@ -98,6 +110,7 @@ impl RequestScheduler {
             queue_depth: QueueDepth::new(),
             slo_policy,
             max_batch_size,
+            context_len,
         })
     }
 
@@ -114,12 +127,37 @@ impl RequestScheduler {
     }
 
     /// Submit a new inference request. Returns a handle for receiving tokens.
+    ///
+    /// `max_tokens` is capped by [`token_budget`] over this scheduler's
+    /// context, as the single-sequence loop caps it. A request with no
+    /// budget left, or an empty prompt, ends at once with no tokens.
+    ///
+    /// # Errors
+    ///
+    /// An error when the prompt is longer than the context, or when the
+    /// request cannot be queued.
     pub fn submit(
         &self,
         prompt_tokens: Vec<u32>,
-        gen_config: GenerationConfig,
+        mut gen_config: GenerationConfig,
     ) -> Result<RequestHandle> {
+        if prompt_tokens.len() > self.context_len {
+            return Err(anyhow!(
+                "the prompt of {} tokens exceeds the {}-token context this scheduler serves; \
+                 shorten the prompt",
+                prompt_tokens.len(),
+                self.context_len
+            ));
+        }
+        gen_config.max_tokens =
+            token_budget(gen_config.max_tokens, self.context_len, prompt_tokens.len());
         let seq_id = self.registry.next_id();
+        if gen_config.max_tokens == 0 || prompt_tokens.is_empty() {
+            // Nothing to decode: the caller's stream closes with no tokens.
+            let handle = self.registry.insert(seq_id, prompt_tokens, gen_config)?;
+            self.registry.finish(seq_id)?;
+            return Ok(handle);
+        }
         let request = SequenceRequest::new(seq_id, prompt_tokens.clone())
             .with_max_tokens(gen_config.max_tokens);
 
@@ -225,18 +263,17 @@ impl RequestScheduler {
         self.registry.token_sender(seq_id)
     }
 
-    /// The text `token_id` adds to `seq_id`'s response. See
-    /// [`RequestRegistry::token_text`](super::request_registry::RequestRegistry::token_text).
+    /// The text `token_id` adds to `seq_id`'s response, cut at its stops.
+    /// See [`RequestRegistry::token_text`].
     pub fn token_text(
         &self,
         seq_id: SequenceId,
         tokenizer: &crate::tokenizer::AnyTokenizer,
         token_id: u32,
-        is_eos: bool,
-        is_final: bool,
-    ) -> String {
+        finish: Option<FinishReason>,
+    ) -> StopCut {
         self.registry
-            .token_text(seq_id, tokenizer, token_id, is_eos, is_final)
+            .token_text(seq_id, tokenizer, token_id, finish)
     }
 
     /// Get token history for a sequence (prompt + generated so far)
@@ -376,6 +413,38 @@ mod tests {
 
         drop(scheduler);
         assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(0.0));
+    }
+
+    /// A pool of two 4-token blocks gives an 8-token context.
+    #[tokio::test]
+    async fn max_tokens_is_capped_by_the_context_the_pool_holds() {
+        let config = SchedulerConfig {
+            max_batch_size: 2,
+            block_size: 4,
+            ..Default::default()
+        };
+        let scheduler = RequestScheduler::new(CpuBlockAllocator::new(2, 4), config);
+        let long = GenerationConfig {
+            max_tokens: 100,
+            ..GenerationConfig::default()
+        };
+
+        let handle = scheduler
+            .submit(vec![1, 2, 3], long.clone())
+            .expect("submit");
+        let capped = scheduler
+            .get_gen_config(handle.seq_id)
+            .map(|c| c.max_tokens);
+        assert_eq!(capped, Some(5));
+
+        let mut full = scheduler
+            .submit(vec![1; 8], long.clone())
+            .expect("a prompt that fills the context is admitted");
+        assert!(full.token_rx.recv().await.is_none(), "no token is decoded");
+        assert!(!scheduler.is_live(full.seq_id));
+
+        let err = scheduler.submit(vec![1; 9], long);
+        assert!(err.is_err_and(|e| e.to_string().contains("exceeds the 8-token context")));
     }
 
     #[test]

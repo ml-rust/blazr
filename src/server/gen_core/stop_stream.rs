@@ -10,7 +10,7 @@ use futures::StreamExt;
 
 use super::streaming::StreamToken;
 use crate::config::GenerationConfig;
-use crate::engine::{FinishReason, StopMatcher};
+use crate::engine::StopMatcher;
 use crate::runtime::ServerRuntime;
 use crate::server::metrics;
 
@@ -91,27 +91,14 @@ async fn forward_with_stop_sequences<S>(
                 }
                 last_token_time = std::time::Instant::now();
 
-                let step = matcher.push(&token.text);
-                if step.stopped {
+                // A match ends with `Stop`. The last token carries the
+                // held-back text, which is not a stop.
+                let cut = matcher.cut_token(&token.text, token.finish_reason);
+                if cut.finish.is_some() {
                     let _ = tx
                         .send(StreamToken {
-                            text: step.emit,
-                            finish_reason: Some(FinishReason::Stop),
-                            error: None,
-                        })
-                        .await;
-                    ended = true;
-                    break;
-                }
-
-                if let Some(reason) = token.finish_reason {
-                    // The last token ends the text: held-back text is not a stop.
-                    let mut text = step.emit;
-                    text.push_str(&matcher.finish());
-                    let _ = tx
-                        .send(StreamToken {
-                            text,
-                            finish_reason: Some(reason),
+                            text: cut.text,
+                            finish_reason: cut.finish,
                             error: None,
                         })
                         .await;
@@ -120,12 +107,12 @@ async fn forward_with_stop_sequences<S>(
                 }
 
                 // A token held back by the matcher sends nothing.
-                if step.emit.is_empty() && !token.text.is_empty() {
+                if cut.text.is_empty() && !token.text.is_empty() {
                     continue;
                 }
                 if tx
                     .send(StreamToken {
-                        text: step.emit,
+                        text: cut.text,
                         finish_reason: None,
                         error: None,
                     })
@@ -170,6 +157,7 @@ async fn forward_with_stop_sequences<S>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::FinishReason;
 
     fn tok(
         text: &str,

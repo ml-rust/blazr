@@ -152,11 +152,12 @@ impl LaneEngine {
             // most what its prompt leaves free in that lane. It decodes at
             // least one, so the lane always reaches a finish reason and comes
             // back.
-            let room = self
-                .executor
-                .qwen35_lane_capacity()
-                .saturating_sub(prompt_tokens.len());
-            gen_config.max_tokens = gen_config.max_tokens.clamp(1, room.max(1));
+            gen_config.max_tokens = crate::engine::token_budget(
+                gen_config.max_tokens,
+                self.executor.qwen35_lane_capacity(),
+                prompt_tokens.len(),
+            )
+            .max(1);
 
             let outcome = if self.chunk_size > 0 {
                 self.admit_chunked(&prompt_tokens, &gen_config).await
@@ -267,7 +268,8 @@ impl LaneEngine {
     /// Send one token to its caller and record it.
     ///
     /// Returns `false` when this request is over: the lane reported a finish
-    /// reason, or the caller's receiver is gone.
+    /// reason, the token completed a stop sequence, or the caller's receiver
+    /// is gone.
     async fn deliver(
         &self,
         seq_id: SequenceId,
@@ -275,13 +277,8 @@ impl LaneEngine {
         finish_reason: Option<FinishReason>,
     ) -> bool {
         let registry = self.scheduler.registry();
-        let text = registry.token_text(
-            seq_id,
-            self.executor.tokenizer(),
-            token_id,
-            finish_reason == Some(FinishReason::Eos),
-            finish_reason.is_some(),
-        );
+        let cut = registry.token_text(seq_id, self.executor.tokenizer(), token_id, finish_reason);
+        let (text, finish_reason) = (cut.text, cut.finish);
         registry.push_history(seq_id, token_id);
         let delivered = registry
             .send_token(

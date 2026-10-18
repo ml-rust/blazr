@@ -133,19 +133,17 @@ fn paged_batching(
     device: &str,
 ) -> Result<Arc<dyn GenerationScheduler>> {
     let block_size = executor.config().inference.block_size;
-    let kv_pool = executor.config().inference.kv_pool_blocks;
     let max_ctx = executor.config().inference.max_context_len.unwrap_or(4096);
 
-    let total_blocks = if kv_pool > 0 {
-        kv_pool
-    } else {
-        (max_ctx * max_batch / block_size).max(256)
-    };
+    // The scheduler hands out block ids of the engine's own KV pool, so both
+    // hold the same number of blocks.
+    let total_blocks = BatchEngine::<ServerRuntime>::kv_pool_blocks(&executor)?;
 
     let allocator = boostr::inference::memory::CpuBlockAllocator::new(total_blocks, block_size);
     let sched_config = boostr::inference::scheduler::SchedulerConfig {
         max_batch_size: max_batch,
         max_batch_tokens: max_ctx,
+        max_seq_len: executor.config().max_seq_len(),
         block_size,
         ..Default::default()
     };

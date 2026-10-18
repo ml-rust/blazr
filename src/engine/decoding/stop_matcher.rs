@@ -4,6 +4,17 @@
 //! The matcher holds back text that can still grow into a stop, so no part
 //! of a stop reaches the caller.
 
+use crate::engine::FinishReason;
+
+/// One generated token's text after the stop check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopCut {
+    /// Text that is safe to send for this token.
+    pub text: String,
+    /// `Stop` on a match, else the token's own finish reason.
+    pub finish: Option<FinishReason>,
+}
+
 /// Result of pushing one piece into a [`StopMatcher`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StopStep {
@@ -67,6 +78,25 @@ impl StopMatcher {
     /// Return the held-back text when generation ends without a stop.
     pub fn finish(&mut self) -> String {
         std::mem::take(&mut self.pending)
+    }
+
+    /// Push one token's `piece`. `finish` is the token's own finish reason.
+    ///
+    /// A match finishes with `Stop` and carries the text before the stop.
+    /// A last token without a match also carries the held-back text.
+    pub fn cut_token(&mut self, piece: &str, finish: Option<FinishReason>) -> StopCut {
+        let step = self.push(piece);
+        if step.stopped {
+            return StopCut {
+                text: step.emit,
+                finish: Some(FinishReason::Stop),
+            };
+        }
+        let mut text = step.emit;
+        if finish.is_some() {
+            text.push_str(&self.finish());
+        }
+        StopCut { text, finish }
     }
 
     /// Start index of the earliest stop in `pending`, longest stop on a tie.
@@ -242,6 +272,27 @@ mod tests {
         let step = m.push("d");
         assert_eq!(step.emit, "abd");
         assert!(!step.stopped);
+    }
+
+    #[test]
+    fn cut_token_stops_holds_and_flushes_on_the_last_token() {
+        let mut m = matcher(&["END"]);
+        let cut = |text: &str, finish| StopCut {
+            text: text.to_string(),
+            finish,
+        };
+        assert_eq!(m.cut_token("go EN", None), cut("go ", None));
+        assert_eq!(
+            m.cut_token("D tail", Some(FinishReason::Length)),
+            cut("", Some(FinishReason::Stop))
+        );
+
+        let mut m = matcher(&["END"]);
+        assert_eq!(m.cut_token("x EN", None), cut("x ", None));
+        assert_eq!(
+            m.cut_token("", Some(FinishReason::Eos)),
+            cut("EN", Some(FinishReason::Eos))
+        );
     }
 
     #[test]

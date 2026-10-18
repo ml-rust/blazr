@@ -18,7 +18,8 @@ use boostr::inference::memory::BlockAllocatorStats;
 use boostr::inference::scheduler::SequenceId;
 
 use crate::config::GenerationConfig;
-use crate::engine::types::GeneratedToken;
+use crate::engine::types::{FinishReason, GeneratedToken};
+use crate::engine::{StopCut, StopMatcher};
 use crate::tokenizer::{AnyTokenizer, TokenTextStream};
 
 /// Tokens a request buffers before the driver waits on its reader.
@@ -72,6 +73,8 @@ struct RequestMeta {
     token_history: Vec<u32>,
     /// The request's text decoder, built at its first token.
     text: Option<TokenTextStream>,
+    /// Cuts the text at the request's first stop sequence.
+    stop: StopMatcher,
 }
 
 /// The requests a scheduler is carrying, keyed by sequence id.
@@ -114,6 +117,7 @@ impl RequestRegistry {
         let (token_tx, token_rx) = mpsc::channel(TOKEN_CHANNEL_CAPACITY);
         let (done_tx, done_rx) = oneshot::channel();
         let meta = RequestMeta {
+            stop: StopMatcher::new(&gen_config.stop_sequences),
             gen_config,
             token_tx,
             done_tx: Some(done_tx),
@@ -195,29 +199,42 @@ impl RequestRegistry {
         }
     }
 
-    /// The text `token_id` adds to `seq_id`'s response.
+    /// The text `token_id` adds to `seq_id`'s response, cut at its stops.
     ///
-    /// The request's own streaming decoder renders it, primed with the
-    /// prompt. See [`TokenTextStream::next_text`] for `is_eos` and
-    /// `is_final`. Empty when the request is gone.
+    /// The request's own streaming decoder renders the token, primed with
+    /// the prompt. `finish` is the token's own finish reason. The request's
+    /// stop sequences then apply as [`StopMatcher::cut_token`] applies them:
+    /// a match finishes with `Stop`. The caller must end the sequence when
+    /// the returned finish is set. Empty, with no finish, when the request
+    /// is gone.
     pub fn token_text(
         &self,
         seq_id: SequenceId,
         tokenizer: &AnyTokenizer,
         token_id: u32,
-        is_eos: bool,
-        is_final: bool,
-    ) -> String {
+        finish: Option<FinishReason>,
+    ) -> StopCut {
+        let gone = StopCut {
+            text: String::new(),
+            finish: None,
+        };
         let Ok(mut meta) = self.meta.lock() else {
-            return String::new();
+            return gone;
         };
         let Some(m) = meta.get_mut(&seq_id) else {
-            return String::new();
+            return gone;
         };
         let prompt = &m.prompt_tokens;
-        m.text
+        let piece = m
+            .text
             .get_or_insert_with(|| TokenTextStream::new(tokenizer, prompt))
-            .next_text(tokenizer, token_id, is_eos, is_final)
+            .next_text(
+                tokenizer,
+                token_id,
+                finish == Some(FinishReason::Eos),
+                finish.is_some(),
+            );
+        m.stop.cut_token(&piece, finish)
     }
 
     /// Send `token` to `seq_id`'s caller.
@@ -308,6 +325,40 @@ mod tests {
         assert!(registry.send_token(id, token.clone()).await);
         drop(handle);
         assert!(!registry.send_token(id, token).await);
+    }
+
+    /// llama3 ids 0 to 3 are the one-byte pieces `!`, `"`, `#` and `$`.
+    #[test]
+    fn token_text_holds_a_stop_prefix_and_ends_on_the_match() -> Result<()> {
+        let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
+        let registry = RequestRegistry::new();
+        let stops = |stops: &[&str]| GenerationConfig {
+            stop_sequences: stops.iter().map(|s| s.to_string()).collect(),
+            ..config()
+        };
+        let cut = |text: &str, finish| StopCut {
+            text: text.to_string(),
+            finish,
+        };
+
+        let id = registry.next_id();
+        let _handle = registry.insert(id, vec![5], stops(&["\"#"]))?;
+        assert_eq!(registry.token_text(id, &tokenizer, 0, None), cut("!", None));
+        assert_eq!(registry.token_text(id, &tokenizer, 1, None), cut("", None));
+        assert_eq!(
+            registry.token_text(id, &tokenizer, 2, None),
+            cut("", Some(FinishReason::Stop))
+        );
+
+        let id = registry.next_id();
+        let _handle = registry.insert(id, vec![5], stops(&["!x"]))?;
+        assert_eq!(registry.token_text(id, &tokenizer, 0, None), cut("", None));
+        assert_eq!(
+            registry.token_text(id, &tokenizer, 3, Some(FinishReason::Length)),
+            cut("!$", Some(FinishReason::Length))
+        );
+        assert_eq!(registry.token_text(99, &tokenizer, 0, None), cut("", None));
+        Ok(())
     }
 
     #[tokio::test]

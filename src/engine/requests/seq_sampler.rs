@@ -25,6 +25,7 @@ use boostr::{
 use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 use crate::engine::sampler_step::SamplerState;
+use crate::engine::types::{FinishReason, TokenLogprob};
 
 /// One batched sequence's sampling policy and state.
 struct BatchSeq<R: Runtime<DType = DType>> {
@@ -36,6 +37,18 @@ struct BatchSeq<R: Runtime<DType = DType>> {
     /// The scheduler freed this sequence's KV blocks. The next decode must
     /// recompute them first.
     kv_stale: bool,
+    /// Tokens this sequence sampled so far.
+    generated: usize,
+}
+
+/// One sampled token, with what the single-sequence loop reports for it.
+pub(in crate::engine) struct SampledToken {
+    pub id: u32,
+    /// Set when the request asked for logprobs.
+    pub logprob: Option<f32>,
+    pub top_logprobs: Option<Vec<TokenLogprob>>,
+    /// `Eos` or `Length` from [`Executor::decode_finish_reason`].
+    pub finish: Option<FinishReason>,
 }
 
 /// The sampling state of every sequence the batching engine carries.
@@ -158,6 +171,7 @@ where
                 gen_config,
                 sampler,
                 kv_stale: false,
+                generated: 0,
             },
         );
         Ok(())
@@ -166,28 +180,41 @@ where
     /// Sample `seq_id`'s next id from its `[1, seq, vocab]` logits row.
     ///
     /// The id goes into the sequence's history and advances its grammar.
+    /// The logprobs come from the same logits, as the single-sequence loop
+    /// takes them, and only when the request asked. The finish reason counts
+    /// this token against the request's `max_tokens`.
     ///
     /// # Errors
     ///
-    /// An error when `seq_id` has no state, or when the sample fails.
+    /// An error when `seq_id` has no state, or when the sample or the
+    /// logprobs fail.
     pub(in crate::engine) fn sample(
         &mut self,
         executor: &Executor<R>,
         seq_id: SequenceId,
         logits: &Tensor<R>,
-    ) -> Result<u32> {
+    ) -> Result<SampledToken> {
         let seq = self.seqs.get_mut(&seq_id).ok_or_else(|| {
             anyhow!(
                 "sequence {seq_id} has no sampler state. A batched sequence must pass \
                  prefill in this engine before it samples."
             )
         })?;
-        executor.sample_step(
+        let id = executor.sample_step(
             logits,
             &mut seq.sampler,
             &seq.gen_config,
             Some(&self.scratch),
-        )
+        )?;
+        let (logprob, top_logprobs) = executor.token_logprobs(logits, id, &seq.gen_config)?;
+        let finish = executor.decode_finish_reason(id, seq.generated, seq.gen_config.max_tokens);
+        seq.generated += 1;
+        Ok(SampledToken {
+            id,
+            logprob,
+            top_logprobs,
+            finish,
+        })
     }
 }
 
@@ -219,11 +246,49 @@ mod tests {
         let mut seqs = BatchSeqs::new(exec.vocab_size(), exec.device())?;
         seqs.begin(&exec, 1, &[1, 2], greedy())?;
         seqs.begin(&exec, 2, &[3], greedy())?;
-        assert_eq!(seqs.sample(&exec, 1, &peaked(&exec, 7)?)?, 7);
-        assert_eq!(seqs.sample(&exec, 2, &peaked(&exec, 9)?)?, 9);
+        assert_eq!(seqs.sample(&exec, 1, &peaked(&exec, 7)?)?.id, 7);
+        assert_eq!(seqs.sample(&exec, 2, &peaked(&exec, 9)?)?.id, 9);
         let history = |id| seqs.seqs.get(&id).map(|s| s.sampler.token_history.clone());
         assert_eq!(history(1), Some(vec![1, 2, 7]));
         assert_eq!(history(2), Some(vec![3, 9]));
+        Ok(())
+    }
+
+    #[test]
+    fn logprobs_come_only_when_asked_and_length_ends_at_max_tokens() -> Result<()> {
+        let exec = tiny_executor()?;
+        let mut seqs = BatchSeqs::new(exec.vocab_size(), exec.device())?;
+        let asked = GenerationConfig {
+            logprobs: true,
+            top_logprobs: 2,
+            max_tokens: 2,
+            ..greedy()
+        };
+        seqs.begin(&exec, 1, &[1], asked)?;
+        seqs.begin(
+            &exec,
+            2,
+            &[1],
+            GenerationConfig {
+                max_tokens: 2,
+                ..greedy()
+            },
+        )?;
+        let logits = peaked(&exec, 7)?;
+
+        let first = seqs.sample(&exec, 1, &logits)?;
+        assert_eq!(first.finish, None);
+        let top = first.top_logprobs.unwrap_or_default();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top.first().map(|t| t.token_id), Some(7));
+        assert!(first.logprob.is_some_and(|lp| lp <= 0.0 && lp > -1e-3));
+        assert_eq!(
+            seqs.sample(&exec, 1, &logits)?.finish,
+            Some(FinishReason::Length)
+        );
+
+        let plain = seqs.sample(&exec, 2, &logits)?;
+        assert!(plain.logprob.is_none() && plain.top_logprobs.is_none());
         Ok(())
     }
 

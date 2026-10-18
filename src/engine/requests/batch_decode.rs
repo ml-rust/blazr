@@ -1,7 +1,8 @@
 //! Batched decode step for continuous batching
 //!
 //! Contains the core logic for batched single-token decoding. Each row
-//! samples through its own sequence's sampler state.
+//! samples through its own sequence's sampler state and emits through
+//! [`emit_token`].
 
 use anyhow::{anyhow, Result};
 
@@ -14,11 +15,11 @@ use boostr::{
     SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
+use super::batch_emit::emit_token;
 use super::kv_recompute::{block_ids, block_slot, recompute_kv};
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;
-use crate::engine::types::{FinishReason, GeneratedToken};
 
 /// Per-sequence data collected before the batched decode forward pass.
 pub(in crate::engine) struct DecodeSeqData {
@@ -189,42 +190,7 @@ where
             continue;
         }
 
-        let token_id = seqs.sample(executor, seq_id, &seq_logits)?;
-
-        let is_eos = executor.tokenizer().is_eos(token_id);
-        let finished = scheduler.append_token(seq_id, token_id)?;
-        let finish = if is_eos {
-            Some(FinishReason::Eos)
-        } else if finished {
-            Some(FinishReason::Length)
-        } else {
-            None
-        };
-        let text = scheduler.token_text(
-            seq_id,
-            executor.tokenizer(),
-            token_id,
-            is_eos,
-            finish.is_some(),
-        );
-
-        if let Some(tx) = scheduler.get_token_sender(seq_id) {
-            let token = GeneratedToken {
-                token_id,
-                text,
-                logprob: None,
-                top_logprobs: None,
-                finish_reason: finish,
-            };
-            let _ = tx.send(Ok(token)).await;
-        }
-
-        scheduler.append_to_history(seq_id, token_id);
-
-        if finish.is_some() {
-            seqs.end_seq(seq_id);
-            scheduler.finish_sequence(seq_id)?;
-        }
+        emit_token(executor, scheduler, seqs, seq_id, &seq_logits).await?;
     }
 
     Ok(())

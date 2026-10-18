@@ -14,6 +14,7 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
+- **Grammar parser** — a `grammar` containing an unsupported character (such as a parenthesis) no longer hangs the server. The request fails with an error that names the character.
 - **Stop sequences** — a stop sequence split across tokens no longer leaks into the stream, and a stop sequence inside a token now ends the non-streaming text there. One `StopMatcher` serves the streaming and non-streaming paths, including multimodal text.
 - **Token budget leak** — the token budget no longer leaks when a request times out or the client disconnects. Admission returns a `BudgetPermit` that releases its tokens in `Drop`; a streaming response owns the permit until the stream ends or the client leaves. The `blazr_active_decode_slots` and `blazr_requests_active` gauges use the same guard, and `/v1/infill` no longer decrements the decode-slot gauge twice.
 

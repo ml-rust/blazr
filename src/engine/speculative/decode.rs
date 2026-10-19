@@ -5,17 +5,18 @@ use async_stream::stream;
 use futures::Stream;
 
 use boostr::inference::speculative::{
-    FinishReason as SpeculativeFinish, SpeculativeClient, SpeculativeGenerator, SpeculativeStats,
-    StepOutput,
+    FinishReason as SpeculativeFinish, PromptLookup, SpeculativeClient, SpeculativeConfig,
+    SpeculativeGenerator, SpeculativeModel, SpeculativeStats, StepOutput,
 };
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, GrammarDfaOps, NormalizationOps, Runtime,
-    SamplingOps, ScalarOps, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, DType, GrammarDfaOps, NormalizationOps, RoPEPackedOps,
+    Runtime, SamplingOps, ScalarOps, TypeConversionOps, UnaryOps,
 };
 
-use super::{ContiguousTarget, Fallback, SpeculativePlan};
+use super::target_glue::LastLogits;
+use super::{ContiguousTarget, Fallback, PagedTarget, SpeculativePlan};
 use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 use crate::engine::types::{FinishReason, GeneratedToken};
@@ -69,6 +70,7 @@ where
         + SamplingOps<R>
         + GrammarDfaOps<R>
         + ModelClient<R>
+        + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>
         + SpeculativeClient<R>,
 {
@@ -97,6 +99,12 @@ where
 
     /// Decode `prompt` speculatively under `plan`.
     ///
+    /// The target is a [`PagedTarget`] when the executor runs paged attention
+    /// and a [`ContiguousTarget`] otherwise. A paged pool that cannot cover a
+    /// step, or a model the paged kernel cannot serve, ends the stream with
+    /// the error the plain paged path returns. Nothing falls back to plain
+    /// decoding mid-request.
+    ///
     /// Each step runs one target forward and yields one or more tokens.
     /// Emitted token `j` of a step takes row `j` of that forward's logits
     /// for its logprobs. The last token of the final step carries the
@@ -109,9 +117,37 @@ where
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             let SpeculativePlan { config, drafter } = plan;
+            if self.config.inference.paged_attention {
+                let target = PagedTarget::new(self, gen, prompt.len())?;
+                let inner = self.drive_speculative(target, prompt, gen, config, drafter);
+                for await item in inner {
+                    yield item;
+                }
+            } else {
+                let target = ContiguousTarget::new(self, gen, prompt.len(), config.max_tokens)?;
+                let inner = self.drive_speculative(target, prompt, gen, config, drafter);
+                for await item in inner {
+                    yield item;
+                }
+            }
+        }
+    }
+
+    /// The speculative loop over `target`.
+    fn drive_speculative<'a, M>(
+        &'a self,
+        target: M,
+        prompt: &'a [u32],
+        gen: &'a GenerationConfig,
+        config: SpeculativeConfig,
+        drafter: PromptLookup,
+    ) -> impl Stream<Item = Result<GeneratedToken>> + 'a
+    where
+        M: SpeculativeModel + LastLogits<R> + 'a,
+    {
+        stream! {
             let max_tokens = config.max_tokens;
             let num_draft_tokens = config.num_draft_tokens;
-            let target = ContiguousTarget::new(self, gen, prompt.len(), max_tokens)?;
             let mut generator = SpeculativeGenerator::new(target, drafter, config)?;
             let mut stats = StatsGuard::default();
             let mut text = TokenTextStream::new(self.tokenizer(), prompt);
@@ -148,6 +184,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    use boostr::inference::BlockAllocator;
     use boostr::CpuRuntime;
     use futures::StreamExt;
 
@@ -155,7 +192,9 @@ mod tests {
     use crate::engine::requests::batch_test_rig::{
         alone_tokens, drain, greedy, ids, rig, rig_on, POOL, SEED as RIG_SEED, TINY_CTX,
     };
-    use crate::engine::test_support::{full_vocab_executor, seeded_executor, seeded_executor_ctx};
+    use crate::engine::test_support::{
+        full_vocab_executor, seeded_executor, seeded_executor_ctx, seeded_paged, PagedPool,
+    };
     use crate::engine::types::GenerationResult;
     use crate::telemetry::names;
     use crate::telemetry::test_recorder::TestRecorder;
@@ -517,11 +556,40 @@ mod tests {
         drain(&mut on).await?;
         assert_eq!(ids(&mut b)?, ids(&mut a)?);
         assert!(!recorder.render().contains("blazr_speculative_"));
-        // The single-sequence paged path falls back with its reason.
+        // The single-sequence paged path speculates and counts no fallback.
         let want = alone_tokens(&plain.executor, &prompt, &greedy(6)).await?;
         let got = alone_tokens(&on.executor, &prompt, &greedy(6)).await?;
         assert_eq!(shape(&got), shape(&want));
-        assert_eq!(fallbacks(&recorder, "paged_attention"), 1.0);
+        assert_eq!(fallbacks(&recorder, "paged_attention"), 0.0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_paged_executor_speculates_as_plain_paged_greedy() -> Result<()> {
+        let recorder = TestRecorder::install();
+        let pool = PagedPool {
+            block_size: 4,
+            blocks: 16,
+        };
+        let plain = seeded_paged(SEED, pool, CTX, false)?;
+        let spec = speculating(seeded_paged(SEED, pool, CTX, false)?, 5);
+        let prompt = tie_free(&plain, &REPETITIVE, 12).await?;
+        let gen = with_logprobs(12);
+        let want = alone_tokens(&plain, prompt, &gen).await?;
+        let got = alone_tokens(&spec, prompt, &gen).await?;
+        assert_eq!(shape(&got), shape(&want));
+        assert_logprobs_close(&got, &want, "paged");
+        assert!(count(&recorder, names::SPECULATIVE_EMITTED_TOTAL) > 0.0);
+        assert!(!recorder
+            .render()
+            .contains(names::SPECULATIVE_FALLBACKS_TOTAL));
+        let free = spec
+            .shared_allocator()
+            .ok_or_else(|| anyhow!("the executor has no shared allocator"))?
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {e}"))?
+            .free_block_count();
+        assert_eq!(free, pool.blocks, "the request returned its blocks");
         Ok(())
     }
 

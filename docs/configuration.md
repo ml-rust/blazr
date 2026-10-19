@@ -236,7 +236,7 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `gpu_prefix_cache_ram_tier`          | integer  | `5000`              | RAM tier entries for the GPU prefix cache                                                                                    |
 | `prefill_chunk_size`                 | integer  | `0`                 | Prompt tokens per prefill chunk. `0` processes the whole prompt at once.                                                     |
 | `speculative`                        | object   | unset               | Speculative decoding. See [Speculative decoding](tuning.md#speculative-decoding).                                            |
-| `speculative.enabled`                | boolean  | `false`             | Draft tokens and check them in one forward for each eligible request.                                                        |
+| `speculative.enabled`                | boolean  | `false`             | Draft tokens and check them in one forward for each eligible single-sequence request. Runs with `paged_attention` on or off.                                                        |
 | `speculative.drafter`                | string   | `prompt_lookup`     | Drafter. `prompt_lookup` is the only value.                                                                                  |
 | `speculative.num_draft_tokens`       | integer  | `5`                 | Drafts per step, `1` to `32`. The old name `num_speculative_tokens` is accepted.                                             |
 | `speculative.prompt_lookup.min_ngram`| integer  | `1`                 | Shortest n-gram the drafter matches. At least `1`.                                                                           |

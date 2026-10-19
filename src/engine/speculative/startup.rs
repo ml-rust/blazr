@@ -49,7 +49,7 @@ where
             "inference.speculative.draft_model is not supported yet; drafting by prompt lookup"
         );
     }
-    if let Err(fallback) = load_fallback(model, inference) {
+    if let Err(fallback) = load_fallback(model) {
         tracing::warn!(
             reason = fallback.reason(),
             "speculative decoding is on, but this model decodes without it"
@@ -60,8 +60,9 @@ where
         tracing::warn!("inference.graphs: graph-captured decode runs without speculative decoding");
     }
     tracing::info!(
-        "speculative decoding on: drafter {}, num_draft_tokens {}; single-sequence contiguous \
-         path; constrained, mirostat, DRY, typical and dynatemp requests decode without it",
+        "speculative decoding on: drafter {}, num_draft_tokens {}; single-sequence \
+         path on contiguous or paged attention; constrained, mirostat, DRY, typical \
+         and dynatemp requests decode without it",
         spec.drafter.name(),
         spec.draft_count()
     );
@@ -101,10 +102,7 @@ mod tests {
             (with(None, false), SpeculativeStartup::Off),
             (with(Some(off), false), SpeculativeStartup::Off),
             (with(Some(on()), false), SpeculativeStartup::On),
-            (
-                with(Some(on()), true),
-                SpeculativeStartup::Unreachable(Fallback::PagedAttention),
-            ),
+            (with(Some(on()), true), SpeculativeStartup::On),
         ];
         for (inference, want) in cases {
             assert_eq!(
@@ -155,7 +153,7 @@ mod tests {
         inference.speculative = Some(on());
         assert_eq!(
             report_speculative(exec.model(), &inference)?,
-            SpeculativeStartup::Unreachable(Fallback::PagedAttention)
+            SpeculativeStartup::On
         );
         Ok(())
     }

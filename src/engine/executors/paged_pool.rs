@@ -64,8 +64,16 @@ where
             self.model.num_layers(),
             total_blocks,
             self.config.inference.block_size,
-            self.model.num_kv_heads().unwrap_or(8),
-            self.model.head_dim().unwrap_or(64),
+            self.model.num_kv_heads().ok_or_else(|| {
+                anyhow!(
+                    "The model reports no KV head count, so paged attention cannot size its pool."
+                )
+            })?,
+            self.model.head_dim().ok_or_else(|| {
+                anyhow!(
+                    "The model reports no head dimension, so paged attention cannot size its pool."
+                )
+            })?,
             self.config.kv_cache_dtype()?,
             &self.device,
         )?;
@@ -124,7 +132,7 @@ pub(crate) struct PoolLease<'a> {
 #[cfg(feature = "cuda")]
 pub(crate) struct GpuPrefixRelease<'a> {
     pub cache: &'a Option<Mutex<boostr::inference::prefix_cache::GpuPrefixCache>>,
-    pub prompt_tokens: &'a [u32],
+    pub prompt_tokens: Vec<u32>,
 }
 
 impl<'a> PoolLease<'a> {
@@ -155,9 +163,18 @@ impl<'a> PoolLease<'a> {
     }
 
     /// Release the GPU prefix cache references of `release` on drop.
+    ///
+    /// References an earlier call took go back first, so a second prompt on
+    /// one lease leaves no count behind.
     #[cfg(feature = "cuda")]
     pub(crate) fn hold_gpu_prefix(&mut self, release: GpuPrefixRelease<'a>) {
-        self.gpu_release = Some(release);
+        if let Some(earlier) = self.gpu_release.replace(release) {
+            super::executor_cache::gpu_prefix_cache_release(
+                earlier.cache,
+                &earlier.prompt_tokens,
+                self.block_size,
+            );
+        }
     }
 
     /// Allocate blocks until the lease covers positions `0..tokens`.
@@ -177,6 +194,27 @@ impl<'a> PoolLease<'a> {
         self.blocks.extend(extra);
         Ok(())
     }
+
+    /// Free the blocks past those that hold positions `0..tokens`.
+    ///
+    /// The prefix blocks stay, whatever `tokens` is. Nothing happens when the
+    /// lease holds no block past that point.
+    ///
+    /// # Errors
+    ///
+    /// An error when the allocator refuses the free. The lease keeps the
+    /// blocks and drop frees them.
+    pub(crate) fn shrink_to(&mut self, tokens: usize) -> Result<()> {
+        let keep = tokens.div_ceil(self.block_size).max(self.prefix_count);
+        if keep >= self.blocks.len() {
+            return Ok(());
+        }
+        self.allocator
+            .free(&self.blocks[keep..])
+            .map_err(|e| anyhow!("Failed to free KV blocks past {tokens} tokens: {e}"))?;
+        self.blocks.truncate(keep);
+        Ok(())
+    }
 }
 
 impl Drop for PoolLease<'_> {
@@ -185,7 +223,7 @@ impl Drop for PoolLease<'_> {
         if let Some(release) = self.gpu_release.take() {
             super::executor_cache::gpu_prefix_cache_release(
                 release.cache,
-                release.prompt_tokens,
+                &release.prompt_tokens,
                 self.block_size,
             );
         }
@@ -246,6 +284,54 @@ mod tests {
         assert_eq!(lease.blocks().len(), 3, "12 tokens fit in 3 blocks");
         assert_eq!(free_blocks(&exec)?, POOL.blocks - 3);
         drop(lease);
+        assert_eq!(free_blocks(&exec)?, POOL.blocks);
+        Ok(())
+    }
+
+    #[test]
+    fn shrink_to_frees_the_blocks_past_the_kept_tokens() -> Result<()> {
+        let exec = seeded_executor(1, Some(POOL))?;
+        let mut lease = exec.pool_lease()?;
+        lease.cover(14)?;
+        assert_eq!(lease.blocks().len(), 4);
+        let kept = lease.blocks()[..2].to_vec();
+        lease.shrink_to(5)?;
+        assert_eq!(lease.blocks(), &kept[..], "5 tokens need 2 blocks");
+        assert_eq!(free_blocks(&exec)?, POOL.blocks - 2);
+        lease.shrink_to(8)?;
+        assert_eq!(
+            free_blocks(&exec)?,
+            POOL.blocks - 2,
+            "nothing past 8 tokens"
+        );
+        lease.shrink_to(0)?;
+        assert!(lease.blocks().is_empty());
+        assert_eq!(free_blocks(&exec)?, POOL.blocks);
+        Ok(())
+    }
+
+    #[test]
+    fn shrink_to_never_frees_a_prefix_block() -> Result<()> {
+        let exec = seeded_executor(1, Some(POOL))?;
+        let shared = exec
+            .shared_allocator()
+            .ok_or_else(|| anyhow!("no shared allocator"))?;
+        let allocator = shared
+            .lock()
+            .map_err(|e| anyhow!("lock poisoned: {e}"))?
+            .clone();
+        let prefix = allocator.allocate(2).map_err(|e| anyhow!("{e}"))?;
+        let mut lease = exec.pool_lease()?;
+        lease.hold_prefix_blocks(7, prefix.clone());
+        lease.cover(16)?;
+        assert_eq!(lease.blocks().len(), 4);
+        lease.shrink_to(0)?;
+        assert_eq!(lease.blocks(), &prefix[..], "the prefix blocks stay");
+        assert_eq!(free_blocks(&exec)?, POOL.blocks - 2);
+        // The executor has no prefix cache, so the drop leaves the prefix blocks.
+        drop(lease);
+        assert_eq!(free_blocks(&exec)?, POOL.blocks - 2);
+        allocator.free(&prefix).map_err(|e| anyhow!("{e}"))?;
         assert_eq!(free_blocks(&exec)?, POOL.blocks);
         Ok(())
     }

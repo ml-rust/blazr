@@ -152,15 +152,31 @@ pub(crate) struct PagedPool {
 /// the KV cache. With `paged`, paged attention is on over that pool and the
 /// executor admits two sequences per batch.
 pub(crate) fn seeded_executor(seed: u64, paged: Option<PagedPool>) -> Result<Executor<CpuRuntime>> {
-    seeded_on(seed, paged, 16)
+    seeded_on(seed, paged, 16, false)
 }
 
 /// A [`seeded_executor`] with no paged pool and a context of `ctx` tokens.
 pub(crate) fn seeded_executor_ctx(seed: u64, ctx: usize) -> Result<Executor<CpuRuntime>> {
-    seeded_on(seed, None, ctx)
+    seeded_on(seed, None, ctx, false)
 }
 
-fn seeded_on(seed: u64, paged: Option<PagedPool>, ctx: usize) -> Result<Executor<CpuRuntime>> {
+/// A [`seeded_executor`] with a context of `ctx` tokens and the prefix cache
+/// on or off.
+pub(crate) fn seeded_paged(
+    seed: u64,
+    pool: PagedPool,
+    ctx: usize,
+    prefix_cache: bool,
+) -> Result<Executor<CpuRuntime>> {
+    seeded_on(seed, Some(pool), ctx, prefix_cache)
+}
+
+fn seeded_on(
+    seed: u64,
+    paged: Option<PagedPool>,
+    ctx: usize,
+    prefix_cache: bool,
+) -> Result<Executor<CpuRuntime>> {
     let device = CpuDevice::new();
     let yaml = TINY_LLAMA_YAML.replace("max_seq_len: 16", &format!("max_seq_len: {ctx}"));
     let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
@@ -175,6 +191,7 @@ fn seeded_on(seed: u64, paged: Option<PagedPool>, ctx: usize) -> Result<Executor
 
     let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
     enable_paged(&mut blazr_config, paged);
+    blazr_config.inference.prefix_cache = prefix_cache;
     let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
     Executor::new(model, blazr_config, tokenizer, device, ctx)
 }

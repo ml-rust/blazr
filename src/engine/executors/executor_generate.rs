@@ -77,7 +77,7 @@ where
                 gen_config.max_tokens, max_seq_len, prompt_tokens.len(),
             );
 
-            // ── Speculative path: one contiguous sequence, drafts checked per forward ──
+            // ── Speculative path: one sequence, drafts checked per forward ──
             if let Some(plan) = self.speculative_route(gen_config, prompt_tokens, max_tokens) {
                 let inner = self.generate_speculative(prompt_tokens, gen_config, plan);
                 for await item in inner {
@@ -155,7 +155,7 @@ where
                     );
                     lease.hold_gpu_prefix(super::paged_pool::GpuPrefixRelease {
                         cache: &self.gpu_prefix_cache,
-                        prompt_tokens,
+                        prompt_tokens: prompt_tokens.to_vec(),
                     });
                 }
 

@@ -9,7 +9,7 @@ use boostr::{
 };
 
 use super::sample_rule;
-use crate::config::{GenerationConfig, InferenceConfig};
+use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 
 /// The plan of one speculative generation.
@@ -34,8 +34,6 @@ pub(in crate::engine) enum Fallback {
     EmptyPrompt,
     /// The model keeps SSM or Gated DeltaNet state, which has no rollback.
     Architecture,
-    /// Paged attention is on. The target needs a contiguous KV cache.
-    PagedAttention,
     /// The model runs tensor-parallel. Follower caches have no rollback.
     TensorParallel,
     /// The request sets a constraint: JSON mode, a schema, GBNF or constrained tools.
@@ -66,7 +64,6 @@ impl Fallback {
             Self::ZeroBudget => "zero_budget",
             Self::EmptyPrompt => "empty_prompt",
             Self::Architecture => "architecture",
-            Self::PagedAttention => "paged_attention",
             Self::TensorParallel => "tensor_parallel",
             Self::Grammar => "grammar",
             Self::Mirostat => "mirostat",
@@ -81,23 +78,17 @@ impl Fallback {
     }
 }
 
-/// Why no request on `model` under `inference` can decode speculatively.
+/// Why no request on `model` can decode speculatively.
 ///
-/// It checks what a load fixes: the architecture, paged attention and a
-/// tensor-parallel communicator.
-pub(in crate::engine) fn load_fallback<R>(
-    model: &LoadedModel<R>,
-    inference: &InferenceConfig,
-) -> Result<(), Fallback>
+/// It checks what a load fixes: the architecture and a tensor-parallel
+/// communicator.
+pub(in crate::engine) fn load_fallback<R>(model: &LoadedModel<R>) -> Result<(), Fallback>
 where
     R: Runtime<DType = DType>,
     R::Client: ModelClient<R>,
 {
     if model.needs_ssm_state() || model.needs_gdn_state() || !model.needs_kv_cache() {
         return Err(Fallback::Architecture);
-    }
-    if inference.paged_attention {
-        return Err(Fallback::PagedAttention);
     }
     if model.tp_communicator().is_some() {
         return Err(Fallback::TensorParallel);
@@ -166,9 +157,9 @@ where
         Ok(SpeculativePlan { config, drafter })
     }
 
-    /// The model, the cache layout and the device group fit the contiguous target.
+    /// The model and the device group fit a speculative target.
     fn speculative_backend(&self) -> Result<(), Fallback> {
-        load_fallback(&self.model, &self.config.inference)?;
+        load_fallback(&self.model)?;
         #[cfg(feature = "cuda")]
         if self.tp_state.is_some() {
             return Err(Fallback::TensorParallel);
@@ -404,16 +395,13 @@ mod tests {
     }
 
     #[test]
-    fn paged_attention_falls_back() -> Result<()> {
+    fn paged_attention_gets_a_plan() -> Result<()> {
         let pool = PagedPool {
             block_size: 4,
             blocks: 16,
         };
         let exec = enabled(seeded_executor(SEED, Some(pool))?, 5);
-        assert_eq!(
-            exec.speculative_plan(&greedy(), &PROMPT, 8),
-            Err(Fallback::PagedAttention)
-        );
+        assert!(exec.speculative_plan(&greedy(), &PROMPT, 8).is_ok());
         Ok(())
     }
 
@@ -424,7 +412,6 @@ mod tests {
             Fallback::ZeroBudget,
             Fallback::EmptyPrompt,
             Fallback::Architecture,
-            Fallback::PagedAttention,
             Fallback::TensorParallel,
             Fallback::Grammar,
             Fallback::Mirostat,

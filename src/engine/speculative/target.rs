@@ -1,19 +1,14 @@
 //! The speculative target over an executor's contiguous KV cache.
 
-use anyhow::anyhow;
-
-use boostr::error::{Error, Result};
-use boostr::inference::speculative::{
-    verify_logits, Draw, SampleRule, SpeculativeClient, SpeculativeModel, Verdict,
-};
+use boostr::error::Result;
+use boostr::inference::speculative::{Draw, SampleRule, SpeculativeModel, Verdict};
 use boostr::inference::LayeredKvCache;
-use boostr::model::ModelClient;
-use boostr::ops::TensorOps;
-use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, GrammarDfaOps, NormalizationOps, Runtime,
-    SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
-};
+use boostr::{DType, Runtime, Tensor};
 
+use super::target_glue::{
+    bias_tensor, biased_rows, greedy_ids, inference_error, no_verify_tokens, verify_rows,
+    LastLogits, TargetClient,
+};
 use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 use crate::engine::tensor_parallel::KvCacheSpec;
@@ -37,29 +32,10 @@ pub(in crate::engine) struct ContiguousTarget<'a, R: Runtime<DType = DType>> {
     last_logits: Option<Tensor<R>>,
 }
 
-/// An anyhow error as a boostr inference error.
-fn inference_error(e: anyhow::Error) -> Error {
-    Error::InferenceError {
-        reason: format!("{e:#}"),
-    }
-}
-
 impl<'a, R> ContiguousTarget<'a, R>
 where
     R: Runtime<DType = DType>,
-    R::Client: TensorOps<R>
-        + ScalarOps<R>
-        + ConvOps<R>
-        + NormalizationOps<R>
-        + UnaryOps<R>
-        + ActivationOps<R>
-        + BinaryOps<R>
-        + TypeConversionOps<R>
-        + SamplingOps<R>
-        + GrammarDfaOps<R>
-        + ModelClient<R>
-        + boostr::quant::traits::DequantOps<R>
-        + SpeculativeClient<R>,
+    R::Client: TargetClient<R>,
 {
     /// An empty target for a prompt of `prompt_len` tokens and `max_tokens` new tokens.
     ///
@@ -73,16 +49,11 @@ where
         max_tokens: usize,
     ) -> anyhow::Result<Self> {
         let (kv, fresh) = exec.contiguous_kv_cache(prompt_len, max_tokens)?;
-        let bias = if gen.logit_bias.is_empty() {
-            None
-        } else {
-            Some(exec.logit_bias_tensor(&gen.logit_bias, DType::F32)?)
-        };
         Ok(Self {
             exec,
             kv,
             fresh: Some(fresh),
-            bias,
+            bias: bias_tensor(exec, gen)?,
             fed: Vec::with_capacity(prompt_len + max_tokens),
             last_logits: None,
         })
@@ -113,61 +84,24 @@ where
             self.exec
                 .forward_contiguous(&input, &mut self.kv, position, self.fresh.take())?;
         self.fed.extend_from_slice(tokens);
-        let shape = logits.shape();
-        if shape.len() != 3 || shape[1] != tokens.len() {
-            return Err(anyhow!(
-                "the forward over {} tokens returned logits of shape {shape:?}; \
-                 speculative verification needs one row per token",
-                tokens.len()
-            ));
-        }
-        let Some(bias) = self.bias.as_mut() else {
-            return Ok((logits.clone(), logits));
-        };
-        if bias.dtype() != logits.dtype() {
-            *bias = R::default_client(self.exec.device())
-                .cast(bias, logits.dtype())
-                .map_err(|e| anyhow!("casting logit_bias to {:?} failed: {e}", logits.dtype()))?;
-        }
-        let biased = logits
-            .add(bias)
-            .map_err(|e| anyhow!("logit_bias add failed: {e}"))?;
-        Ok((logits, biased))
+        biased_rows(self.exec, &mut self.bias, logits, tokens.len())
     }
+}
 
-    /// The greedy id of every row of `logits`, read to the host.
-    fn greedy_ids(&self, logits: &Tensor<R>) -> anyhow::Result<Vec<u32>> {
-        // [1, n, vocab] -> [1, n] ids on the device; n ids cross to the host.
-        let ids = self
-            .exec
-            .argmax_ids(logits, 2)?
-            .contiguous()?
-            .try_to_vec::<i64>()?;
-        ids.into_iter()
-            .map(|id| {
-                u32::try_from(id)
-                    .map_err(|_| anyhow!("argmax returned id {id}, outside the u32 token range"))
-            })
-            .collect()
+impl<R> LastLogits<R> for ContiguousTarget<'_, R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TargetClient<R>,
+{
+    fn last_logits(&self) -> Option<&Tensor<R>> {
+        ContiguousTarget::last_logits(self)
     }
 }
 
 impl<R> SpeculativeModel for ContiguousTarget<'_, R>
 where
     R: Runtime<DType = DType>,
-    R::Client: TensorOps<R>
-        + ScalarOps<R>
-        + ConvOps<R>
-        + NormalizationOps<R>
-        + UnaryOps<R>
-        + ActivationOps<R>
-        + BinaryOps<R>
-        + TypeConversionOps<R>
-        + SamplingOps<R>
-        + GrammarDfaOps<R>
-        + ModelClient<R>
-        + boostr::quant::traits::DequantOps<R>
-        + SpeculativeClient<R>,
+    R::Client: TargetClient<R>,
 {
     fn vocab_size(&self) -> usize {
         self.exec.vocab_size()
@@ -188,24 +122,17 @@ where
             return Ok(Vec::new());
         }
         let (logits, biased) = self.forward(tokens).map_err(inference_error)?;
-        let ids = self.greedy_ids(&biased).map_err(inference_error)?;
+        let ids = greedy_ids(self.exec, &biased).map_err(inference_error)?;
         self.last_logits = Some(logits);
         Ok(ids)
     }
 
     fn extend_sampled(&mut self, tokens: &[u32], rule: &SampleRule, draw: Draw) -> Result<Verdict> {
         if tokens.is_empty() {
-            return Err(Error::InvalidArgument {
-                arg: "tokens",
-                reason: "a verify forward needs the last committed token; got no tokens".into(),
-            });
+            return Err(no_verify_tokens());
         }
         let (logits, biased) = self.forward(tokens).map_err(inference_error)?;
-        // Row 0 scores the cached tokens plus the last committed token.
-        let drafts = &tokens[1..];
-        let context = &self.fed[..self.fed.len() - drafts.len()];
-        let client = R::default_client(self.exec.device());
-        let verdict = verify_logits(&client, &biased, context, drafts, rule, draw)?;
+        let verdict = verify_rows(self.exec, &biased, &self.fed, tokens, rule, draw)?;
         self.last_logits = Some(logits);
         Ok(verdict)
     }
@@ -215,6 +142,9 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    use anyhow::anyhow;
+    use boostr::error::Error;
 
     use boostr::inference::speculative::{
         PromptLookup, SpeculativeConfig, SpeculativeGenerator, SpeculativeStats,

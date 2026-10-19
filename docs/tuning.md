@@ -109,7 +109,7 @@ inference:
 
 - Greedy output equals plain decoding, logprobs included.
 - A seeded sampled run is reproducible for a fixed seed, `num_draft_tokens` and drafter. It differs from the same seed with speculation off.
-- Only single-sequence requests on a contiguous KV cache use it. Paged attention, the batching engine, SSM and `qwen35` models, CUDA graph decode and tensor parallelism decode without it.
+- Only single-sequence requests use it. It runs on a contiguous KV cache and on paged attention. With paged attention, a request that the KV pool cannot hold ends with the same error as plain decoding. The batching engine, SSM and `qwen35` models, CUDA graph decode and tensor parallelism decode without it.
 - Constrained output, mirostat v2, DRY, typical-p and dynamic temperature requests decode without it.
 - A bad value fails the model load with an error that names the key.
 
@@ -121,7 +121,7 @@ Repetitive output, such as code edits or quoted context, accepts the most drafts
 | `blazr_speculative_accepted_total` | Drafts the target accepted |
 | `blazr_speculative_emitted_total` | Tokens emitted |
 | `blazr_speculative_target_forwards_total` | Target forwards |
-| `blazr_speculative_fallbacks_total{reason}` | Requests with speculation on that decoded without it |
+| `blazr_speculative_fallbacks_total{reason}` | Single-sequence requests with speculation on that decoded without it. The batching engine counts none |
 
 ## CUDA graphs
 

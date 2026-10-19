@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Result};
 
+use boostr::inference::LayeredKvCache;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -12,6 +13,7 @@ use boostr::{
 
 use super::executor::Executor;
 use super::paged_pool::PoolLease;
+use crate::engine::tensor_parallel::KvCacheSpec;
 
 /// Lease the prompt blocks of `prompt_tokens`, reusing prefix cache blocks.
 ///
@@ -138,15 +140,56 @@ where
             .narrow(1, seq_len - 1, 1)
             .map_err(|e| anyhow!("{}", e))?;
         let squeezed = narrowed.squeeze(Some(1)).squeeze(Some(0));
-        let token = squeezed.argmax(0, false).map_err(|e| anyhow!("{}", e))?;
-        if token.dtype() == DType::I64 {
-            return Ok(token);
+        self.argmax_ids(&squeezed, 0)
+    }
+
+    /// Argmax of `logits` over `axis`, as I64 ids on the device.
+    ///
+    /// Axis 2 of `[1, n, vocab]` logits gives the `[1, n]` greedy ids of
+    /// every row. Ties break to the lowest id.
+    pub(crate) fn argmax_ids(&self, logits: &Tensor<R>, axis: usize) -> Result<Tensor<R>> {
+        let ids = logits.argmax(axis, false).map_err(|e| anyhow!("{}", e))?;
+        if ids.dtype() == DType::I64 {
+            return Ok(ids);
         }
         // WebGPU has no 64-bit integers, so its argmax returns I32. Every
-        // token reader takes I64. The cast moves one element.
+        // token reader takes I64. The cast moves one element per row.
         R::default_client(&self.device)
-            .cast(&token, DType::I64)
+            .cast(&ids, DType::I64)
             .map_err(|e| anyhow!("argmax token cast to I64: {e}"))
+    }
+
+    /// A fresh contiguous KV cache for one sequence, and its shape for the
+    /// tensor-parallel followers.
+    ///
+    /// The capacity is `prompt_len + max_tokens`, at most `max_seq_len`.
+    pub(crate) fn contiguous_kv_cache(
+        &self,
+        prompt_len: usize,
+        max_tokens: usize,
+    ) -> Result<(LayeredKvCache<R>, KvCacheSpec)> {
+        let max_seq_len = self.config.max_seq_len();
+        let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
+        let head_dim = self.model.head_dim().unwrap_or(64);
+        let initial_capacity = (prompt_len + max_tokens).min(max_seq_len);
+        let dtype = self.config.kv_cache_dtype()?;
+        let cache = LayeredKvCache::new_positional(
+            self.model.num_layers(),
+            1,
+            num_kv_heads,
+            initial_capacity,
+            max_seq_len,
+            head_dim,
+            dtype,
+            &self.device,
+        )
+        .map_err(|e| anyhow!("Failed to create KV cache: {}", e))?;
+        let spec = KvCacheSpec {
+            initial_capacity,
+            max_seq_len,
+            dtype,
+        };
+        Ok((cache, spec))
     }
 
     /// Read a scalar i64 GPU tensor to CPU using the pipelined copy stream.

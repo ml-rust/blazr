@@ -152,8 +152,7 @@ mod tests {
         let mut with_spec = tiny_executor()?;
         with_spec.config.inference.speculative = Some(SpeculativeDecodingConfig {
             draft_model: "missing-draft".to_string(),
-            num_speculative_tokens: 5,
-            adaptive_depth: false,
+            ..SpeculativeDecodingConfig::default()
         });
         assert_eq!(greedy_count(&plain).await?, greedy_count(&with_spec).await?);
         Ok(())

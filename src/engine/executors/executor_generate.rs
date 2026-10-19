@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use async_stream::stream;
 use futures::Stream;
 
-use boostr::inference::{LayeredKvCache, LayeredSsmState};
+use boostr::inference::LayeredSsmState;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -216,22 +216,8 @@ where
                 tracing::info!(phase = "decode_end", backend = "paged");
             } else {
                 // ── Llama path: contiguous KV cache ──
-                let num_layers = self.model.num_layers();
-                let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
-                let head_dim = self.model.head_dim().unwrap_or(64);
-                let initial_capacity = (prompt_tokens.len() + max_tokens).min(max_seq_len);
-
-                let kv_dtype = self.config.kv_cache_dtype()?;
-
-                let mut kv_cache = LayeredKvCache::new_positional(
-                    num_layers, 1, num_kv_heads, initial_capacity, max_seq_len,
-                    head_dim, kv_dtype, &self.device,
-                ).map_err(|e| anyhow!("Failed to create KV cache: {}", e))?;
-                let fresh_cache = crate::engine::tensor_parallel::KvCacheSpec {
-                    initial_capacity,
-                    max_seq_len,
-                    dtype: kv_dtype,
-                };
+                let (mut kv_cache, fresh_cache) =
+                    self.contiguous_kv_cache(prompt_tokens.len(), max_tokens)?;
                 // A tensor-parallel group runs one sequence at a time.
                 let _tp_guard = self.tp_generation_guard().await;
 

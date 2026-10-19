@@ -129,18 +129,6 @@ where
             .ok_or_else(|| anyhow!("the grammar vocabulary is missing after it was built"))
     }
 
-    /// The EOS ids the grammar mask allows in an accepting state.
-    ///
-    /// They are the ids [`Self::decode_finish_reason`] ends generation on,
-    /// inside the model vocabulary. The model can never emit an id past it.
-    pub(in crate::engine) fn grammar_eos_ids(&self) -> Vec<u32> {
-        self.tokenizer()
-            .eos_token_id()
-            .filter(|&id| usize::try_from(id).is_ok_and(|at| at < self.vocab_size()))
-            .into_iter()
-            .collect()
-    }
-
     /// The grammar state for `gen_config`, or `None` when it sets no constraint.
     ///
     /// Admission puts the compiled DFA in `gen_config.compiled`. Without it,
@@ -171,7 +159,8 @@ where
             }
         };
         let vocab = self.grammar_vocab()?.clone();
-        let eos = self.grammar_eos_ids();
+        // The mask allows these ids in an accepting state.
+        let eos = self.eos_ids();
         let device = DeviceGrammarDfa::<R>::from_byte_dfa(&dfa, &vocab, &eos, self.device())
             .map_err(|e| anyhow!("uploading the grammar DFA failed: {e}"))?;
         tracing::debug!(states = dfa.num_states(), "grammar DFA ready");

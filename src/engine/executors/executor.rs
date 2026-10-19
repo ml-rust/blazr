@@ -368,6 +368,19 @@ where
         self.model.vocab_size()
     }
 
+    /// The ids that end generation, inside the model vocabulary.
+    ///
+    /// They come from the tokenizer, never from a hard-coded list.
+    /// [`Self::decode_finish_reason`] ends on the same ids. The model can
+    /// never emit an id past its vocabulary.
+    pub(in crate::engine) fn eos_ids(&self) -> Vec<u32> {
+        self.tokenizer()
+            .eos_token_id()
+            .filter(|&id| usize::try_from(id).is_ok_and(|at| at < self.vocab_size()))
+            .into_iter()
+            .collect()
+    }
+
     /// Get the device
     pub(crate) fn device(&self) -> &R::Device {
         &self.device

@@ -190,6 +190,21 @@ where
         logits: &Tensor<R>,
         bias_map: &std::collections::HashMap<u32, f32>,
     ) -> Result<Tensor<R>> {
+        let bias_tensor = self.logit_bias_tensor(bias_map, logits.dtype())?;
+        logits
+            .add(&bias_tensor)
+            .map_err(|e| anyhow!("logit_bias add failed: {}", e))
+    }
+
+    /// The `[1, 1, vocab]` bias tensor of `bias_map` in `dtype`.
+    ///
+    /// An id at or past the model vocabulary gets no bias. A `[1, n, vocab]`
+    /// logits tensor takes it by broadcast.
+    pub(crate) fn logit_bias_tensor(
+        &self,
+        bias_map: &std::collections::HashMap<u32, f32>,
+        dtype: DType,
+    ) -> Result<Tensor<R>> {
         let vocab_size = self.vocab_size();
         let mut bias_vec = vec![0.0f32; vocab_size];
         for (&token_id, &bias) in bias_map {
@@ -199,11 +214,8 @@ where
         }
         let bias_tensor = Tensor::from_slice(&bias_vec, &[1, 1, vocab_size], self.device())?;
         // Half-precision logits take the bias in their own dtype.
-        let bias_tensor = R::default_client(self.device())
-            .cast(&bias_tensor, logits.dtype())
-            .map_err(|e| anyhow!("casting logit_bias to {:?} failed: {e}", logits.dtype()))?;
-        logits
-            .add(&bias_tensor)
-            .map_err(|e| anyhow!("logit_bias add failed: {}", e))
+        R::default_client(self.device())
+            .cast(&bias_tensor, dtype)
+            .map_err(|e| anyhow!("casting logit_bias to {dtype:?} failed: {e}"))
     }
 }

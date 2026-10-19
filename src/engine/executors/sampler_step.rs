@@ -460,18 +460,16 @@ mod tests {
     #[test]
     fn eos_ids_are_the_finish_ids_inside_the_model_vocab() -> Result<()> {
         let tiny = tiny_executor()?;
-        assert!(
-            tiny.grammar_eos_ids().is_empty(),
-            "the EOS id is past 32 ids"
-        );
+        assert!(tiny.eos_ids().is_empty(), "the EOS id is past 32 ids");
         let full = full_vocab_executor(None)?;
-        assert_eq!(
-            full.grammar_eos_ids(),
-            full.tokenizer()
-                .eos_token_id()
-                .into_iter()
-                .collect::<Vec<_>>()
-        );
+        let eos = full
+            .tokenizer()
+            .eos_token_id()
+            .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
+        assert_eq!(full.eos_ids(), vec![eos]);
+        for id in full.eos_ids() {
+            assert_eq!(full.decode_finish_reason(id, 0, 8), Some(FinishReason::Eos));
+        }
         Ok(())
     }
 

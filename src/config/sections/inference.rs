@@ -1,7 +1,6 @@
 //! Inference configuration settings
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -79,11 +78,10 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub kv_pool_blocks: usize,
 
-    /// Speculative decoding config. Blazr parses it and ignores it: requests
-    /// decode through the sampler. [`InferenceConfig::warn_speculative_ignored`]
-    /// logs the ignored key once.
+    /// Speculative decoding config. No request path reads it yet.
+    /// [`InferenceConfig::warn_speculative_ignored`] logs the ignored key once.
     #[serde(default)]
-    pub speculative: Option<SpeculativeDecodingConfig>,
+    pub speculative: Option<super::speculative::SpeculativeDecodingConfig>,
 
     /// Tensor parallelism degree. 1 runs on one GPU.
     /// Above 1, `blazr serve` shards a SafeTensors model across GPUs with
@@ -143,56 +141,12 @@ fn default_max_cached_blocks() -> usize {
     10000
 }
 
-/// Speculative decoding config. Parsed so existing config files load. Blazr does not read its fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpeculativeDecodingConfig {
-    /// Path to the draft model (smaller, faster model for speculation)
-    pub draft_model: String,
-    /// Number of tokens to speculate per iteration (default: 5)
-    #[serde(default = "default_spec_tokens")]
-    pub num_speculative_tokens: usize,
-    /// Enable adaptive depth (adjust speculation depth based on acceptance rate)
-    #[serde(default)]
-    pub adaptive_depth: bool,
-}
-
-/// Set once the ignored-`speculative` warning has been logged.
-static SPECULATIVE_WARNED: AtomicBool = AtomicBool::new(false);
-
-/// Log the ignored-`speculative` warning the first time `flag` is unset.
-/// Return `true` when this call logged it.
-fn warn_speculative_once(
-    flag: &AtomicBool,
-    speculative: Option<&SpeculativeDecodingConfig>,
-) -> bool {
-    if speculative.is_none() || flag.swap(true, Ordering::Relaxed) {
-        return false;
-    }
-    tracing::warn!(
-        "inference.speculative is ignored: speculative decoding is disabled until its \
-         implementation is rewritten. Requests decode with the normal sampler"
-    );
-    true
-}
-
-impl InferenceConfig {
-    /// Log once per process that `inference.speculative` is ignored.
-    /// Return `true` when this call logged the warning.
-    pub fn warn_speculative_ignored(&self) -> bool {
-        warn_speculative_once(&SPECULATIVE_WARNED, self.speculative.as_ref())
-    }
-}
-
 fn default_ram_tier_capacity() -> usize {
     5000
 }
 
 fn default_one() -> usize {
     1
-}
-
-fn default_spec_tokens() -> usize {
-    5
 }
 
 impl Default for InferenceConfig {
@@ -219,38 +173,5 @@ impl Default for InferenceConfig {
             decision: Default::default(),
             lora: Vec::new(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn spec() -> SpeculativeDecodingConfig {
-        SpeculativeDecodingConfig {
-            draft_model: "d".to_string(),
-            num_speculative_tokens: 5,
-            adaptive_depth: false,
-        }
-    }
-
-    #[test]
-    fn a_speculative_section_parses() -> Result<(), serde_saphyr::Error> {
-        let cfg: InferenceConfig =
-            serde_saphyr::from_str("speculative:\n  draft_model: tiny\n  adaptive_depth: true\n")?;
-        let spec = cfg.speculative;
-        assert_eq!(spec.as_ref().map(|s| s.draft_model.as_str()), Some("tiny"));
-        assert_eq!(spec.as_ref().map(|s| s.num_speculative_tokens), Some(5));
-        assert_eq!(spec.map(|s| s.adaptive_depth), Some(true));
-        Ok(())
-    }
-
-    #[test]
-    fn the_warning_logs_once() {
-        let flag = AtomicBool::new(false);
-        assert!(!warn_speculative_once(&flag, None), "unset logs nothing");
-        assert!(warn_speculative_once(&flag, Some(&spec())));
-        assert!(!warn_speculative_once(&flag, Some(&spec())));
-        assert!(!warn_speculative_once(&flag, Some(&spec())));
     }
 }

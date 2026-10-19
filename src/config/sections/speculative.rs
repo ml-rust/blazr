@@ -1,12 +1,10 @@
 //! The `inference.speculative` config section.
 
 use anyhow::{anyhow, Result};
-use boostr::inference::speculative::{
-    PromptLookup, DEFAULT_NUM_DRAFT_TOKENS, MAX_NUM_DRAFT_TOKENS,
-};
+use boostr::inference::speculative::{DEFAULT_NUM_DRAFT_TOKENS, MAX_NUM_DRAFT_TOKENS};
 use serde::{Deserialize, Serialize};
 
-use super::speculative_drafter::{DrafterKind, PromptLookupConfig};
+use super::speculative_drafter::{DrafterKind, DrafterSpec, PromptLookupConfig};
 
 /// Speculative decoding config. It is off by default.
 ///
@@ -31,7 +29,7 @@ pub struct SpeculativeDecodingConfig {
     /// The n-gram search of the `prompt_lookup` drafter.
     #[serde(default)]
     pub prompt_lookup: PromptLookupConfig,
-    /// Draft model path. It is not supported: drafting runs by prompt lookup.
+    /// The draft model of `drafter: model`: a GGUF file or a SafeTensors directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_model: Option<String>,
     /// Accepted from old config files and ignored.
@@ -56,10 +54,17 @@ impl SpeculativeDecodingConfig {
     ///
     /// # Errors
     ///
-    /// An error naming the `prompt_lookup` key boostr refuses.
-    pub fn build_drafter(&self) -> Result<PromptLookup> {
+    /// An error naming the refused key: a `prompt_lookup` value boostr
+    /// refuses, or `draft_model` unset or empty under `drafter: model`.
+    pub fn drafter_spec(&self) -> Result<DrafterSpec> {
         match self.drafter {
-            DrafterKind::PromptLookup => self.prompt_lookup.build(),
+            DrafterKind::PromptLookup => self.prompt_lookup.build().map(DrafterSpec::PromptLookup),
+            DrafterKind::Model if self.draft_model().is_some() => Ok(DrafterSpec::Model),
+            DrafterKind::Model => Err(anyhow!(
+                "inference.speculative.draft_model is {:?}; drafter model needs a draft model. \
+                 Set draft_model to a GGUF file or a SafeTensors directory",
+                self.draft_model.as_deref().unwrap_or_default()
+            )),
         }
     }
 
@@ -67,8 +72,8 @@ impl SpeculativeDecodingConfig {
     ///
     /// # Errors
     ///
-    /// An error naming the key: a draft count outside `1..=32`, or a
-    /// `prompt_lookup` value boostr refuses.
+    /// An error naming the key: a draft count outside `1..=32`, a
+    /// `prompt_lookup` value boostr refuses, or a missing `draft_model`.
     pub fn check(&self) -> Result<()> {
         let key = if self.num_draft_tokens.is_none() && self.num_speculative_tokens.is_some() {
             "num_speculative_tokens"
@@ -81,7 +86,8 @@ impl SpeculativeDecodingConfig {
                 "inference.speculative.{key} is {count}; set a value in 1..={MAX_NUM_DRAFT_TOKENS}"
             ));
         }
-        self.build_drafter().map(|_| ())
+        self.prompt_lookup.build()?;
+        self.drafter_spec().map(|_| ())
     }
 }
 
@@ -89,6 +95,7 @@ impl SpeculativeDecodingConfig {
 mod tests {
     use super::*;
     use crate::config::{FileConfig, InferenceConfig};
+    use boostr::inference::speculative::PromptLookup;
     use std::path::Path;
 
     fn section(yaml: &str) -> Result<SpeculativeDecodingConfig> {
@@ -103,7 +110,10 @@ mod tests {
         assert!(!spec.enabled);
         assert_eq!(spec.drafter, DrafterKind::PromptLookup);
         assert_eq!(spec.draft_count(), DEFAULT_NUM_DRAFT_TOKENS);
-        assert_eq!(spec.build_drafter()?, PromptLookup::default());
+        assert_eq!(
+            spec.drafter_spec()?,
+            DrafterSpec::PromptLookup(PromptLookup::default())
+        );
         assert_eq!(spec.draft_model(), None);
         spec.check()?;
         assert!(InferenceConfig::default().speculative.is_none());
@@ -173,6 +183,36 @@ mod tests {
                 matches!(&err, Err(msg) if msg.contains(&format!("inference.speculative.{key}"))),
                 "{spec:?}: {err:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_model_drafter_parses_with_its_path() -> Result<()> {
+        let spec = section(
+            "speculative:\n  enabled: true\n  drafter: model\n  draft_model: /models/draft.gguf\n",
+        )?;
+        assert_eq!(spec.drafter, DrafterKind::Model);
+        assert_eq!(spec.draft_model(), Some("/models/draft.gguf"));
+        assert_eq!(spec.drafter_spec()?, DrafterSpec::Model);
+        spec.check()
+    }
+
+    #[test]
+    fn the_model_drafter_without_a_path_names_draft_model() {
+        for path in [None, Some(String::new())] {
+            for enabled in [false, true] {
+                let spec = SpeculativeDecodingConfig {
+                    enabled,
+                    drafter: DrafterKind::Model,
+                    draft_model: path.clone(),
+                    ..SpeculativeDecodingConfig::default()
+                };
+                let err = spec.check().map_err(|e| e.to_string());
+                assert!(
+                    matches!(&err, Err(msg) if msg.contains("inference.speculative.draft_model")),
+                    "{spec:?}: {err:?}"
+                );
+            }
         }
     }
 

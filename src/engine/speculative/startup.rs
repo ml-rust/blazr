@@ -7,7 +7,7 @@ use boostr::{DType, Runtime};
 
 use super::eligibility::load_fallback;
 use super::Fallback;
-use crate::config::InferenceConfig;
+use crate::config::{DrafterKind, InferenceConfig};
 
 /// What a load found for speculative decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,10 +43,11 @@ where
     if !spec.enabled {
         return Ok(SpeculativeStartup::Off);
     }
-    if let Some(path) = spec.draft_model() {
+    if let (Some(path), DrafterKind::PromptLookup) = (spec.draft_model(), spec.drafter) {
         tracing::warn!(
             draft_model = path,
-            "inference.speculative.draft_model is not supported yet; drafting by prompt lookup"
+            "inference.speculative.draft_model is set, but the drafter is prompt_lookup; \
+             set drafter: model to draft with it"
         );
     }
     if let Err(fallback) = load_fallback(model) {
@@ -118,7 +119,25 @@ mod tests {
         assert_eq!(
             report_speculative(model, &with(Some(draft), false))?,
             SpeculativeStartup::On,
-            "a draft model warns and drafts by prompt lookup"
+            "a draft model under prompt_lookup warns and drafts by prompt lookup"
+        );
+        let drafting = SpeculativeDecodingConfig {
+            drafter: DrafterKind::Model,
+            draft_model: Some("draft-dir".to_string()),
+            ..on()
+        };
+        assert_eq!(
+            report_speculative(model, &with(Some(drafting), false))?,
+            SpeculativeStartup::On
+        );
+        let no_path = SpeculativeDecodingConfig {
+            drafter: DrafterKind::Model,
+            ..on()
+        };
+        let err = report_speculative(model, &with(Some(no_path), false)).map_err(|e| e.to_string());
+        assert!(
+            matches!(&err, Err(msg) if msg.contains("inference.speculative.draft_model")),
+            "{err:?}"
         );
         Ok(())
     }

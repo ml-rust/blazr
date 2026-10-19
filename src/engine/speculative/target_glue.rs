@@ -16,7 +16,7 @@ use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 
 /// The device client a speculative target needs.
-pub(in crate::engine) trait TargetClient<R: Runtime<DType = DType>>:
+pub trait TargetClient<R: Runtime<DType = DType>>:
     TensorOps<R>
     + ScalarOps<R>
     + ConvOps<R>
@@ -164,7 +164,9 @@ pub(super) fn no_verify_tokens() -> Error {
 /// Verify the drafts of `tokens` against the biased `rows` of their forward.
 ///
 /// `fed` is the target's token history, with `tokens` already appended. Row 0
-/// scores the cached tokens plus the last committed token.
+/// scores the cached tokens plus the last committed token. `draft_probs` is
+/// the `[1, drafts, V]` draft distributions of a draft model, or `None` for
+/// one-hot drafts.
 ///
 /// # Errors
 ///
@@ -176,6 +178,7 @@ pub(super) fn verify_rows<R>(
     tokens: &[u32],
     rule: &SampleRule,
     draw: Draw,
+    draft_probs: Option<&Tensor<R>>,
 ) -> Result<Verdict>
 where
     R: Runtime<DType = DType>,
@@ -184,5 +187,5 @@ where
     let drafts = tokens.get(1..).unwrap_or_default();
     let context = &fed[..fed.len().saturating_sub(drafts.len())];
     let client = R::default_client(exec.device());
-    verify_logits(&client, biased, context, drafts, rule, draw)
+    verify_logits(&client, biased, context, drafts, rule, draw, draft_probs)
 }

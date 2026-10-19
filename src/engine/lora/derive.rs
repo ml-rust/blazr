@@ -106,6 +106,7 @@ where
         })?;
         executor.chat_template = self.chat_template.clone();
         executor.vision_tower = self.vision_tower.clone();
+        executor.draft = self.draft.clone();
         tracing::info!(
             adapter = %spec.name,
             path = %spec.path.display(),

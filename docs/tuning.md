@@ -94,7 +94,7 @@ The sweep runs its requests one after another through a single executor. The swe
 
 ## Speculative decoding
 
-Set `inference.speculative.enabled: true` to draft tokens by prompt lookup. The drafter copies the tokens that followed an earlier match of the context's last n-gram. One target forward checks every draft. A step emits the accepted drafts plus one token from the target.
+Set `inference.speculative.enabled: true` to draft tokens by prompt lookup. A [draft model](#draft-model) is the other drafter. Prompt lookup copies the tokens that followed an earlier match of the context's last n-gram. One target forward checks every draft. A step emits the accepted drafts plus one token from the target.
 
 ```yaml
 inference:
@@ -113,7 +113,30 @@ inference:
 - Constrained output, mirostat v2, DRY, typical-p and dynamic temperature requests decode without it.
 - A bad value fails the model load with an error that names the key.
 
-Repetitive output, such as code edits or quoted context, accepts the most drafts. The load logs one line that states whether speculation is on. Prometheus counters:
+Repetitive output, such as code edits or quoted context, accepts the most drafts with prompt lookup.
+
+### Draft model
+
+Set `drafter: model` to draft with a small model of the same family. Varied text accepts more drafts this way.
+
+```yaml
+inference:
+  speculative:
+    enabled: true
+    drafter: model
+    draft_model: /models/llama-3.2-1b-instruct
+    num_draft_tokens: 4
+```
+
+- The draft model loads once with the target. Every request shares its weights.
+- It loads on the target's device in the target's compute dtype. It costs its weights plus one contiguous KV cache per active request.
+- The draft always runs a contiguous KV cache, also when the target runs paged attention.
+- The draft must share the target's tokenizer. The load checks the vocabulary sizes, the EOS and BOS ids and the ids of a fixed set of texts. A mismatch fails the load with an error that names `draft_model`.
+- Sampled requests keep the target's output distribution. The verify uses each draft's distribution.
+- A request falls back with reason `draft_model` when no draft model is loaded. It falls back with reason `draft_context` when the prompt, the budget and one step of drafts pass the draft's context.
+- Pick a draft that agrees with the target often. A draft that rarely agrees costs a draft forward per draft and saves no target forward.
+
+The load logs one line that states whether speculation is on. Prometheus counters:
 
 | Metric | Meaning |
 | ------ | ------- |

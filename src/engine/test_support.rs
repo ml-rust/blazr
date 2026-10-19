@@ -171,6 +171,21 @@ pub(crate) fn seeded_paged(
     seeded_on(seed, Some(pool), ctx, prefix_cache)
 }
 
+/// A seeded target with a context of `ctx` tokens and a seeded draft attached.
+///
+/// The draft runs contiguous KV with the same context, whatever `paged`
+/// sets for the target. Equal seeds give a draft with the target's weights.
+/// The test sets `inference.speculative` itself.
+pub(crate) fn seeded_executor_pair(
+    target_seed: u64,
+    draft_seed: u64,
+    ctx: usize,
+    paged: Option<PagedPool>,
+) -> Result<Executor<CpuRuntime>> {
+    let draft = seeded_on(draft_seed, None, ctx, false)?;
+    seeded_on(target_seed, paged, ctx, false)?.with_draft(draft)
+}
+
 fn seeded_on(
     seed: u64,
     paged: Option<PagedPool>,

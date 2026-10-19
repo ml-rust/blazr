@@ -1,6 +1,6 @@
 //! Which requests can decode speculatively, and with what plan.
 
-use boostr::inference::speculative::{PromptLookup, SpeculativeConfig, MAX_NUM_DRAFT_TOKENS};
+use boostr::inference::speculative::{SpeculativeConfig, MAX_NUM_DRAFT_TOKENS};
 use boostr::model::{LoadedModel, ModelClient};
 use boostr::ops::TensorOps;
 use boostr::{
@@ -9,7 +9,7 @@ use boostr::{
 };
 
 use super::sample_rule;
-use crate::config::GenerationConfig;
+use crate::config::{DrafterSpec, GenerationConfig};
 use crate::engine::executor::Executor;
 
 /// The plan of one speculative generation.
@@ -17,8 +17,8 @@ use crate::engine::executor::Executor;
 pub(in crate::engine) struct SpeculativePlan {
     /// The draft count, token budget, EOS ids and acceptance rule.
     pub config: SpeculativeConfig,
-    /// The model-free drafter.
-    pub drafter: PromptLookup,
+    /// Prompt lookup, or the executor's draft model.
+    pub drafter: DrafterSpec,
 }
 
 /// Why a request decodes through the plain sampler instead.
@@ -50,6 +50,10 @@ pub(in crate::engine) enum Fallback {
     DraftCount,
     /// boostr refuses the configured drafter keys.
     Drafter,
+    /// `drafter: model` is set, but the executor holds no draft model.
+    DraftModel,
+    /// The prompt, the budget and one step of drafts pass the draft model's context.
+    DraftContext,
     /// boostr's check refuses the mapped sampling rule.
     SampleRule,
     /// A prompt id is at or past the model vocabulary.
@@ -72,6 +76,8 @@ impl Fallback {
             Self::Dynatemp => "dynatemp",
             Self::DraftCount => "draft_count",
             Self::Drafter => "drafter",
+            Self::DraftModel => "draft_model",
+            Self::DraftContext => "draft_context",
             Self::SampleRule => "sample_rule",
             Self::PromptVocab => "prompt_vocab",
         }
@@ -141,7 +147,13 @@ where
         if !(1..=MAX_NUM_DRAFT_TOKENS).contains(&num_draft_tokens) {
             return Err(Fallback::DraftCount);
         }
-        let drafter = spec.build_drafter().map_err(|_| Fallback::Drafter)?;
+        let drafter = spec.drafter_spec().map_err(|_| Fallback::Drafter)?;
+        if drafter == DrafterSpec::Model {
+            let draft = self.draft.as_deref().ok_or(Fallback::DraftModel)?;
+            if prompt.len() + max_tokens + num_draft_tokens > draft.config.max_seq_len() {
+                return Err(Fallback::DraftContext);
+            }
+        }
         let vocab = self.vocab_size();
         let config = SpeculativeConfig {
             num_draft_tokens,
@@ -195,11 +207,14 @@ mod tests {
     use std::collections::HashSet;
 
     use anyhow::Result;
+    use boostr::inference::speculative::PromptLookup;
     use boostr::CpuRuntime;
 
-    use crate::config::{Constraint, PromptLookupConfig, SpeculativeDecodingConfig};
+    use crate::config::{Constraint, DrafterKind, PromptLookupConfig, SpeculativeDecodingConfig};
     use crate::engine::speculative::{Fallback, SpeculativePlan};
-    use crate::engine::test_support::{full_vocab_executor, seeded_executor, PagedPool};
+    use crate::engine::test_support::{
+        full_vocab_executor, seeded_executor, seeded_executor_pair, PagedPool,
+    };
 
     const SEED: u64 = 0x5bec;
     const PROMPT: [u32; 3] = [1, 2, 3];
@@ -231,7 +246,7 @@ mod tests {
                 eos_token_ids: exec.eos_ids(),
                 sampling: None,
             },
-            drafter: PromptLookup::default(),
+            drafter: DrafterSpec::PromptLookup(PromptLookup::default()),
         };
         assert_eq!(plan.as_ref().map(|p| p.drafter), Ok(want.drafter));
         assert_eq!(plan, Ok(want));
@@ -383,13 +398,41 @@ mod tests {
             spec.prompt_lookup = lookup;
         }
         let plan = exec.speculative_plan(&greedy(), &PROMPT, 8);
-        assert_eq!(plan.map(|p| p.drafter), Ok(PromptLookup::new(2, 4, 32)?));
+        assert_eq!(
+            plan.map(|p| p.drafter),
+            Ok(DrafterSpec::PromptLookup(PromptLookup::new(2, 4, 32)?))
+        );
         if let Some(spec) = exec.config.inference.speculative.as_mut() {
             spec.prompt_lookup.window = 4;
         }
         assert_eq!(
             exec.speculative_plan(&greedy(), &PROMPT, 8),
             Err(Fallback::Drafter)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_model_drafter_needs_a_draft_with_room() -> Result<()> {
+        let drafting = |mut exec: Executor<CpuRuntime>| {
+            if let Some(spec) = exec.config.inference.speculative.as_mut() {
+                spec.drafter = DrafterKind::Model;
+                spec.draft_model = Some("draft".into());
+            }
+            exec
+        };
+        let exec = drafting(enabled(seeded_executor(SEED, None)?, 4));
+        assert_eq!(
+            exec.speculative_plan(&greedy(), &PROMPT, 8),
+            Err(Fallback::DraftModel)
+        );
+        // The draft context is 16: 3 prompt + 8 budget + 4 drafts fit, 3 + 10 + 4 do not.
+        let exec = drafting(enabled(seeded_executor_pair(SEED, SEED, 16, None)?, 4));
+        let plan = exec.speculative_plan(&greedy(), &PROMPT, 8);
+        assert_eq!(plan.map(|p| p.drafter), Ok(DrafterSpec::Model));
+        assert_eq!(
+            exec.speculative_plan(&greedy(), &PROMPT, 10),
+            Err(Fallback::DraftContext)
         );
         Ok(())
     }
@@ -420,6 +463,8 @@ mod tests {
             Fallback::Dynatemp,
             Fallback::DraftCount,
             Fallback::Drafter,
+            Fallback::DraftModel,
+            Fallback::DraftContext,
             Fallback::SampleRule,
             Fallback::PromptVocab,
         ];

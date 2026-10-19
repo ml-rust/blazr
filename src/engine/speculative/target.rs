@@ -1,7 +1,9 @@
 //! The speculative target over an executor's contiguous KV cache.
 
-use boostr::error::Result;
-use boostr::inference::speculative::{Draw, SampleRule, SpeculativeModel, Verdict};
+use boostr::error::{Error, Result};
+use boostr::inference::speculative::{
+    DraftModel, Draw, SampleRule, SpeculativeModel, SpeculativeProbModel, Verdict,
+};
 use boostr::inference::LayeredKvCache;
 use boostr::{DType, Runtime, Tensor};
 
@@ -128,13 +130,57 @@ where
     }
 
     fn extend_sampled(&mut self, tokens: &[u32], rule: &SampleRule, draw: Draw) -> Result<Verdict> {
+        self.extend_sampled_with_probs(tokens, rule, draw, None)
+    }
+}
+
+impl<R> SpeculativeProbModel<R> for ContiguousTarget<'_, R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TargetClient<R>,
+{
+    fn extend_sampled_with_probs(
+        &mut self,
+        tokens: &[u32],
+        rule: &SampleRule,
+        draw: Draw,
+        draft_probs: Option<&Tensor<R>>,
+    ) -> Result<Verdict> {
         if tokens.is_empty() {
             return Err(no_verify_tokens());
         }
         let (logits, biased) = self.forward(tokens).map_err(inference_error)?;
-        let verdict = verify_rows(self.exec, &biased, &self.fed, tokens, rule, draw)?;
+        let verdict = verify_rows(
+            self.exec,
+            &biased,
+            &self.fed,
+            tokens,
+            rule,
+            draw,
+            draft_probs,
+        )?;
         self.last_logits = Some(logits);
         Ok(verdict)
+    }
+}
+
+/// A contiguous target over a draft executor drafts for a [`ModelDrafter`].
+///
+/// [`ModelDrafter`]: boostr::inference::speculative::ModelDrafter
+impl<R> DraftModel<R> for ContiguousTarget<'_, R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TargetClient<R>,
+{
+    fn forward_logits(&mut self, tokens: &[u32]) -> Result<Tensor<R>> {
+        if tokens.is_empty() {
+            return Err(Error::InvalidArgument {
+                arg: "tokens",
+                reason: "a draft forward needs at least one token; got none".into(),
+            });
+        }
+        let (_, biased) = self.forward(tokens).map_err(inference_error)?;
+        Ok(biased)
     }
 }
 
@@ -371,6 +417,31 @@ mod tests {
         };
         let mut target = ContiguousTarget::new(&exec, &gen, 4, 4)?;
         assert_eq!(target.extend_greedy(&[1, 2, 3])?, vec![7, 7, 7]);
+        Ok(())
+    }
+
+    #[test]
+    fn forward_logits_returns_one_biased_row_per_token() -> anyhow::Result<()> {
+        let exec = seeded_executor_ctx(SEED, CTX)?;
+        let vocab = exec.vocab_size();
+        let gen = GenerationConfig {
+            logit_bias: HashMap::from([(7, 100.0)]),
+            ..greedy_plain()
+        };
+        let mut draft = ContiguousTarget::new(&exec, &gen, 4, 4)?;
+        let logits = draft.forward_logits(&[1, 2, 3])?;
+        assert_eq!(logits.shape(), &[1, 3, vocab]);
+        for row in logits.to_vec::<f32>().chunks(vocab) {
+            let top = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(id, _)| id);
+            assert_eq!(top, Some(7), "the bias reaches the draft logits");
+        }
+        assert_eq!((draft.len(), draft.fed()), (3, &[1, 2, 3][..]));
+        assert!(draft.forward_logits(&[]).is_err());
+        assert_eq!(draft.len(), 3);
         Ok(())
     }
 }

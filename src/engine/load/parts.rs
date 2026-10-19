@@ -71,12 +71,14 @@ where
 ///
 /// The chat template is the one `chat_template` names, else the model's
 /// own. The vision tower is the one `config.inference.mmproj` names, if
-/// any. A caller writes its settings into the config before this call.
+/// any. The draft model is the one `inference.speculative.draft_model`
+/// names under `drafter: model`. A caller sets these in the
+/// config before this call.
 ///
 /// # Errors
 ///
 /// A chat template that does not load, an executor that does not start,
-/// or a vision tower that does not load.
+/// or a vision tower or draft model that does not load.
 pub(crate) fn start_executor<R>(
     path: &Path,
     parts: ModelParts<R>,
@@ -102,7 +104,8 @@ where
     let template = ChatTemplate::detect(path, config.model_type(), chat_template)?;
     Executor::new(model, config, tokenizer, device, num_ctx)?
         .with_chat_template(template)
-        .with_configured_vision_tower()
+        .with_configured_vision_tower()?
+        .with_configured_draft_model()
 }
 
 #[cfg(test)]

@@ -7,13 +7,15 @@ use serde::{Deserialize, Serialize};
 
 /// The drafter that proposes speculative tokens.
 ///
-/// `prompt_lookup` is the only drafter. A draft model is not supported.
+/// `prompt_lookup` needs no model. `model` samples from a small draft model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DrafterKind {
     /// Copy the tokens that followed an earlier n-gram of the context.
     #[default]
     PromptLookup,
+    /// Sample drafts from the model `inference.speculative.draft_model` names.
+    Model,
 }
 
 impl DrafterKind {
@@ -21,8 +23,18 @@ impl DrafterKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::PromptLookup => "prompt_lookup",
+            Self::Model => "model",
         }
     }
+}
+
+/// The drafter of a checked `inference.speculative` section.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DrafterSpec {
+    /// Prompt lookup with the configured n-gram search.
+    PromptLookup(PromptLookup),
+    /// The draft model the executor loaded from `draft_model`.
+    Model,
 }
 
 /// The n-gram search of the `prompt_lookup` drafter.
@@ -122,7 +134,9 @@ mod tests {
             (kind, kind.name()),
             (DrafterKind::PromptLookup, "prompt_lookup")
         );
-        assert!(serde_saphyr::from_str::<DrafterKind>("model").is_err());
+        let kind: DrafterKind = serde_saphyr::from_str("model")?;
+        assert_eq!((kind, kind.name()), (DrafterKind::Model, "model"));
+        assert!(serde_saphyr::from_str::<DrafterKind>("ngram").is_err());
         Ok(())
     }
 }

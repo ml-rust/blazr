@@ -17,5 +17,5 @@ pub use inference::InferenceConfig;
 pub use overlay::InferenceOverlay;
 pub use server::{LatencySlo, ReasoningFormat, ServerConfig};
 pub use speculative::SpeculativeDecodingConfig;
-pub use speculative_drafter::{DrafterKind, PromptLookupConfig};
+pub use speculative_drafter::{DrafterKind, DrafterSpec, PromptLookupConfig};
 pub use vision::VisionOverrides;

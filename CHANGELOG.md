@@ -16,6 +16,7 @@ preview on crates.io that shares no code with it.
 
 - **Streaming logprobs** — completions and chat stream chunks now carry `choices[0].logprobs` when the request sets `logprobs`. Each chunk holds the entry of the token it carries. A token whose text a stop-sequence prefix or a reasoning tag holds back still sends its entry in its own chunk.
 - **Speculative decoding** — `inference.speculative.enabled` drafts tokens by prompt lookup and checks them in one forward. It applies to single-sequence requests, on a contiguous KV cache and on paged attention. Greedy output equals plain decoding. Constrained, mirostat, DRY, typical and dynamic-temperature requests decode without it. `blazr_speculative_*` counters report drafts, accepts and fallbacks.
+- **Draft-model speculation** — `inference.speculative.drafter: model` drafts with the small model `inference.speculative.draft_model` names. It loads once on the target's device and dtype. Each request gets its own contiguous draft KV cache, also over a paged target. Sampled requests verify against each draft's distribution, so the output follows the target's distribution. A draft whose tokenizer or vocabulary differs from the target fails the load. `drafter: model` with no `draft_model` fails the config check.
 - **Logprob bytes** — each logprob entry and `top_logprobs` item now has `bytes`, the UTF-8 bytes of its token, in streaming and non-streaming responses.
 
 ### Fixed

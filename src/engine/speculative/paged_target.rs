@@ -4,7 +4,9 @@ use anyhow::anyhow;
 
 use boostr::error::{Error, Result};
 use boostr::inference::kv_cache::LayeredPagedKvCache;
-use boostr::inference::speculative::{Draw, SampleRule, SpeculativeModel, Verdict};
+use boostr::inference::speculative::{
+    Draw, SampleRule, SpeculativeModel, SpeculativeProbModel, Verdict,
+};
 use boostr::{DType, RoPEPackedOps, Runtime, Tensor};
 
 use super::target_glue::{
@@ -238,11 +240,35 @@ where
     }
 
     fn extend_sampled(&mut self, tokens: &[u32], rule: &SampleRule, draw: Draw) -> Result<Verdict> {
+        self.extend_sampled_with_probs(tokens, rule, draw, None)
+    }
+}
+
+impl<R> SpeculativeProbModel<R> for PagedTarget<'_, R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TargetClient<R> + RoPEPackedOps<R>,
+{
+    fn extend_sampled_with_probs(
+        &mut self,
+        tokens: &[u32],
+        rule: &SampleRule,
+        draw: Draw,
+        draft_probs: Option<&Tensor<R>>,
+    ) -> Result<Verdict> {
         if tokens.is_empty() {
             return Err(no_verify_tokens());
         }
         let (logits, biased) = self.forward(tokens).map_err(inference_error)?;
-        let verdict = verify_rows(self.exec, &biased, &self.fed, tokens, rule, draw)?;
+        let verdict = verify_rows(
+            self.exec,
+            &biased,
+            &self.fed,
+            tokens,
+            rule,
+            draw,
+            draft_probs,
+        )?;
         self.last_logits = Some(logits);
         Ok(verdict)
     }

@@ -17,7 +17,7 @@ use crate::config::{BlazrConfig, DtypeRequest, InferenceOverlay, VisionOverrides
 use crate::engine::{tensor_parallel, Executor};
 use crate::loader;
 
-/// The scheduler settings every load applies, owned so the load runs on
+/// The scheduler config every load applies, owned so the load runs on
 /// another thread.
 pub(crate) struct LoadJob<R: Runtime<DType = DType>> {
     /// The device the weights upload to.

@@ -10,7 +10,6 @@ use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, NormalizationOps, Runtime, SamplingOps, ScalarOps,
     TypeConversionOps, UnaryOps,
 };
-use splintr::Tokenize;
 
 use super::eligibility::load_fallback;
 use crate::config::{DrafterKind, DtypeRequest, DtypeSource, InferenceConfig};
@@ -46,9 +45,10 @@ fn draft_only(inference: &mut InferenceConfig) {
 
 /// Check that `draft` drafts in the token ids of `target`.
 ///
-/// The model vocabularies, the tokenizer vocabularies, the EOS id and the BOS
-/// ids must match. Both tokenizers must encode every probe text to the same
-/// ids.
+/// The model vocabularies must match. Both tokenizers must encode every probe
+/// text to the same ids. Special tokens past the shared text vocabulary can
+/// differ: the target alone decides every emitted token, so a draft id it does
+/// not share only lowers acceptance.
 ///
 /// # Errors
 ///
@@ -74,24 +74,6 @@ where
         return Err(refuse("the model vocabularies differ".into()));
     }
     let (t, d) = (&*target.tokenizer, &*draft.tokenizer);
-    let (t_words, d_words) = (Tokenize::vocab_size(t), Tokenize::vocab_size(d));
-    if t_words != d_words {
-        return Err(refuse(format!(
-            "the tokenizers hold {t_words} and {d_words} tokens"
-        )));
-    }
-    if t.eos_token_id() != d.eos_token_id() {
-        return Err(refuse(format!(
-            "the EOS ids are {:?} and {:?}",
-            t.eos_token_id(),
-            d.eos_token_id()
-        )));
-    }
-    // An empty text encodes to the BOS ids the tokenizer adds, if any.
-    let (t_bos, d_bos) = (t.encode(""), d.encode(""));
-    if t_bos != d_bos {
-        return Err(refuse(format!("the BOS ids are {t_bos:?} and {d_bos:?}")));
-    }
     for text in PROBE_TEXTS {
         let (a, b) = (t.encode(text), d.encode(text));
         if a != b {

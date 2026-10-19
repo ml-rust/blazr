@@ -131,9 +131,11 @@ inference:
 - The draft model loads once with the target. Every request shares its weights.
 - It loads on the target's device in the target's compute dtype. It costs its weights plus one contiguous KV cache per active request.
 - The draft always runs a contiguous KV cache, also when the target runs paged attention.
-- The draft must share the target's tokenizer. The load checks the vocabulary sizes, the EOS and BOS ids and the ids of a fixed set of texts. A mismatch fails the load with an error that names `draft_model`.
+- The draft must share the target's text tokenizer. The load checks the model vocabulary sizes and the ids of a fixed set of texts. A mismatch fails the load with an error that names `draft_model`. Special tokens can differ, as between Qwen2.5 and Qwen3. The target decides every token, so such a draft id only lowers acceptance.
 - Sampled requests keep the target's output distribution. The verify uses each draft's distribution.
 - A request falls back with reason `draft_model` when no draft model is loaded. It falls back with reason `draft_context` when the prompt, the budget and one step of drafts pass the draft's context.
+- A draft saves time only when a draft forward costs far less than a target forward. Two small models that are both bound by kernel launches gain nothing.
+- Greedy output matches plain decoding exactly in `f32`. In `bf16` or `f16` the multi-token check forward rounds differently from a one-token step, so a near-tie can pick another token. Prompt lookup has the same effect.
 - Pick a draft that agrees with the target often. A draft that rarely agrees costs a draft forward per draft and saves no target forward.
 
 The load logs one line that states whether speculation is on. Prometheus counters:

@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
-    ActivationOps, BinaryOps, ConvOps, DType, GrammarDfaOps, NormalizationOps, Runtime,
+    ActivationOps, BinaryOps, ConvOps, DType, GrammarDfaOps, NormalizationOps, Runtime, SampleSeed,
     SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
@@ -36,6 +36,9 @@ pub(in crate::engine) struct SamplerState<R: Runtime<DType = DType>> {
     pub grammar: Option<GrammarState<R>>,
     /// The request's text decoder, primed with the prompt.
     pub text: TokenTextStream,
+    /// Index of the next token this request samples, from 0. A seeded
+    /// request uses it as the Philox counter, so each step draws anew.
+    pub step: u64,
 }
 
 /// Where a sampled token id comes from.
@@ -99,6 +102,7 @@ where
             mirostat: Self::mirostat_state(gen_config),
             grammar: self.grammar_state(gen_config)?,
             text: TokenTextStream::new(self.tokenizer(), prompt_tokens),
+            step: 0,
         })
     }
 
@@ -107,6 +111,7 @@ where
     /// Mirostat, the device grammar mask and the device filters apply as
     /// `state` and `gen_config` select. With `scratch`, the device sample
     /// writes into it instead of allocating. Mirostat ignores `scratch`.
+    /// A seeded request draws the Philox uniform at `(seed, state.step)`.
     ///
     /// The event is recorded before this returns. Enqueue the next forward
     /// after this call, then call [`Self::sample_finish`].
@@ -117,10 +122,12 @@ where
         gen_config: &GenerationConfig,
         scratch: Option<&SamplingScratch<R>>,
     ) -> Result<PendingToken<R>> {
+        let seed = Self::step_seed(gen_config, state.step);
         let (tensor, mirostat_id) = self.sample_token_dispatch_with_grammar(
             logits,
             &state.token_history,
             gen_config,
+            seed,
             &mut state.mirostat,
             state.grammar.as_ref().map(GrammarState::device),
             scratch,
@@ -153,8 +160,18 @@ where
             TokenSource::Device(event) => Self::read_token_id(&pending.tensor, event)?,
         };
         state.token_history.push(token_id);
+        state.step = state.step.wrapping_add(1);
         Self::advance_grammar_state(&mut state.grammar, token_id)?;
         Ok(token_id)
+    }
+
+    /// The Philox draw step `step` of a request uses: the request seed as
+    /// the key and `step` as the counter. `None` for an unseeded request.
+    pub(in crate::engine) fn step_seed(
+        gen_config: &GenerationConfig,
+        step: u64,
+    ) -> Option<SampleSeed> {
+        gen_config.seed.map(|key| SampleSeed::new(key, step))
     }
 
     /// Sample one token from `logits` and record it in `state`.
@@ -267,6 +284,92 @@ mod tests {
         assert_eq!((a, b, c), (11, 11, 11));
         assert_eq!(plain.token_history, into.token_history);
         assert_eq!(plain.token_history, split.token_history);
+        Ok(())
+    }
+
+    /// Seeded sampling at temperature 1 with no filter and no penalty.
+    fn seeded(seed: u64) -> GenerationConfig {
+        GenerationConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            repeat_penalty: 1.0,
+            seed: Some(seed),
+            ..GenerationConfig::default()
+        }
+    }
+
+    /// `[1, 1, vocab]` logits every token ties on.
+    fn flat_logits(exec: &Executor<CpuRuntime>) -> Result<Tensor<CpuRuntime>> {
+        let vocab = exec.vocab_size();
+        Ok(Tensor::from_slice(
+            &vec![0.0f32; vocab],
+            &[1, 1, vocab],
+            exec.device(),
+        )?)
+    }
+
+    #[test]
+    fn each_seeded_step_takes_the_next_counter() -> Result<()> {
+        let exec = tiny_executor()?;
+        let cfg = seeded(7);
+        let mut state = exec.sampler_state(&[1], &cfg)?;
+        assert_eq!(state.step, 0);
+        let logits = flat_logits(&exec)?;
+        exec.sample_step(&logits, &mut state, &cfg, None)?;
+        exec.sample_step(&logits, &mut state, &cfg, None)?;
+        assert_eq!(state.step, 2);
+
+        let step = |n| Executor::<CpuRuntime>::step_seed(&cfg, n);
+        assert_eq!(step(0), Some(SampleSeed::new(7, 0)));
+        assert_eq!(step(1), Some(SampleSeed::new(7, 1)));
+        assert_eq!(Executor::<CpuRuntime>::step_seed(&greedy(), 3), None);
+        Ok(())
+    }
+
+    /// Flat logits map one uniform to one token. A draw reseeded from the
+    /// request seed alone gives the same uniform, so the same token, at
+    /// every step. Sabotage check: pass `state.step = 0` to every step, and
+    /// the uniform and token assertions fail.
+    #[test]
+    fn seeded_steps_reproduce_and_draw_a_new_uniform_each_step() -> Result<()> {
+        const STEPS: usize = 16;
+        let exec = tiny_executor()?;
+        let cfg = seeded(7);
+        let logits = flat_logits(&exec)?;
+        let scratch = SamplingScratch::<CpuRuntime>::new(exec.vocab_size(), exec.device())?;
+
+        let mut plain = exec.sampler_state(&[1], &cfg)?;
+        let mut into = exec.sampler_state(&[1], &cfg)?;
+        let mut plain_ids = Vec::with_capacity(STEPS);
+        let mut into_ids = Vec::with_capacity(STEPS);
+        let mut uniforms = Vec::with_capacity(STEPS);
+        for _ in 0..STEPS {
+            plain_ids.push(exec.sample_step(&logits, &mut plain, &cfg, None)?);
+            into_ids.push(exec.sample_step(&logits, &mut into, &cfg, Some(&scratch))?);
+            uniforms.push(scratch.random.item::<f32>()?.to_bits());
+        }
+
+        assert_eq!(plain_ids, into_ids, "one seed must give one token stream");
+        for (n, pair) in uniforms.windows(2).enumerate() {
+            assert_ne!(pair[0], pair[1], "steps {n} and {} drew one uniform", n + 1);
+        }
+        assert!(
+            plain_ids.iter().any(|&id| id != plain_ids[0]),
+            "every step sampled token {}",
+            plain_ids[0]
+        );
+
+        let mut again = exec.sampler_state(&[1], &cfg)?;
+        let mut again_ids = Vec::with_capacity(STEPS);
+        for _ in 0..STEPS {
+            again_ids.push(exec.sample_step(&logits, &mut again, &cfg, None)?);
+        }
+        assert_eq!(
+            plain_ids, again_ids,
+            "a second run with the seed must match"
+        );
         Ok(())
     }
 

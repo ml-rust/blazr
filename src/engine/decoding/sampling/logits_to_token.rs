@@ -7,7 +7,8 @@ use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, DeviceGrammarDfa, GrammarDfaOps, NormalizationOps,
-    Runtime, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
+    Runtime, SampleSeed, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps,
+    UnaryOps,
 };
 
 use crate::config::GenerationConfig;
@@ -46,11 +47,13 @@ where
     /// Returns `[1]` I64 tensor on device. All decode paths (greedy, greedy+penalties,
     /// non-greedy) return the same type, enabling uniform pipelined decode.
     /// With `gpu_grammar`, the device-side grammar DFA masks the logits first.
+    /// `seed` names this step's Philox draw. `None` samples unseeded.
     pub(crate) fn logits_to_token_on_device_with_grammar(
         &self,
         logits: &Tensor<R>,
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
+        seed: Option<SampleSeed>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
     ) -> Result<Tensor<R>> {
         let ready = self.prepare_logits_to_token(logits, recent_tokens, gen_config, gpu_grammar)?;
@@ -68,7 +71,7 @@ where
                 gen_config.top_k,
                 gen_config.top_p,
                 gen_config.min_p,
-                gen_config.seed,
+                seed,
             )
             .map_err(|e| anyhow!("logits_to_token failed: {}", e))
     }
@@ -81,6 +84,7 @@ where
         logits: &Tensor<R>,
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
+        seed: Option<SampleSeed>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
         scratch: &SamplingScratch<R>,
     ) -> Result<Tensor<R>> {
@@ -99,7 +103,7 @@ where
                 gen_config.top_k,
                 gen_config.top_p,
                 gen_config.min_p,
-                gen_config.seed,
+                seed,
                 scratch,
             )
             .map_err(|e| anyhow!("logits_to_token_into failed: {}", e))?;

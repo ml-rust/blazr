@@ -7,7 +7,8 @@ use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, DeviceGrammarDfa, GrammarDfaOps, NormalizationOps,
-    Runtime, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
+    Runtime, SampleSeed, SamplingOps, SamplingScratch, ScalarOps, Tensor, TypeConversionOps,
+    UnaryOps,
 };
 
 use crate::config::GenerationConfig;
@@ -45,11 +46,16 @@ where
     /// steps the same lane every step reuses one buffer. Mirostat ignores
     /// `scratch`: its state update needs the full distribution on the host,
     /// and it returns a freshly allocated tensor.
+    ///
+    /// `seed` names this step's Philox draw for the fused kernel. Mirostat
+    /// ignores it: its host generator takes the request seed once.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sample_token_dispatch_with_grammar(
         &self,
         logits: &Tensor<R>,
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
+        seed: Option<SampleSeed>,
         mirostat: &mut Option<MirostatState>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
         scratch: Option<&SamplingScratch<R>>,
@@ -70,6 +76,7 @@ where
                 logits,
                 recent_tokens,
                 gen_config,
+                seed,
                 gpu_grammar,
                 scratch,
             )?,
@@ -77,6 +84,7 @@ where
                 logits,
                 recent_tokens,
                 gen_config,
+                seed,
                 gpu_grammar,
             )?,
         };

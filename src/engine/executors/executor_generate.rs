@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use async_stream::stream;
 use futures::Stream;
 
+use boostr::inference::speculative::SpeculativeClient;
 use boostr::inference::LayeredSsmState;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
@@ -39,13 +40,17 @@ where
         + boostr::GrammarDfaOps<R>
         + ModelClient<R>
         + RoPEPackedOps<R>
-        + boostr::quant::traits::DequantOps<R>,
+        + boostr::quant::traits::DequantOps<R>
+        + SpeculativeClient<R>,
 {
     /// Generate from already-encoded prompt ids.
     ///
     /// The ids are the caller's — the handler that validated them against its
     /// special-token policy — so nothing here re-tokenizes text and no second
     /// encode can disagree with the one that was checked.
+    ///
+    /// With `inference.speculative.enabled`, an eligible request decodes
+    /// speculatively. Every other request takes the plain loops below.
     pub fn generate<'a>(
         &'a self,
         prompt_tokens: &'a [u32],
@@ -71,6 +76,15 @@ where
             let max_tokens = crate::engine::token_budget(
                 gen_config.max_tokens, max_seq_len, prompt_tokens.len(),
             );
+
+            // ── Speculative path: one contiguous sequence, drafts checked per forward ──
+            if let Some(plan) = self.speculative_route(gen_config, prompt_tokens, max_tokens) {
+                let inner = self.generate_speculative(prompt_tokens, gen_config, plan);
+                for await item in inner {
+                    yield item;
+                }
+                return;
+            }
 
             let input = self.create_input_tensor(prompt_tokens)?;
 

@@ -34,3 +34,13 @@ pub const DECISION_PREFIX_CACHE_MISSES_TOTAL: &str = "blazr_decision_prefix_cach
 pub const DECISION_PREFIX_CACHE_EVICTIONS_TOTAL: &str =
     "blazr_decision_prefix_cache_evictions_total";
 pub const DECISION_PREFIX_CACHE_BYTES: &str = "blazr_decision_prefix_cache_bytes";
+/// Drafts fed to the target.
+pub const SPECULATIVE_DRAFTED_TOTAL: &str = "blazr_speculative_drafted_total";
+/// Drafts the target accepted.
+pub const SPECULATIVE_ACCEPTED_TOTAL: &str = "blazr_speculative_accepted_total";
+/// Tokens speculative decoding emitted.
+pub const SPECULATIVE_EMITTED_TOTAL: &str = "blazr_speculative_emitted_total";
+/// Target forwards speculative decoding ran.
+pub const SPECULATIVE_TARGET_FORWARDS_TOTAL: &str = "blazr_speculative_target_forwards_total";
+/// Requests with speculation on that decoded without it, by `reason`.
+pub const SPECULATIVE_FALLBACKS_TOTAL: &str = "blazr_speculative_fallbacks_total";

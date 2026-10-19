@@ -38,7 +38,8 @@ where
         + ModelClient<R>
         + RoPEPackedOps<R>
         + DequantOps<R>
-        + QuantMatmulOps<R>,
+        + QuantMatmulOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
 {
     /// Encode `images` and expand `prompt_tokens` (one `<|image_pad|>` per
     /// image, in order) into a prefill plan at rope position 0.

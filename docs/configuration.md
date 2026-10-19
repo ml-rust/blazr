@@ -235,10 +235,14 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `gpu_prefix_cache`                   | boolean  | `false`             | GPU prefix cache lookup. Falls back to CPU lookup without CUDA.                                                              |
 | `gpu_prefix_cache_ram_tier`          | integer  | `5000`              | RAM tier entries for the GPU prefix cache                                                                                    |
 | `prefill_chunk_size`                 | integer  | `0`                 | Prompt tokens per prefill chunk. `0` processes the whole prompt at once.                                                     |
-| `speculative`                        | object   | unset               | Ignored. Blazr logs one warning at load and decodes with the sampler, because the speculative implementation is being rewritten. |
-| `speculative.draft_model`            | string   | required in section | Draft model path. Ignored.                                                                                                   |
-| `speculative.num_speculative_tokens` | integer  | `5`                 | Tokens speculated per step. Ignored.                                                                                         |
-| `speculative.adaptive_depth`         | boolean  | `false`             | Speculation depth control. Ignored.                                                                                          |
+| `speculative`                        | object   | unset               | Speculative decoding. See [Speculative decoding](tuning.md#speculative-decoding).                                            |
+| `speculative.enabled`                | boolean  | `false`             | Draft tokens and check them in one forward for each eligible request.                                                        |
+| `speculative.drafter`                | string   | `prompt_lookup`     | Drafter. `prompt_lookup` is the only value.                                                                                  |
+| `speculative.num_draft_tokens`       | integer  | `5`                 | Drafts per step, `1` to `32`. The old name `num_speculative_tokens` is accepted.                                             |
+| `speculative.prompt_lookup.min_ngram`| integer  | `1`                 | Shortest n-gram the drafter matches. At least `1`.                                                                           |
+| `speculative.prompt_lookup.max_ngram`| integer  | `3`                 | Longest n-gram the drafter matches. At least `min_ngram`.                                                                    |
+| `speculative.prompt_lookup.window`   | integer  | `4096`              | Context tokens the drafter scans. Above `max_ngram`.                                                                         |
+| `speculative.draft_model`            | string   | unset               | Not supported yet. Blazr logs a warning and drafts by prompt lookup.                                                         |
 | `tensor_parallel_size`               | integer  | `1`                 | Tensor parallel degree. `BLAZR_TP_SIZE` overrides it for `serve`.                                                            |
 | `data_parallel`                      | integer  | `1`                 | Replicas of the start model for `serve`. Only `config.yaml` sets it. See [Data-parallel replicas](deployment.md#data-parallel-replicas). |
 | `graphs`                             | boolean  | `false`             | CUDA graph capture for greedy decode. `run` and `generate` read it. `serve` logs a warning when it is set.                   |

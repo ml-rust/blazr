@@ -128,7 +128,7 @@ where
         num_ctx: usize,
     ) -> Result<Self> {
         let config = with_runtime_dtype::<R>(config)?;
-        config.inference.warn_speculative_ignored();
+        crate::engine::speculative::report_speculative(&model, &config.inference)?;
         if config.inference.paged_attention {
             if let Some(reason) = model.paged_attention_refusal() {
                 return Err(anyhow!(reason));

@@ -43,6 +43,7 @@ pub(crate) trait EngineClient<R: Runtime<DType = DType>>:
     + boostr::RoPEPackedOps<R>
     + boostr::quant::DequantOps<R>
     + boostr::quant::QuantMatmulOps<R>
+    + boostr::inference::speculative::SpeculativeClient<R>
 {
 }
 
@@ -62,7 +63,8 @@ where
         + ModelClient<R>
         + boostr::RoPEPackedOps<R>
         + boostr::quant::DequantOps<R>
-        + boostr::quant::QuantMatmulOps<R>,
+        + boostr::quant::QuantMatmulOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
 {
 }
 

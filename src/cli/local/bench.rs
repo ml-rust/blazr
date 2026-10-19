@@ -250,7 +250,8 @@ where
         + boostr::GrammarDfaOps<R>
         + boostr::model::ModelClient<R>
         + boostr::RoPEPackedOps<R>
-        + boostr::quant::traits::DequantOps<R>,
+        + boostr::quant::traits::DequantOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
 {
     let start = std::time::Instant::now();
     let mut first_token_time = None;

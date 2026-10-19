@@ -103,6 +103,26 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
         "Total prefix cache misses (new KV blocks allocated)"
     );
     metrics::describe_counter!(
+        names::SPECULATIVE_DRAFTED_TOTAL,
+        "Speculative drafts fed to the target model"
+    );
+    metrics::describe_counter!(
+        names::SPECULATIVE_ACCEPTED_TOTAL,
+        "Speculative drafts the target model accepted"
+    );
+    metrics::describe_counter!(
+        names::SPECULATIVE_EMITTED_TOTAL,
+        "Tokens speculative decoding emitted"
+    );
+    metrics::describe_counter!(
+        names::SPECULATIVE_TARGET_FORWARDS_TOTAL,
+        "Target forwards speculative decoding ran"
+    );
+    metrics::describe_counter!(
+        names::SPECULATIVE_FALLBACKS_TOTAL,
+        "Requests with speculation on that decoded without it, by reason"
+    );
+    metrics::describe_counter!(
         names::DECISION_REQUESTS_TOTAL,
         "Decision requests a model's worker finished, by model and outcome"
     );

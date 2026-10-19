@@ -78,8 +78,8 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub kv_pool_blocks: usize,
 
-    /// Speculative decoding config. No request path reads it yet.
-    /// [`InferenceConfig::warn_speculative_ignored`] logs the ignored key once.
+    /// Speculative decoding config. Unset or `enabled: false` turns it off.
+    /// Single-sequence contiguous-KV requests read it.
     #[serde(default)]
     pub speculative: Option<super::speculative::SpeculativeDecodingConfig>,
 

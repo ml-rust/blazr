@@ -19,7 +19,7 @@ use crate::engine::test_support::{seeded_executor, PagedPool};
 use crate::engine::types::{FinishReason, GeneratedToken};
 
 /// Seed of the rig's tiny llama weights.
-pub(super) const SEED: u64 = 0x5eed;
+pub(crate) const SEED: u64 = 0x5eed;
 /// Ticks a test allows before it calls the engine stuck.
 const TICK_LIMIT: usize = 64;
 /// A pool large enough that no sequence is preempted.
@@ -28,7 +28,7 @@ pub(crate) const POOL: PagedPool = PagedPool {
     blocks: 16,
 };
 /// The context of [`rig`]'s tiny llama.
-pub(super) const TINY_CTX: usize = 16;
+pub(crate) const TINY_CTX: usize = 16;
 
 pub(crate) struct Rig {
     pub executor: Arc<Executor<CpuRuntime>>,
@@ -43,7 +43,7 @@ pub(crate) fn rig(pool: PagedPool) -> Result<Rig> {
 
 /// A batching engine over `executor`, admitting two sequences of up to
 /// `max_seq_len` tokens.
-pub(super) fn rig_on(
+pub(crate) fn rig_on(
     executor: Executor<CpuRuntime>,
     pool: PagedPool,
     max_seq_len: usize,
@@ -133,7 +133,7 @@ pub(super) fn tokens(handle: &mut RequestHandle) -> Result<Vec<GeneratedToken>> 
 }
 
 /// The ids `handle` received so far. A streamed error fails the call.
-pub(super) fn ids(handle: &mut RequestHandle) -> Result<Vec<u32>> {
+pub(crate) fn ids(handle: &mut RequestHandle) -> Result<Vec<u32>> {
     Ok(tokens(handle)?.into_iter().map(|t| t.token_id).collect())
 }
 

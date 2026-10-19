@@ -80,6 +80,33 @@ pub fn record_prefix_cache_miss() {
     metrics::counter!(names::PREFIX_CACHE_MISSES).increment(1);
 }
 
+/// The counters of one speculative generation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpeculativeCounts {
+    /// Drafts fed to the target.
+    pub drafted: usize,
+    /// Drafts the target accepted.
+    pub accepted: usize,
+    /// Tokens emitted to the caller.
+    pub emitted: usize,
+    /// Verify forwards of the target.
+    pub target_forwards: usize,
+}
+
+/// Add one speculative generation's counters.
+pub fn record_speculative(counts: SpeculativeCounts) {
+    metrics::counter!(names::SPECULATIVE_DRAFTED_TOTAL).increment(counts.drafted as u64);
+    metrics::counter!(names::SPECULATIVE_ACCEPTED_TOTAL).increment(counts.accepted as u64);
+    metrics::counter!(names::SPECULATIVE_EMITTED_TOTAL).increment(counts.emitted as u64);
+    metrics::counter!(names::SPECULATIVE_TARGET_FORWARDS_TOTAL)
+        .increment(counts.target_forwards as u64);
+}
+
+/// Count one request that decoded without speculation, by `reason`.
+pub fn record_speculative_fallback(reason: &'static str) {
+    metrics::counter!(names::SPECULATIVE_FALLBACKS_TOTAL, "reason" => reason).increment(1);
+}
+
 /// Adjust the in-flight token gauge (positive = add, negative = subtract)
 pub fn adjust_inflight_tokens(delta: f64) {
     if delta >= 0.0 {

@@ -31,7 +31,8 @@ where
         + boostr::GrammarDfaOps<R>
         + boostr::model::ModelClient<R>
         + boostr::RoPEPackedOps<R>
-        + boostr::quant::traits::DequantOps<R>,
+        + boostr::quant::traits::DequantOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
 {
     eprintln!("{} - Interactive generation", "blazr run".bold().cyan());
     eprintln!("Model: {}", model_name.bold());

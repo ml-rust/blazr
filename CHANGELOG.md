@@ -15,12 +15,13 @@ preview on crates.io that shares no code with it.
 ### Added
 
 - **Streaming logprobs** — completions and chat stream chunks now carry `choices[0].logprobs` when the request sets `logprobs`. Each chunk holds the entry of the token it carries. A token whose text a stop-sequence prefix or a reasoning tag holds back still sends its entry in its own chunk.
+- **Speculative decoding** — `inference.speculative.enabled` drafts tokens by prompt lookup and checks them in one forward. It applies to single-sequence requests on a contiguous KV cache. Greedy output equals plain decoding. Constrained, mirostat, DRY, typical and dynamic-temperature requests decode without it. `blazr_speculative_*` counters report drafts, accepts and fallbacks.
 - **Logprob bytes** — each logprob entry and `top_logprobs` item now has `bytes`, the UTF-8 bytes of its token, in streaming and non-streaming responses.
 
 ### Fixed
 
 - **Streaming token metrics** — streamed requests now count their prompt and generated tokens and record tokens per second, as non-streamed requests do.
-- **Speculative decoding** — the `inference.speculative` setting no longer routes requests through a speculative path that produced wrong output. Blazr ignores it with one warning at load until the rewrite lands.
+- **Speculative decoding** — the old speculative path that produced wrong output is gone.
 - **Streaming finish** — a stream whose generation ends without a finish token now closes with `finish_reason` `length`, as the non-streaming response reports it.
 
 - **Logprobs on GPU** — `logprobs` requests no longer crash the server on half-precision GPU logits. The last logits row casts to F32 on the device before its host copy. Dynamic temperature, DRY, typical sampling and the swarm and disaggregated stages read their logits and activations the same way. `logit_bias` now applies to BF16 and F16 logits.

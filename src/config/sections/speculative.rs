@@ -1,107 +1,194 @@
 //! The `inference.speculative` config section.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use anyhow::{anyhow, Result};
+use boostr::inference::speculative::{
+    PromptLookup, DEFAULT_NUM_DRAFT_TOKENS, MAX_NUM_DRAFT_TOKENS,
+};
 use serde::{Deserialize, Serialize};
 
-/// Speculative decoding config.
+use super::speculative_drafter::{DrafterKind, PromptLookupConfig};
+
+/// Speculative decoding config. It is off by default.
 ///
-/// `enabled` turns on prompt-lookup drafting for eligible requests. It is off
-/// by default. `draft_model` and `adaptive_depth` parse for old config files.
-/// Blazr does not read them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `enabled` drafts tokens for each eligible single-sequence request and
+/// checks them in one target forward. Greedy output equals plain decoding.
+/// A seeded sampled run is reproducible for a fixed seed, `num_draft_tokens`
+/// and drafter. It differs from the same seed with speculation off.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpeculativeDecodingConfig {
     /// Speculative decoding runs for eligible requests. Default: off.
     #[serde(default)]
     pub enabled: bool,
-    /// Path to a draft model. Parsed, not read.
+    /// The drafter. Default: `prompt_lookup`.
     #[serde(default)]
-    pub draft_model: String,
-    /// Drafts proposed per step (default: 5).
-    #[serde(default = "default_spec_tokens")]
-    pub num_speculative_tokens: usize,
-    /// Adaptive draft depth. Parsed, not read.
+    pub drafter: DrafterKind,
+    /// Drafts proposed per step, in `1..=32`. Unset: boostr's default of 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_draft_tokens: Option<usize>,
+    /// The old name of `num_draft_tokens`. `num_draft_tokens` wins when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_speculative_tokens: Option<usize>,
+    /// The n-gram search of the `prompt_lookup` drafter.
     #[serde(default)]
-    pub adaptive_depth: bool,
+    pub prompt_lookup: PromptLookupConfig,
+    /// Draft model path. It is not supported: drafting runs by prompt lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_model: Option<String>,
+    /// Accepted from old config files and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_depth: Option<bool>,
 }
 
-fn default_spec_tokens() -> usize {
-    boostr::inference::speculative::DEFAULT_NUM_DRAFT_TOKENS
-}
+impl SpeculativeDecodingConfig {
+    /// Drafts proposed per step: `num_draft_tokens`, then its old name, then 5.
+    pub fn draft_count(&self) -> usize {
+        self.num_draft_tokens
+            .or(self.num_speculative_tokens)
+            .unwrap_or(DEFAULT_NUM_DRAFT_TOKENS)
+    }
 
-impl Default for SpeculativeDecodingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            draft_model: String::new(),
-            num_speculative_tokens: default_spec_tokens(),
-            adaptive_depth: false,
+    /// The draft model path, when set and not empty.
+    pub fn draft_model(&self) -> Option<&str> {
+        self.draft_model.as_deref().filter(|path| !path.is_empty())
+    }
+
+    /// The configured drafter.
+    ///
+    /// # Errors
+    ///
+    /// An error naming the `prompt_lookup` key boostr refuses.
+    pub fn build_drafter(&self) -> Result<PromptLookup> {
+        match self.drafter {
+            DrafterKind::PromptLookup => self.prompt_lookup.build(),
         }
     }
-}
 
-/// Set once the ignored-`speculative` warning has been logged.
-static SPECULATIVE_WARNED: AtomicBool = AtomicBool::new(false);
-
-/// Log the ignored-`speculative` warning the first time `flag` is unset.
-/// Return `true` when this call logged it.
-fn warn_speculative_once(
-    flag: &AtomicBool,
-    speculative: Option<&SpeculativeDecodingConfig>,
-) -> bool {
-    if speculative.is_none() || flag.swap(true, Ordering::Relaxed) {
-        return false;
-    }
-    tracing::warn!(
-        "inference.speculative is ignored: no request path runs speculative decoding yet. \
-         Requests decode with the normal sampler"
-    );
-    true
-}
-
-impl super::inference::InferenceConfig {
-    /// Log once per process that `inference.speculative` is ignored.
-    /// Return `true` when this call logged the warning.
-    pub fn warn_speculative_ignored(&self) -> bool {
-        warn_speculative_once(&SPECULATIVE_WARNED, self.speculative.as_ref())
+    /// Check every key, whether or not `enabled` is set.
+    ///
+    /// # Errors
+    ///
+    /// An error naming the key: a draft count outside `1..=32`, or a
+    /// `prompt_lookup` value boostr refuses.
+    pub fn check(&self) -> Result<()> {
+        let key = if self.num_draft_tokens.is_none() && self.num_speculative_tokens.is_some() {
+            "num_speculative_tokens"
+        } else {
+            "num_draft_tokens"
+        };
+        let count = self.draft_count();
+        if !(1..=MAX_NUM_DRAFT_TOKENS).contains(&count) {
+            return Err(anyhow!(
+                "inference.speculative.{key} is {count}; set a value in 1..={MAX_NUM_DRAFT_TOKENS}"
+            ));
+        }
+        self.build_drafter().map(|_| ())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::InferenceConfig;
+    use crate::config::{FileConfig, InferenceConfig};
+    use std::path::Path;
+
+    fn section(yaml: &str) -> Result<SpeculativeDecodingConfig> {
+        let cfg: InferenceConfig = serde_saphyr::from_str(yaml)?;
+        cfg.speculative
+            .ok_or_else(|| anyhow!("no speculative section in {yaml:?}"))
+    }
 
     #[test]
-    fn an_old_speculative_section_parses() -> Result<(), serde_saphyr::Error> {
-        let cfg: InferenceConfig =
-            serde_saphyr::from_str("speculative:\n  draft_model: tiny\n  adaptive_depth: true\n")?;
-        let spec = cfg.speculative;
-        assert_eq!(spec.as_ref().map(|s| s.draft_model.as_str()), Some("tiny"));
-        assert_eq!(spec.as_ref().map(|s| s.num_speculative_tokens), Some(5));
-        assert_eq!(spec.as_ref().map(|s| s.adaptive_depth), Some(true));
-        assert_eq!(spec.map(|s| s.enabled), Some(false), "off unless set");
+    fn the_defaults_are_off_and_check() -> Result<()> {
+        let spec = SpeculativeDecodingConfig::default();
+        assert!(!spec.enabled);
+        assert_eq!(spec.drafter, DrafterKind::PromptLookup);
+        assert_eq!(spec.draft_count(), DEFAULT_NUM_DRAFT_TOKENS);
+        assert_eq!(spec.build_drafter()?, PromptLookup::default());
+        assert_eq!(spec.draft_model(), None);
+        spec.check()?;
+        assert!(InferenceConfig::default().speculative.is_none());
         Ok(())
     }
 
     #[test]
-    fn enabled_parses_without_a_draft_model() -> Result<(), serde_saphyr::Error> {
-        let cfg: InferenceConfig = serde_saphyr::from_str("speculative:\n  enabled: true\n")?;
-        let want = SpeculativeDecodingConfig {
-            enabled: true,
+    fn an_old_section_loads_with_its_keys() -> Result<()> {
+        let old = "speculative:\n  draft_model: tiny\n  num_speculative_tokens: 7\n  \
+                   adaptive_depth: true\n";
+        let spec = section(old)?;
+        assert_eq!((spec.enabled, spec.draft_count()), (false, 7));
+        assert_eq!(
+            (spec.draft_model(), spec.adaptive_depth),
+            (Some("tiny"), Some(true))
+        );
+        let empty = section("speculative:\n  draft_model: \"\"\n")?;
+        assert_eq!(empty.draft_model(), None);
+        let both = section("speculative:\n  num_draft_tokens: 3\n  num_speculative_tokens: 7\n")?;
+        assert_eq!(both.draft_count(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn old_keys_are_known_to_the_user_file() -> Result<()> {
+        let text =
+            "inference:\n  speculative:\n    enabled: true\n    num_speculative_tokens: 4\n    \
+                    adaptive_depth: false\n    draft_model: \"\"\n    \
+                    prompt_lookup:\n      max_ngram: 2\n";
+        let parsed = FileConfig::parse(text, Path::new("/home/u/.blazr/config.yaml"))?;
+        assert!(parsed.unknown_keys.is_empty(), "{:?}", parsed.unknown_keys);
+        Ok(())
+    }
+
+    #[test]
+    fn the_new_keys_parse() -> Result<()> {
+        let spec = section(
+            "speculative:\n  enabled: true\n  drafter: prompt_lookup\n  num_draft_tokens: 8\n  \
+             prompt_lookup:\n    min_ngram: 2\n    window: 64\n",
+        )?;
+        assert!(spec.enabled);
+        assert_eq!(spec.draft_count(), 8);
+        let want = PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 3,
+            window: 64,
+        };
+        assert_eq!(spec.prompt_lookup, want);
+        spec.check()
+    }
+
+    #[test]
+    fn a_draft_count_outside_the_range_names_its_key() {
+        let cases = [
+            (Some(0), None, "num_draft_tokens"),
+            (Some(MAX_NUM_DRAFT_TOKENS + 1), None, "num_draft_tokens"),
+            (None, Some(0), "num_speculative_tokens"),
+        ];
+        for (new, old, key) in cases {
+            let spec = SpeculativeDecodingConfig {
+                num_draft_tokens: new,
+                num_speculative_tokens: old,
+                ..SpeculativeDecodingConfig::default()
+            };
+            let err = spec.check().map_err(|e| e.to_string());
+            assert!(
+                matches!(&err, Err(msg) if msg.contains(&format!("inference.speculative.{key}"))),
+                "{spec:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_ngram_fails_the_check() {
+        let spec = SpeculativeDecodingConfig {
+            prompt_lookup: PromptLookupConfig {
+                min_ngram: 0,
+                ..PromptLookupConfig::default()
+            },
             ..SpeculativeDecodingConfig::default()
         };
-        assert_eq!(cfg.speculative, Some(want));
-        Ok(())
-    }
-
-    #[test]
-    fn the_warning_logs_once() {
-        let flag = AtomicBool::new(false);
-        let spec = SpeculativeDecodingConfig::default();
-        assert!(!warn_speculative_once(&flag, None), "unset logs nothing");
-        assert!(warn_speculative_once(&flag, Some(&spec)));
-        assert!(!warn_speculative_once(&flag, Some(&spec)));
-        assert!(!warn_speculative_once(&flag, Some(&spec)));
+        let err = spec.check().map_err(|e| e.to_string());
+        assert!(
+            matches!(&err, Err(msg) if msg.contains("prompt_lookup.min_ngram")),
+            "{err:?}"
+        );
     }
 }

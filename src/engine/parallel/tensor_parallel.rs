@@ -311,18 +311,20 @@ pub fn init_tp(
 /// attention, speculative decoding and the prefix caches run on rank 0
 /// alone, so they stay off.
 pub fn restrict_to_lockstep(inference: &mut crate::config::InferenceConfig) {
-    if inference.paged_attention
-        || inference.speculative.is_some()
-        || inference.prefix_cache
-        || inference.gpu_prefix_cache
-    {
+    if inference.paged_attention || inference.prefix_cache || inference.gpu_prefix_cache {
         tracing::info!(
-            "tensor parallelism decodes with a contiguous KV cache. Paged attention, \
-             speculative decoding and the prefix caches are off"
+            "tensor parallelism decodes with a contiguous KV cache. Paged attention \
+             and the prefix caches are off"
         );
     }
+    if let Some(spec) = inference.speculative.as_mut().filter(|spec| spec.enabled) {
+        tracing::warn!(
+            "inference.speculative.enabled is ignored: a tensor-parallel group has no KV \
+             rollback on its follower ranks. Requests decode without speculation"
+        );
+        spec.enabled = false;
+    }
     inference.paged_attention = false;
-    inference.speculative = None;
     inference.prefix_cache = false;
     inference.gpu_prefix_cache = false;
 }
@@ -377,13 +379,17 @@ mod tests {
             paged_attention: true,
             prefix_cache: true,
             gpu_prefix_cache: true,
+            speculative: Some(crate::config::SpeculativeDecodingConfig {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         restrict_to_lockstep(&mut inference);
         assert!(!inference.paged_attention);
         assert!(!inference.prefix_cache);
         assert!(!inference.gpu_prefix_cache);
-        assert!(inference.speculative.is_none());
+        assert_eq!(inference.speculative.map(|spec| spec.enabled), Some(false));
     }
 
     #[test]

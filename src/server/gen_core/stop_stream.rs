@@ -300,4 +300,82 @@ mod tests {
         assert_eq!(text, "x EN");
         assert_eq!(out.last().and_then(|(_, r)| *r), Some(FinishReason::Length));
     }
+
+    type CpuExecutor = crate::engine::Executor<boostr::CpuRuntime>;
+
+    /// What the client receives when `exec` streams `prompt` through the forwarder.
+    async fn forward_engine(
+        exec: &CpuExecutor,
+        prompt: &[u32],
+        cfg: &GenerationConfig,
+    ) -> Vec<(String, Option<FinishReason>)> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        forward_with_stop_sequences(exec.generate(prompt, cfg), prompt.len(), cfg, "Test", tx)
+            .await;
+        let mut out = Vec::new();
+        while let Some(t) = rx.recv().await {
+            out.push((t.text, t.finish_reason));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn speculative_streams_match_plain_streams() -> anyhow::Result<()> {
+        use crate::config::SpeculativeDecodingConfig;
+        use crate::engine::batch_test_rig::greedy;
+        use crate::engine::test_support::seeded_executor_ctx;
+
+        let plain = seeded_executor_ctx(0x5bec, 64)?;
+        let mut spec = seeded_executor_ctx(0x5bec, 64)?;
+        spec.config.inference.speculative = Some(SpeculativeDecodingConfig {
+            enabled: true,
+            num_draft_tokens: Some(5),
+            ..SpeculativeDecodingConfig::default()
+        });
+        let probe = GenerationConfig {
+            logprobs: true,
+            top_logprobs: 2,
+            ..greedy(16)
+        };
+        let prompts: [&[u32]; 3] = [
+            &[3, 7, 11, 3, 7, 11, 3, 7, 11],
+            &[1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3],
+            &[4, 4, 4, 4, 4, 4],
+        ];
+        let mut compared = 0;
+        for prompt in prompts {
+            // Skip a prompt whose greedy run has a top-2 tie the two paths can break apart.
+            let result = plain.generate_text(prompt, &probe).await?;
+            let tokens = result.token_logprobs.unwrap_or_default();
+            let tied = tokens.iter().any(|t| match t.top_logprobs.as_deref() {
+                Some([a, b, ..]) => (a.logprob - b.logprob).abs() < 1e-4,
+                _ => true,
+            });
+            if tied {
+                continue;
+            }
+            // Every id under 32 is one ASCII character, so a byte range is a token range.
+            let text: String = tokens.iter().map(|t| t.text.as_str()).collect();
+            if text.len() != tokens.len() || !text.is_ascii() {
+                return Err(anyhow::anyhow!(
+                    "{text:?} is not one ASCII character per token"
+                ));
+            }
+            let stop = GenerationConfig {
+                stop_sequences: vec![text[3..5].to_string()],
+                ..greedy(16)
+            };
+            for cfg in [greedy(16), stop] {
+                let want = forward_engine(&plain, prompt, &cfg).await;
+                assert_eq!(
+                    forward_engine(&spec, prompt, &cfg).await,
+                    want,
+                    "{prompt:?}"
+                );
+            }
+            compared += 1;
+        }
+        assert!(compared > 0, "every prompt has a near-tie");
+        Ok(())
+    }
 }

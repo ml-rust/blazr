@@ -170,7 +170,8 @@ where
         + boostr::GrammarDfaOps<R>
         + boostr::model::ModelClient<R>
         + boostr::RoPEPackedOps<R>
-        + boostr::quant::traits::DequantOps<R>,
+        + boostr::quant::traits::DequantOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
 {
     if runtime.paged_attention || runtime.graphs {
         tracing::warn!(
@@ -215,7 +216,8 @@ where
         + boostr::GrammarDfaOps<R>
         + boostr::model::ModelClient<R>
         + boostr::RoPEPackedOps<R>
-        + boostr::quant::traits::DequantOps<R>,
+        + boostr::quant::traits::DequantOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
 {
     let Some(prompt) = prompt else {
         if !images.is_empty() {

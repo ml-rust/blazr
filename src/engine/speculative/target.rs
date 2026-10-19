@@ -33,7 +33,7 @@ pub(in crate::engine) struct ContiguousTarget<'a, R: Runtime<DType = DType>> {
     bias: Option<Tensor<R>>,
     /// Every token the cache holds, in order. It is the penalty context.
     fed: Vec<u32>,
-    /// The `[1, M, vocab]` biased logits of the last extend.
+    /// The `[1, M, vocab]` logits of the last extend, before the bias.
     last_logits: Option<Tensor<R>>,
 }
 
@@ -89,19 +89,24 @@ where
     }
 
     /// Every token the cache holds, in order.
+    #[cfg(test)]
     pub(in crate::engine) fn fed(&self) -> &[u32] {
         &self.fed
     }
 
-    /// The `[1, M, vocab]` biased logits of the last extend, if any.
+    /// The `[1, M, vocab]` logits of the last extend before the bias, if any.
+    ///
+    /// Row `i` scores the prefix that ends with fed token `i`. The plain
+    /// decode loops report logprobs from unbiased logits too.
     pub(in crate::engine) fn last_logits(&self) -> Option<&Tensor<R>> {
         self.last_logits.as_ref()
     }
 
-    /// One forward over `tokens` at the cache end, with the bias added.
+    /// One forward over `tokens` at the cache end: the logits, then the
+    /// logits with the bias added.
     ///
     /// The cache and `fed` grow by `tokens.len()`.
-    fn forward(&mut self, tokens: &[u32]) -> anyhow::Result<Tensor<R>> {
+    fn forward(&mut self, tokens: &[u32]) -> anyhow::Result<(Tensor<R>, Tensor<R>)> {
         let input = self.exec.create_input_tensor(tokens)?;
         let position = self.kv.seq_len();
         let logits =
@@ -117,16 +122,17 @@ where
             ));
         }
         let Some(bias) = self.bias.as_mut() else {
-            return Ok(logits);
+            return Ok((logits.clone(), logits));
         };
         if bias.dtype() != logits.dtype() {
             *bias = R::default_client(self.exec.device())
                 .cast(bias, logits.dtype())
                 .map_err(|e| anyhow!("casting logit_bias to {:?} failed: {e}", logits.dtype()))?;
         }
-        logits
+        let biased = logits
             .add(bias)
-            .map_err(|e| anyhow!("logit_bias add failed: {e}"))
+            .map_err(|e| anyhow!("logit_bias add failed: {e}"))?;
+        Ok((logits, biased))
     }
 
     /// The greedy id of every row of `logits`, read to the host.
@@ -181,8 +187,8 @@ where
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
-        let logits = self.forward(tokens).map_err(inference_error)?;
-        let ids = self.greedy_ids(&logits).map_err(inference_error)?;
+        let (logits, biased) = self.forward(tokens).map_err(inference_error)?;
+        let ids = self.greedy_ids(&biased).map_err(inference_error)?;
         self.last_logits = Some(logits);
         Ok(ids)
     }
@@ -194,12 +200,12 @@ where
                 reason: "a verify forward needs the last committed token; got no tokens".into(),
             });
         }
-        let logits = self.forward(tokens).map_err(inference_error)?;
+        let (logits, biased) = self.forward(tokens).map_err(inference_error)?;
         // Row 0 scores the cached tokens plus the last committed token.
         let drafts = &tokens[1..];
         let context = &self.fed[..self.fed.len() - drafts.len()];
         let client = R::default_client(self.exec.device());
-        let verdict = verify_logits(&client, &logits, context, drafts, rule, draw)?;
+        let verdict = verify_logits(&client, &biased, context, drafts, rule, draw)?;
         self.last_logits = Some(logits);
         Ok(verdict)
     }

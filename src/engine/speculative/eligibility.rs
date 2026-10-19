@@ -1,7 +1,7 @@
 //! Which requests can decode speculatively, and with what plan.
 
 use boostr::inference::speculative::{PromptLookup, SpeculativeConfig, MAX_NUM_DRAFT_TOKENS};
-use boostr::model::ModelClient;
+use boostr::model::{LoadedModel, ModelClient};
 use boostr::ops::TensorOps;
 use boostr::{
     ActivationOps, BinaryOps, ConvOps, DType, GrammarDfaOps, NormalizationOps, Runtime,
@@ -9,7 +9,7 @@ use boostr::{
 };
 
 use super::sample_rule;
-use crate::config::GenerationConfig;
+use crate::config::{GenerationConfig, InferenceConfig};
 use crate::engine::executor::Executor;
 
 /// The plan of one speculative generation.
@@ -50,6 +50,8 @@ pub(in crate::engine) enum Fallback {
     Dynatemp,
     /// The configured draft count is outside `1..=MAX_NUM_DRAFT_TOKENS`.
     DraftCount,
+    /// boostr refuses the configured drafter keys.
+    Drafter,
     /// boostr's check refuses the mapped sampling rule.
     SampleRule,
     /// A prompt id is at or past the model vocabulary.
@@ -72,10 +74,35 @@ impl Fallback {
             Self::Typical => "typical",
             Self::Dynatemp => "dynatemp",
             Self::DraftCount => "draft_count",
+            Self::Drafter => "drafter",
             Self::SampleRule => "sample_rule",
             Self::PromptVocab => "prompt_vocab",
         }
     }
+}
+
+/// Why no request on `model` under `inference` can decode speculatively.
+///
+/// It checks what a load fixes: the architecture, paged attention and a
+/// tensor-parallel communicator.
+pub(in crate::engine) fn load_fallback<R>(
+    model: &LoadedModel<R>,
+    inference: &InferenceConfig,
+) -> Result<(), Fallback>
+where
+    R: Runtime<DType = DType>,
+    R::Client: ModelClient<R>,
+{
+    if model.needs_ssm_state() || model.needs_gdn_state() || !model.needs_kv_cache() {
+        return Err(Fallback::Architecture);
+    }
+    if inference.paged_attention {
+        return Err(Fallback::PagedAttention);
+    }
+    if model.tp_communicator().is_some() {
+        return Err(Fallback::TensorParallel);
+    }
+    Ok(())
 }
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -119,12 +146,14 @@ where
         }
         self.speculative_backend()?;
         Self::host_sampling(gen)?;
-        if !(1..=MAX_NUM_DRAFT_TOKENS).contains(&spec.num_speculative_tokens) {
+        let num_draft_tokens = spec.draft_count();
+        if !(1..=MAX_NUM_DRAFT_TOKENS).contains(&num_draft_tokens) {
             return Err(Fallback::DraftCount);
         }
+        let drafter = spec.build_drafter().map_err(|_| Fallback::Drafter)?;
         let vocab = self.vocab_size();
         let config = SpeculativeConfig {
-            num_draft_tokens: spec.num_speculative_tokens,
+            num_draft_tokens,
             max_tokens,
             eos_token_ids: self.eos_ids(),
             sampling: sample_rule(gen),
@@ -134,26 +163,14 @@ where
         if prompt.iter().any(|&id| id as usize >= vocab) {
             return Err(Fallback::PromptVocab);
         }
-        Ok(SpeculativePlan {
-            config,
-            drafter: PromptLookup::default(),
-        })
+        Ok(SpeculativePlan { config, drafter })
     }
 
     /// The model, the cache layout and the device group fit the contiguous target.
     fn speculative_backend(&self) -> Result<(), Fallback> {
-        let model = &self.model;
-        if model.needs_ssm_state() || model.needs_gdn_state() || !model.needs_kv_cache() {
-            return Err(Fallback::Architecture);
-        }
-        if self.config.inference.paged_attention {
-            return Err(Fallback::PagedAttention);
-        }
+        load_fallback(&self.model, &self.config.inference)?;
         #[cfg(feature = "cuda")]
         if self.tp_state.is_some() {
-            return Err(Fallback::TensorParallel);
-        }
-        if model.tp_communicator().is_some() {
             return Err(Fallback::TensorParallel);
         }
         Ok(())
@@ -189,7 +206,7 @@ mod tests {
     use anyhow::Result;
     use boostr::CpuRuntime;
 
-    use crate::config::{Constraint, SpeculativeDecodingConfig};
+    use crate::config::{Constraint, PromptLookupConfig, SpeculativeDecodingConfig};
     use crate::engine::speculative::{Fallback, SpeculativePlan};
     use crate::engine::test_support::{full_vocab_executor, seeded_executor, PagedPool};
 
@@ -199,7 +216,7 @@ mod tests {
     fn enabled(mut exec: Executor<CpuRuntime>, k: usize) -> Executor<CpuRuntime> {
         exec.config.inference.speculative = Some(SpeculativeDecodingConfig {
             enabled: true,
-            num_speculative_tokens: k,
+            num_draft_tokens: Some(k),
             ..SpeculativeDecodingConfig::default()
         });
         exec
@@ -364,6 +381,29 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_takes_the_configured_drafter() -> Result<()> {
+        let mut exec = enabled(seeded_executor(SEED, None)?, 3);
+        let lookup = PromptLookupConfig {
+            min_ngram: 2,
+            max_ngram: 4,
+            window: 32,
+        };
+        if let Some(spec) = exec.config.inference.speculative.as_mut() {
+            spec.prompt_lookup = lookup;
+        }
+        let plan = exec.speculative_plan(&greedy(), &PROMPT, 8);
+        assert_eq!(plan.map(|p| p.drafter), Ok(PromptLookup::new(2, 4, 32)?));
+        if let Some(spec) = exec.config.inference.speculative.as_mut() {
+            spec.prompt_lookup.window = 4;
+        }
+        assert_eq!(
+            exec.speculative_plan(&greedy(), &PROMPT, 8),
+            Err(Fallback::Drafter)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn paged_attention_falls_back() -> Result<()> {
         let pool = PagedPool {
             block_size: 4,
@@ -392,6 +432,7 @@ mod tests {
             Fallback::Typical,
             Fallback::Dynatemp,
             Fallback::DraftCount,
+            Fallback::Drafter,
             Fallback::SampleRule,
             Fallback::PromptVocab,
         ];

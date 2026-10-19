@@ -94,7 +94,34 @@ The sweep runs its requests one after another through a single executor. The swe
 
 ## Speculative decoding
 
-Blazr ignores `inference.speculative`. It logs one warning at load and decodes with the sampler, because the speculative implementation is being rewritten.
+Set `inference.speculative.enabled: true` to draft tokens by prompt lookup. The drafter copies the tokens that followed an earlier match of the context's last n-gram. One target forward checks every draft. A step emits the accepted drafts plus one token from the target.
+
+```yaml
+inference:
+  speculative:
+    enabled: true
+    num_draft_tokens: 5
+    prompt_lookup:
+      min_ngram: 1
+      max_ngram: 3
+      window: 4096
+```
+
+- Greedy output equals plain decoding, logprobs included.
+- A seeded sampled run is reproducible for a fixed seed, `num_draft_tokens` and drafter. It differs from the same seed with speculation off.
+- Only single-sequence requests on a contiguous KV cache use it. Paged attention, the batching engine, SSM and `qwen35` models, CUDA graph decode and tensor parallelism decode without it.
+- Constrained output, mirostat v2, DRY, typical-p and dynamic temperature requests decode without it.
+- A bad value fails the model load with an error that names the key.
+
+Repetitive output, such as code edits or quoted context, accepts the most drafts. The load logs one line that states whether speculation is on. Prometheus counters:
+
+| Metric | Meaning |
+| ------ | ------- |
+| `blazr_speculative_drafted_total` | Drafts fed to the target |
+| `blazr_speculative_accepted_total` | Drafts the target accepted |
+| `blazr_speculative_emitted_total` | Tokens emitted |
+| `blazr_speculative_target_forwards_total` | Target forwards |
+| `blazr_speculative_fallbacks_total{reason}` | Requests with speculation on that decoded without it |
 
 ## CUDA graphs
 

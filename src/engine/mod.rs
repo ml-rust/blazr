@@ -18,12 +18,9 @@ pub(crate) mod load;
 pub mod lora;
 mod parallel;
 mod requests;
-// Allowed until unit U6 wires `speculative` into the request path.
-// U6 must remove this attribute.
-#[cfg_attr(not(test), allow(dead_code, unused_imports))]
 mod speculative;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use decoding::*;
 pub use executors::*;

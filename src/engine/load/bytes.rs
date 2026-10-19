@@ -226,7 +226,8 @@ mod tests {
             + boostr::GrammarDfaOps<R>
             + ModelClient<R>
             + boostr::RoPEPackedOps<R>
-            + boostr::quant::DequantOps<R>,
+            + boostr::quant::DequantOps<R>
+            + boostr::inference::speculative::SpeculativeClient<R>,
     {
         let config = GenerationConfig {
             max_tokens: 1,

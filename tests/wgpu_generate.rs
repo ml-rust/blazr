@@ -190,7 +190,8 @@ where
         + boostr::GrammarDfaOps<R>
         + boostr::model::ModelClient<R>
         + boostr::RoPEPackedOps<R>
-        + boostr::quant::traits::DequantOps<R>,
+        + boostr::quant::traits::DequantOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
 {
     let config = greedy_config();
     let mut stream = std::pin::pin!(executor.generate(prompt, &config));

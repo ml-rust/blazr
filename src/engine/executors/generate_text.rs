@@ -3,6 +3,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 
+use boostr::inference::speculative::SpeculativeClient;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::quant::{DequantOps, QuantMatmulOps};
@@ -32,7 +33,8 @@ where
         + ModelClient<R>
         + RoPEPackedOps<R>
         + DequantOps<R>
-        + QuantMatmulOps<R>,
+        + QuantMatmulOps<R>
+        + SpeculativeClient<R>,
 {
     /// Generate text from already-encoded prompt ids and return the complete
     /// result with metadata.
@@ -133,7 +135,7 @@ where
 mod tests {
     use super::*;
     use crate::config::SpeculativeDecodingConfig;
-    use crate::engine::test_support::tiny_executor;
+    use crate::engine::test_support::seeded_executor;
 
     /// Token ids generated from a fixed prompt, greedy.
     async fn greedy_count(exec: &Executor<boostr::CpuRuntime>) -> Result<(String, usize)> {
@@ -147,11 +149,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn speculative_config_leaves_generation_unchanged() -> Result<()> {
-        let plain = tiny_executor()?;
-        let mut with_spec = tiny_executor()?;
+    async fn enabled_speculation_leaves_greedy_text_unchanged() -> Result<()> {
+        let plain = seeded_executor(0x5bec, None)?;
+        let mut with_spec = seeded_executor(0x5bec, None)?;
         with_spec.config.inference.speculative = Some(SpeculativeDecodingConfig {
-            draft_model: "missing-draft".to_string(),
+            enabled: true,
             ..SpeculativeDecodingConfig::default()
         });
         assert_eq!(greedy_count(&plain).await?, greedy_count(&with_spec).await?);

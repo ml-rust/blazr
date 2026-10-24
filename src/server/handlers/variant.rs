@@ -135,22 +135,8 @@ pub async fn select_executor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{Scheduler, VariantInfo};
-
-    fn test_state(dir: &std::path::Path) -> AppState {
-        // A device handle only. No model loads, so no adapter opens.
-        #[cfg(feature = "cuda")]
-        let device = boostr::CudaDevice::new(0);
-        #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
-        let device = boostr::runtime::wgpu::WgpuDevice::new(0);
-        #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-        let device = boostr::CpuDevice::new();
-        let scheduler = Arc::new(Scheduler::<ServerRuntime>::new(dir.to_path_buf(), device));
-        let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-            .build_recorder()
-            .handle();
-        AppState::new(scheduler, metrics_handle)
-    }
+    use crate::engine::VariantInfo;
+    use crate::server::handlers::test_state;
 
     #[test]
     fn each_failure_has_its_status() {

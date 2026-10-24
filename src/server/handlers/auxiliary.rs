@@ -85,27 +85,11 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::Scheduler;
-    use std::sync::Arc;
-
-    use crate::runtime::ServerRuntime as TestRuntime;
 
     fn test_state() -> AppState {
-        // A device handle only. No model loads, so no adapter opens.
-        #[cfg(feature = "cuda")]
-        let device = boostr::CudaDevice::new(0);
-        #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
-        let device = boostr::runtime::wgpu::WgpuDevice::new(0);
-        #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-        let device = boostr::CpuDevice::new();
-        let scheduler = Arc::new(Scheduler::<TestRuntime>::new(
-            std::env::temp_dir().join("blazr-auxiliary-test-models"),
-            device,
-        ));
-        let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-            .build_recorder()
-            .handle();
-        AppState::new(scheduler, metrics_handle)
+        crate::server::handlers::test_state(
+            &std::env::temp_dir().join("blazr-auxiliary-test-models"),
+        )
     }
 
     #[tokio::test]

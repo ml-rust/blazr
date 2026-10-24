@@ -12,15 +12,17 @@ use axum::{
 use serde::Deserialize;
 
 use crate::server::handlers::AppState;
+use crate::server::model_name::resolve;
 
 /// POST /api/copy — Copy/alias a model
 pub async fn copy_model(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CopyRequest>,
 ) -> Response {
+    let source = resolve(&state, &request.source).await;
     match state.scheduler.list_available() {
         Ok(models) => {
-            if let Some(m) = models.iter().find(|m| m.name == request.source) {
+            if let Some(m) = models.iter().find(|m| m.name == source) {
                 let src = &m.path;
                 // Determine destination path (sibling to source)
                 let dest = if let Some(parent) = src.parent() {

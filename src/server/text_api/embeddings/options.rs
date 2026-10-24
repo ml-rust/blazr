@@ -49,7 +49,10 @@ const MATRYOSHKA_NOTE: &str =
     "Truncation keeps the first values only. Quality holds only for Matryoshka-trained models.";
 
 /// Check `dimensions` against the pooling mode before any model work.
-pub(super) fn check_dimensions(dimensions: Option<usize>, pooling: Pooling) -> Result<(), String> {
+pub(in crate::server) fn check_dimensions(
+    dimensions: Option<usize>,
+    pooling: Pooling,
+) -> Result<(), String> {
     match dimensions {
         None => Ok(()),
         Some(0) => Err(format!("dimensions must be at least 1. {MATRYOSHKA_NOTE}")),

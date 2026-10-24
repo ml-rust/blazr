@@ -84,27 +84,66 @@ pub(crate) async fn embed_tokens(
     })
 }
 
+/// The token count a text may encode to before it embeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TokenLimit {
+    /// The most tokens that embed.
+    pub max: usize,
+    /// Cut a longer text to `max` tokens. Without it a longer text is a 400.
+    pub truncate: bool,
+}
+
+impl TokenLimit {
+    /// Apply the limit to `ids`.
+    ///
+    /// # Errors
+    ///
+    /// The message of a text over `max` tokens without `truncate`.
+    pub(crate) fn apply(self, ids: &mut Vec<u32>) -> Result<(), String> {
+        if ids.len() <= self.max {
+            return Ok(());
+        }
+        if !self.truncate {
+            return Err(format!(
+                "input is {} tokens, over the context length of {}. \
+                 Shorten the input or set truncate to true",
+                ids.len(),
+                self.max
+            ));
+        }
+        ids.truncate(self.max);
+        Ok(())
+    }
+}
+
 /// The finished vector of caller `text` and its token count.
 ///
 /// The text has no template around it, so it encodes under
 /// `SpecialMode::Ordinary`: nothing in it can become a control token.
-/// The pooled vector then takes `dimensions` and `normalize`.
+/// With `limit` set, the ids then take [`TokenLimit::apply`]. The pooled
+/// vector then takes `dimensions` and `normalize`.
 ///
 /// # Errors
 ///
-/// `400` for text that spells a control token or a vector that does not
-/// take `dimensions`, `500` for a failed forward pass.
+/// `400` for text that spells a control token, text over `limit`, or a
+/// vector that does not take `dimensions`, `500` for a failed forward pass.
 pub(crate) async fn embed_text(
     executor: &Arc<Executor<ServerRuntime>>,
     text: &str,
     pooling: Pooling,
     dimensions: Option<usize>,
     normalize: bool,
+    limit: Option<TokenLimit>,
 ) -> Result<(Vec<f32>, usize), Box<Response>> {
-    let ids = executor
+    let mut ids = executor
         .tokenizer()
         .encode_with(text, &splintr::SpecialMode::Ordinary)
         .map_err(|e| Box::new(policy_error_response(&e)))?;
+    if let Some(limit) = limit {
+        limit
+            .apply(&mut ids)
+            .map_err(|msg| Box::new(bad_request(&msg)))?;
+    }
     let num_tokens = ids.len();
     let pooled = embed_tokens(executor, ids, pooling).await?;
     Ok((finished(pooled, dimensions, normalize)?, num_tokens))
@@ -189,6 +228,7 @@ pub async fn embeddings(
                     pooling,
                     request.dimensions,
                     request.normalize,
+                    None,
                 )
                 .await
                 {
@@ -256,4 +296,34 @@ pub async fn embeddings(
         },
     };
     (StatusCode::OK, Json(response)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_limit_truncates_or_refuses_a_long_text() {
+        let cut = TokenLimit {
+            max: 2,
+            truncate: true,
+        };
+        let mut ids = vec![1, 2, 3];
+        assert_eq!(cut.apply(&mut ids), Ok(()));
+        assert_eq!(ids, [1, 2]);
+
+        let refuse = TokenLimit {
+            max: 2,
+            truncate: false,
+        };
+        let mut ids = vec![1, 2, 3];
+        let err = refuse.apply(&mut ids).unwrap_err();
+        assert!(
+            err.contains("3 tokens") && err.contains("truncate"),
+            "{err}"
+        );
+        let mut short = vec![1, 2];
+        assert_eq!(refuse.apply(&mut short), Ok(()));
+        assert_eq!(short, [1, 2]);
+    }
 }

@@ -23,6 +23,9 @@ use super::lora::{list_loras, load_lora, unload_lora};
 use super::management::{
     copy_model, delete_model, list_running, list_tags, pull_model, show_model,
 };
+use super::ollama_chat::ollama_chat;
+use super::ollama_embed::{ollama_embed, ollama_embeddings};
+use super::ollama_generate::ollama_generate;
 use super::rerank::rerank;
 use super::responses::responses;
 
@@ -68,6 +71,11 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/delete", delete(delete_model))
         .route("/api/copy", post(copy_model))
         .route("/api/pull", post(pull_model))
+        // Ollama generation and embedding endpoints
+        .route("/api/chat", post(ollama_chat))
+        .route("/api/generate", post(ollama_generate))
+        .route("/api/embed", post(ollama_embed))
+        .route("/api/embeddings", post(ollama_embeddings))
         // LoRA adapter management endpoints
         .route("/v1/lora", get(list_loras).post(load_lora))
         .route("/v1/lora/{name}", delete(unload_lora))
@@ -80,5 +88,94 @@ mod tests {
     #[test]
     fn every_route_path_parses() {
         let _ = super::api_routes();
+    }
+
+    use std::sync::Arc;
+
+    use axum::{body::Body, http::Request};
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    /// The status and JSON body of `POST path` with `body`, on a server
+    /// whose model directory is empty.
+    async fn post(path: &str, body: Value) -> (u16, Value) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state = Arc::new(super::super::handlers::test_state(dir.path()));
+        let app = super::api_routes().with_state(state);
+        let request = Request::post(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request builds");
+        let response = app.oneshot(request).await.expect("router answers");
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn ollama_paths_answer_an_unknown_model_with_a_404() {
+        let missing = json!({"error": "model 'ghost:latest' not found"});
+        let user = json!([{"role": "user", "content": "hi"}]);
+        let cases = [
+            (
+                "/api/chat",
+                json!({"model": "ghost:latest", "messages": user}),
+            ),
+            (
+                "/api/chat",
+                json!({"model": "ghost:latest", "messages": []}),
+            ),
+            (
+                "/api/generate",
+                json!({"model": "ghost:latest", "prompt": "hi"}),
+            ),
+            ("/api/generate", json!({"model": "ghost:latest"})),
+            (
+                "/api/generate",
+                json!({"model": "ghost:latest", "keep_alive": 0}),
+            ),
+            (
+                "/api/embed",
+                json!({"model": "ghost:latest", "input": ["a", "b"]}),
+            ),
+            (
+                "/api/embeddings",
+                json!({"model": "ghost:latest", "prompt": "a"}),
+            ),
+            ("/api/show", json!({"model": "ghost:latest"})),
+        ];
+        for (path, body) in cases {
+            assert_eq!(
+                post(path, body.clone()).await,
+                (404, missing.clone()),
+                "{path} {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ollama_paths_answer_bad_input_with_an_error_object() {
+        let (status, body) = post("/api/chat", json!({"messages": []})).await;
+        assert!((400..500).contains(&status), "{status}");
+        assert!(body["error"].is_string(), "{body}");
+        let (status, body) = post(
+            "/api/embed",
+            json!({"model": "m", "input": "a", "dimensions": 0}),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body["error"].as_str().unwrap_or("").contains("dimensions"));
+        let go = json!({"model": "m", "prompt": "x", "template": "{{ .Prompt }}"});
+        let (status, body) = post("/api/generate", go).await;
+        assert_eq!(status, 400);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Go templates"));
     }
 }

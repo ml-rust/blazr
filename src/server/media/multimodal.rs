@@ -186,17 +186,16 @@ pub async fn decode_image(url: &str) -> Result<DecodedImage, String> {
         let bytes = base64_decode(url).map_err(|e| {
             format!("Invalid image_url: expected a data: URI, an http(s) URL, or base64 ({e})")
         })?;
-        let mime_type = detect_image_mime(&bytes);
-        if mime_type == UNKNOWN_IMAGE_MIME {
+        let Some(mime_type) = image_mime(&bytes) else {
             return Err(
                 "Invalid image_url: expected a data: URI, an http(s) URL, or base64 \
                  of a PNG, JPEG, WebP, or GIF image"
                     .to_string(),
             );
-        }
+        };
         Ok(DecodedImage {
             data: bytes,
-            mime_type,
+            mime_type: mime_type.to_string(),
         })
     }
 }
@@ -221,21 +220,19 @@ fn decode_base64_image(mime_type: &str, data: &str) -> Result<DecodedImage, Stri
     })
 }
 
-/// MIME type `detect_image_mime` returns when no image signature matches.
-const UNKNOWN_IMAGE_MIME: &str = "application/octet-stream";
-
-/// Detect MIME type from image magic bytes.
-fn detect_image_mime(data: &[u8]) -> String {
+/// The MIME type of a PNG, JPEG, WebP or GIF from its first bytes, or
+/// `None` when no signature matches. A WebP needs its first 12 bytes.
+pub(in crate::server) fn image_mime(data: &[u8]) -> Option<&'static str> {
     if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png".to_string()
+        Some("image/png")
     } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg".to_string()
-    } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WEBP" {
-        "image/webp".to_string()
+        Some("image/jpeg")
+    } else if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WEBP" {
+        Some("image/webp")
     } else if data.starts_with(b"GIF8") {
-        "image/gif".to_string()
+        Some("image/gif")
     } else {
-        UNKNOWN_IMAGE_MIME.to_string()
+        None
     }
 }
 
@@ -323,13 +320,15 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_image_mime() {
+    fn test_image_mime() {
         assert_eq!(
-            detect_image_mime(&[0x89, 0x50, 0x4E, 0x47, 0x0D]),
-            "image/png"
+            image_mime(&[0x89, 0x50, 0x4E, 0x47, 0x0D]),
+            Some("image/png")
         );
-        assert_eq!(detect_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
-        assert_eq!(detect_image_mime(&[0x00, 0x01]), "application/octet-stream");
+        assert_eq!(image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(image_mime(b"RIFF\0\0\0\0WEBP"), Some("image/webp"));
+        assert_eq!(image_mime(b"GIF89a"), Some("image/gif"));
+        assert_eq!(image_mime(&[0x00, 0x01]), None);
     }
 
     #[tokio::test]

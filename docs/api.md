@@ -28,7 +28,7 @@ The error body depends on the route family.
 | ------------------------------------------------------- | --------------------------------------------------------- |
 | OpenAI-compatible, slots, LoRA, tokenize, rerank, audio | `{"error":{"message":"...","type":"..."}}`                |
 | Anthropic (`/v1/messages`, `/v1/messages/count_tokens`) | `{"type":"error","error":{"type":"...","message":"..."}}` |
-| Ollama-style (`/api/show`, `/api/delete`, `/api/copy`)  | `{"error":"..."}`                                         |
+| Ollama (`/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`, `/api/show`, `/api/delete`, `/api/copy`) | `{"error":"..."}` |
 | System One (`/v1/systemone`)                            | `{"error":{"message":"...","type":"...","code":"..."}}`   |
 
 The `401` body uses the OpenAI shape with `"type":"invalid_api_key"`.
@@ -38,6 +38,8 @@ Some `500` responses from `GET /v1/models` and `GET /api/tags` return the error 
 ## Streaming
 
 Completions, chat, infill, and Anthropic messages stream with `"stream": true`.
+
+The Ollama routes stream NDJSON instead: see [Ollama API](#ollama-api).
 
 - OpenAI-style routes send Server-Sent Events. Each event is one `data:` line holding a JSON chunk.
 - The stream ends with `data: [DONE]`. The Anthropic stream has no `[DONE]` line.
@@ -115,6 +117,10 @@ data: [DONE]
 | DELETE    | `/api/slots/{slot_id}`       | Free an inference slot             | none          |
 | GET, POST | `/v1/lora`                   | List or register LoRA variants     | none          |
 | DELETE    | `/v1/lora/{name}`            | Unregister a LoRA variant          | none          |
+| POST      | `/api/chat`                  | Ollama chat                        | none          |
+| POST      | `/api/generate`              | Ollama prompt completion           | none          |
+| POST      | `/api/embed`                 | Ollama embeddings                  | none          |
+| POST      | `/api/embeddings`            | Ollama legacy single embedding     | none          |
 | GET       | `/api/tags`                  | List local models                  | none          |
 | POST      | `/api/show`                  | Show model details                 | none          |
 | GET       | `/api/ps`                    | List loaded models                 | none          |
@@ -193,9 +199,11 @@ Each field the request omits takes its value from the `generation` section of `~
 | Value                   | Meaning                                                    |
 | ----------------------- | ---------------------------------------------------------- |
 | `"0"`                   | Unload immediately.                                        |
-| `"-1"`                  | Keep loaded indefinitely.                                  |
+| `"-1"`, `"-5m"`         | Keep loaded indefinitely. Any negative value does this.    |
 | `"30s"`, `"5m"`, `"1h"` | Keep loaded for the duration.                              |
 | `"300"`                 | Keep loaded for 300 seconds. A bare number counts seconds. |
+
+The Ollama routes also take a JSON number of seconds, such as `300`, `0` or `-1`.
 
 ## Completions
 
@@ -1183,6 +1191,102 @@ Requires the query parameter `model`. Unregisters the variant `<model>:<name>` a
 ```bash
 curl -X DELETE "http://localhost:8080/v1/lora/sql?model=qwen3.5-4b"
 ```
+
+## Ollama API
+
+`/api/chat`, `/api/generate`, `/api/embed` and `/api/embeddings` follow the Ollama API. They run on the same pipeline as `/v1/chat/completions`, so its checks, templates, tools, constraints and media apply.
+
+- `stream` defaults to `true`. A stream is `application/x-ndjson`: one JSON object per line, no `data:` prefix, no `[DONE]`.
+- Every duration is in nanoseconds.
+- `model` echoes the name the request sent. A trailing `:latest` is cut when only the cut name is a known model. `<model>:<adapter>` still selects a LoRA variant. `/api/show`, `/api/delete` and `/api/copy` resolve names the same way, and `/api/show` and `/api/delete` take `model` or `name`.
+- An error is `{"error": "..."}` under the HTTP status. An unknown model is `404` with `model '<name>' not found`. A `503` keeps its `retry-after`.
+- An error mid-stream ends the stream with one `{"error": "..."}` line. No done object follows, and a tool call that has not closed is dropped.
+
+### POST /api/chat
+
+| Field        | Type                 | Meaning                                                                       |
+| ------------ | -------------------- | ----------------------------------------------------------------------------- |
+| `model`      | string               | Model name.                                                                   |
+| `messages`   | array                | `role`, `content`, `images` (base64), `tool_calls`, `tool_name`, `thinking`.   |
+| `tools`      | array                | Tool definitions in the OpenAI shape.                                         |
+| `format`     | `"json"` or object   | JSON mode, or a JSON schema the output follows.                               |
+| `options`    | object               | Sampling options. See [Options](#options).                                    |
+| `stream`     | bool                 | Default `true`.                                                               |
+| `think`      | bool or string       | `true`/`false`, or an effort `low`, `medium`, `high` that also turns it on.    |
+| `keep_alive` | string or number     | See [keep_alive](#keep_alive).                                                |
+
+- An image's type is read from its first bytes: PNG, JPEG, WebP or GIF. Another type is a `400`.
+- An assistant `tool_calls` entry takes `function.name` and `function.arguments` as a JSON object. A `tool` message answers the earliest open call to its `tool_name`.
+- Reasoning always goes in `message.thinking`, never in `content`.
+- An empty `messages` loads the model and returns `done_reason` `load`. With `keep_alive` zero it unloads the model and returns `done_reason` `unload`.
+
+```json
+{"model":"llama3:latest","created_at":"2026-01-01T00:00:00.000000000Z","message":{"role":"assistant","content":"Hel"},"done":false}
+{"model":"llama3:latest","created_at":"2026-01-01T00:00:00.100000000Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":0,"load_duration":0,"prompt_eval_count":0,"prompt_eval_duration":0,"eval_count":0,"eval_duration":0}
+```
+
+- A chunk carries `message.content`, and `message.thinking` when the piece holds reasoning.
+- A tool call goes out whole, once it closes, as `message.tool_calls: [{"function": {"name": "...", "arguments": {...}}}]`. Arguments that are not valid JSON stay a string.
+- The done object has empty output, `done_reason` `stop` or `length`, and the counts and durations. A reply with a tool call is `stop`.
+- `prompt_eval_duration` is the time to the first token. `eval_duration` is the rest of the generation.
+- With `stream` false, the reply is the done object with the full `message`.
+
+```bash
+curl http://localhost:8080/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3", "messages": [{"role": "user", "content": "Hi"}], "stream": false}'
+```
+
+### POST /api/generate
+
+| Field      | Type            | Meaning                                                                           |
+| ---------- | --------------- | --------------------------------------------------------------------------------- |
+| `prompt`   | string          | The user turn. Empty or absent loads or unloads the model, as `/api/chat` does.   |
+| `suffix`   | string          | The code after the gap: a fill-in-the-middle prompt, as `/v1/infill` builds.       |
+| `system`   | string          | System turn.                                                                      |
+| `template` | string          | A built-in chat template name. Go templates are a `400`.                          |
+| `context`  | array of ints   | The `context` of an earlier reply.                                                |
+| `raw`      | bool            | Send the prompt without a template.                                               |
+| `images`   | array           | Base64 images, on the user turn.                                                  |
+
+`model`, `format`, `options`, `think`, `keep_alive` and `stream` act as on `/api/chat`.
+
+- A chunk carries `response`, and `thinking` when the piece holds reasoning.
+- `suffix` needs a tokenizer with `<|fim_prefix|>`, `<|fim_suffix|>` and `<|fim_middle|>`, else `400`. It cannot combine with `raw`.
+- The done object of a request without `raw` or `suffix` carries `context`: the prompt ids, then the generated text encoded again as ordinary text. It approximates the model's own ids, because a second encode can split the text differently. `context` is deprecated in Ollama.
+
+### POST /api/embed
+
+| Field        | Type               | Meaning                                                                         |
+| ------------ | ------------------ | ------------------------------------------------------------------------------- |
+| `input`      | string or array    | The texts to embed. An empty array returns `{"model": "...", "embeddings": []}`. |
+| `truncate`   | bool               | Default `true`: cut a text to the model's context length.                       |
+| `dimensions` | int                | Keep the first values only. Quality holds only for Matryoshka-trained models.    |
+
+`model`, `options` and `keep_alive` act as on `/api/chat`. Embeddings take no options: each key is ignored.
+
+- Each vector is the mean of the token states, L2-normalized.
+- With `truncate` false, a text over the context length is a `400`. A model that reports no context length embeds the whole text.
+- The reply is `{"model", "embeddings", "total_duration", "load_duration", "prompt_eval_count"}`.
+
+### POST /api/embeddings
+
+The legacy form: `{"model", "prompt", "options", "keep_alive"}` returns `{"embedding": [...]}`. An empty prompt returns an empty vector. The vector is L2-normalized, where Ollama returns it unnormalized.
+
+### Options
+
+| Option                                                             | Maps to                                                          |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `temperature`, `top_p`, `top_k`, `min_p`, `typical_p`               | The sampling field of the same name.                             |
+| `repeat_penalty`, `presence_penalty`, `frequency_penalty`           | The sampling field of the same name.                             |
+| `mirostat`, `mirostat_tau`, `mirostat_eta`                         | The sampling field of the same name.                             |
+| `stop`                                                             | `stop`: a string or up to four.                                  |
+| `seed`                                                             | `seed`. A negative seed draws a random one.                      |
+| `num_predict`                                                      | `max_tokens`. `-1` and `-2` take the config default. `0` is a `400`. |
+| `repeat_last_n`                                                    | `repeat_last_n`. `-1` covers the whole history. `0` turns the repeat, presence and frequency penalties off. |
+| `num_ctx`                                                          | A `400` above the model's context length. Otherwise ignored: the context size is set at load. |
+
+Every other option is ignored, such as `num_keep`, `tfs_z`, `penalize_newline`, `num_batch`, `num_gpu`, `main_gpu`, `num_thread` and `use_mmap`.
 
 ## Model management
 

@@ -12,19 +12,26 @@ use serde::{Deserialize, Serialize};
 
 use super::common::ModelDetails;
 use crate::server::handlers::{classify_lookup, AppState};
+use crate::server::model_name::{not_found, resolve};
 
 /// POST /api/show — Show model details
 pub async fn show_model(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ShowRequest>,
 ) -> Response {
-    let executor = match state.scheduler.get_executor(&request.name).await {
+    let name = resolve(&state, &request.name).await;
+    let executor = match state.scheduler.get_executor(&name).await {
         Ok(e) => e,
         Err(e) => {
             let failure = classify_lookup(&e);
+            let message = if failure.code == Some("model_not_found") {
+                not_found(&request.name)
+            } else {
+                failure.message
+            };
             return (
                 failure.status,
-                Json(serde_json::json!({ "error": failure.message })),
+                Json(serde_json::json!({ "error": message })),
             )
                 .into_response();
         }
@@ -60,6 +67,8 @@ pub async fn show_model(
 
 #[derive(Deserialize)]
 pub struct ShowRequest {
+    /// Current Ollama clients send `model`, older ones `name`.
+    #[serde(alias = "model")]
     pub name: String,
 }
 

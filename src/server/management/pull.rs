@@ -3,18 +3,24 @@
 
 use axum::{
     extract::{Json, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use hf_hub::repository::RepoTypeModel;
 use hf_hub::HFRepository;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::loader::hub_client::{async_client, async_get, async_model};
 use crate::server::handlers::AppState;
+use crate::server::ndjson::ndjson_response;
+
+/// One progress line: a `{"status": ...}` object, or the message of the
+/// error that ends the pull.
+type Progress = Result<Value, String>;
 
 /// POST /api/pull — Pull model from HuggingFace with streaming progress.
 /// The model lands in the scheduler's model directory.
@@ -22,10 +28,7 @@ pub async fn pull_model(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PullRequest>,
 ) -> Response {
-    use axum::body::Body;
-    use futures::stream;
-
-    let (tx, rx) = mpsc::channel::<String>(32);
+    let (tx, rx) = mpsc::channel::<Progress>(32);
     let repo = request.name.clone();
     let model_dir = state.scheduler.model_dir().to_path_buf();
 
@@ -34,8 +37,7 @@ pub async fn pull_model(
         let client = match async_client(None) {
             Ok(client) => client,
             Err(e) => {
-                let msg = serde_json::json!({ "error": format!("Failed to init HF API: {}", e) });
-                let _ = tx.send(format!("{}\n", msg)).await;
+                let _ = tx.send(Err(format!("Failed to init HF API: {}", e))).await;
                 return;
             }
         };
@@ -82,30 +84,23 @@ pub async fn pull_model(
         send_status(&tx, "success").await;
     });
 
-    // Stream status messages as NDJSON
-    let body_stream = stream::unfold(rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|msg| (Ok::<_, std::convert::Infallible>(msg), rx))
-    });
+    progress_response(rx)
+}
 
-    let body = Body::from_stream(body_stream);
-    Response::builder()
-        .header("Content-Type", "application/x-ndjson")
-        .body(body)
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+/// The NDJSON response of the progress lines `rx` receives.
+fn progress_response(rx: mpsc::Receiver<Progress>) -> Response {
+    ndjson_response(ReceiverStream::new(rx))
 }
 
 /// Sends one NDJSON `{"status": ...}` line. A closed stream drops it.
-async fn send_status(tx: &mpsc::Sender<String>, status: &str) {
-    let msg = serde_json::json!({ "status": status });
-    let _ = tx.send(format!("{}\n", msg)).await;
+async fn send_status(tx: &mpsc::Sender<Progress>, status: &str) {
+    let _ = tx.send(Ok(json!({ "status": status }))).await;
 }
 
 /// Downloads the repo file `name` and copies it into `dest`, with a
 /// `pulling` line before and a `downloaded` line after a fetch that worked.
 async fn pull_file(
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<Progress>,
     repo_api: &HFRepository<RepoTypeModel>,
     name: &str,
     dest: &Path,
@@ -124,4 +119,37 @@ async fn pull_file(
 #[derive(Deserialize)]
 pub struct PullRequest {
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::ndjson::ndjson_test::body;
+
+    #[tokio::test]
+    async fn progress_lines_keep_their_ndjson_form() -> anyhow::Result<()> {
+        let (tx, rx) = mpsc::channel::<Progress>(8);
+        send_status(&tx, "pulling config.json").await;
+        send_status(&tx, "success").await;
+        drop(tx);
+        let response = progress_response(rx);
+        assert_eq!(response.headers()["content-type"], "application/x-ndjson");
+        assert_eq!(
+            body(response).await?,
+            "{\"status\":\"pulling config.json\"}\n{\"status\":\"success\"}\n"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_pull_ends_with_an_error_line() -> anyhow::Result<()> {
+        let (tx, rx) = mpsc::channel::<Progress>(8);
+        let _ = tx.send(Err("Failed to init HF API: offline".into())).await;
+        drop(tx);
+        assert_eq!(
+            body(progress_response(rx)).await?,
+            "{\"error\":\"Failed to init HF API: offline\"}\n"
+        );
+        Ok(())
+    }
 }

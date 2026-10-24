@@ -11,12 +11,13 @@ pub(super) const FIM_SUFFIX_TOKEN: &str = "<|fim_suffix|>";
 ///
 /// A caller that spells any other control token in its text is refused,
 /// not promoted to that token's id.
-pub(super) static FIM_MARKERS: LazyLock<splintr::FxHashSet<String>> = LazyLock::new(|| {
-    [FIM_PREFIX_TOKEN, FIM_MIDDLE_TOKEN, FIM_SUFFIX_TOKEN]
-        .iter()
-        .map(|t| (*t).to_string())
-        .collect()
-});
+pub(in crate::server) static FIM_MARKERS: LazyLock<splintr::FxHashSet<String>> =
+    LazyLock::new(|| {
+        [FIM_PREFIX_TOKEN, FIM_MIDDLE_TOKEN, FIM_SUFFIX_TOKEN]
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect()
+    });
 
 /// The FIM markers `tokenizer` does not define, in prefix, suffix, middle order.
 fn missing_markers(tokenizer: &splintr::AnyTokenizer) -> Vec<&'static str> {

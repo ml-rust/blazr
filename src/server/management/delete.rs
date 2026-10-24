@@ -11,19 +11,21 @@ use axum::{
 use serde::Deserialize;
 
 use crate::server::handlers::AppState;
+use crate::server::model_name::{not_found, resolve};
 
 /// DELETE /api/delete — Delete a local model
 pub async fn delete_model(
     State(state): State<Arc<AppState>>,
     Json(request): Json<DeleteRequest>,
 ) -> Response {
+    let name = resolve(&state, &request.name).await;
     // Unload model if currently loaded
-    state.scheduler.unload(&request.name).await;
+    state.scheduler.unload(&name).await;
 
     // Find model path
     match state.scheduler.list_available() {
         Ok(models) => {
-            if let Some(m) = models.iter().find(|m| m.name == request.name) {
+            if let Some(m) = models.iter().find(|m| m.name == name) {
                 let path = &m.path;
                 let result = if path.is_dir() {
                     std::fs::remove_dir_all(path)
@@ -33,10 +35,10 @@ pub async fn delete_model(
                 match result {
                     Ok(()) => {
                         // Its LoRA variants have no weights left to build on.
-                        for variant in state.scheduler.variants(Some(&request.name)) {
+                        for variant in state.scheduler.variants(Some(&name)) {
                             state.scheduler.remove_variant(&variant.id).await;
                         }
-                        tracing::info!("Deleted model: {}", request.name);
+                        tracing::info!("Deleted model: {}", name);
                         StatusCode::OK.into_response()
                     }
                     Err(e) => (
@@ -48,7 +50,7 @@ pub async fn delete_model(
             } else {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": format!("model '{}' not found", request.name) })),
+                    Json(serde_json::json!({ "error": not_found(&request.name) })),
                 )
                     .into_response()
             }
@@ -59,5 +61,7 @@ pub async fn delete_model(
 
 #[derive(Deserialize)]
 pub struct DeleteRequest {
+    /// Current Ollama clients send `model`, older ones `name`.
+    #[serde(alias = "model")]
     pub name: String,
 }

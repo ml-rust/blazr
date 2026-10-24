@@ -14,6 +14,7 @@ use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg, Tool};
 use crate::config::{GenerationConfig, ReasoningFormat};
 use crate::engine::GenerationResult;
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage};
+use crate::server::fim_prompt::{build_fim_prompt, FIM_MARKERS};
 use crate::server::generation::{
     admit_constraint, chat_prompt_error_response, decode_context_prefix, error_response,
     overloaded_response, policy_error_response, HasSamplingFields,
@@ -152,13 +153,20 @@ pub(in crate::server) async fn prepare_chat<'r>(
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        match executor
-            .tokenizer()
-            .encode_with(&raw_prompt, &splintr::SpecialMode::Ordinary)
-        {
-            Ok(ids) => (raw_prompt, ids),
-            Err(e) => return Err(Box::new(policy_error_response(&e))),
-        }
+        let tokenizer = executor.tokenizer();
+        let encoded = match request.fim_suffix.as_deref() {
+            // Only the FIM markers this server inserts can be control tokens.
+            Some(suffix) => {
+                let fim = build_fim_prompt(tokenizer, &raw_prompt, suffix)
+                    .map_err(|message| bad_request(&message))?;
+                let ids = tokenizer.encode_with(&fim, &splintr::SpecialMode::Allow(&FIM_MARKERS));
+                ids.map(|ids| (fim, ids))
+            }
+            None => tokenizer
+                .encode_with(&raw_prompt, &splintr::SpecialMode::Ordinary)
+                .map(|ids| (raw_prompt, ids)),
+        };
+        encoded.map_err(|e| Box::new(policy_error_response(&e)))?
     } else {
         let mut msgs: Vec<ChatMessage> = Vec::new();
         if let Some(ref sys) = request.system {

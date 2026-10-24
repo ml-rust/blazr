@@ -119,6 +119,11 @@ pub struct ChatRequest {
     /// variant, both must name the same adapter.
     #[serde(default)]
     pub lora_adapter: Option<String>,
+    /// The code after the gap of a fill-in-the-middle request. With `raw`
+    /// set, the joined message text is the prefix and the prompt takes the
+    /// tokenizer's FIM markers. Set by a dialect adapter, never from JSON.
+    #[serde(skip)]
+    pub fim_suffix: Option<String>,
 }
 
 impl ChatRequest {

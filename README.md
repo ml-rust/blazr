@@ -199,10 +199,12 @@ GGUF files load through mmap on every target except `wasm32`. A failed map falls
 | POST   | `/v1/audio/transcriptions` | Speech to text, with word timestamps (`audio`) |
 | POST   | `/v1/audio/translations`   | Speech to English text (`audio`)               |
 | GET    | `/v1/audio/voices`         | A TTS model's voices (`audio`)                 |
+| POST   | `/api/chat`, `/api/generate` | Ollama chat and prompt completion, NDJSON streams |
+| POST   | `/api/embed`, `/api/embeddings` | Ollama embeddings                            |
 | GET    | `/api/tags`, `/api/ps`     | Ollama-compatible model listing                |
 | GET    | `/metrics`                 | Prometheus metrics                             |
 
-[docs/api.md](docs/api.md) lists every route, with its request fields, responses, and errors. Streaming responses send `data: {...}` chunks and end with `data: [DONE]`.
+[docs/api.md](docs/api.md) lists every route, with its request fields, responses, and errors. OpenAI and Anthropic streams send `data: {...}` chunks, and OpenAI streams end with `data: [DONE]`. Ollama streams send one JSON object per line.
 
 ## CLI Reference
 

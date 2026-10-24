@@ -203,6 +203,45 @@ pub(crate) fn seeded_executor_pair(
     seeded_on(target_seed, paged, ctx, false)?.with_draft(draft)
 }
 
+/// The tiny llama with seeded random weights over every llama3 token id,
+/// with a context of [`FULL_VOCAB_CTX`] tokens.
+///
+/// Text encodes into its vocab, so a server test can send a text prompt.
+/// Its logits depend on the prompt, and its hidden states are nonzero.
+pub(crate) fn seeded_full_vocab_executor(seed: u64) -> Result<Executor<CpuRuntime>> {
+    let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
+    let eos = tokenizer
+        .eos_token_id()
+        .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
+    let vocab = splintr::Tokenize::vocab_size(&tokenizer).max(eos as usize + 1);
+    let device = CpuDevice::new();
+    let yaml = TINY_LLAMA_YAML
+        .replace("vocab_size: 32", &format!("vocab_size: {vocab}"))
+        .replace("max_seq_len: 16", &format!("max_seq_len: {FULL_VOCAB_CTX}"));
+    let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
+    let model = seeded_model(seed, vocab, &config, &device)?;
+    let blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
+    Executor::new(model, blazr_config, tokenizer, device, FULL_VOCAB_CTX)
+}
+
+/// The model of `config` with weights drawn from `seed`.
+fn seeded_model(
+    seed: u64,
+    vocab: usize,
+    config: &boostr::model::UniversalConfig,
+    device: &CpuDevice,
+) -> Result<LoadedModel<CpuRuntime>> {
+    let mut weights = SeededWeights {
+        state: seed,
+        vocab,
+        map: VarMap::new(),
+    };
+    weights.fill(device)?;
+    let mut map = weights.map;
+    let mut vb = VarBuilder::new(&mut map, device);
+    Ok(LoadedModel::<CpuRuntime>::load(config, &mut vb)?)
+}
+
 fn seeded_on(
     seed: u64,
     paged: Option<PagedPool>,
@@ -212,14 +251,7 @@ fn seeded_on(
     let device = CpuDevice::new();
     let yaml = TINY_LLAMA_YAML.replace("max_seq_len: 16", &format!("max_seq_len: {ctx}"));
     let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
-    let mut weights = SeededWeights {
-        state: seed,
-        map: VarMap::new(),
-    };
-    weights.fill(&device)?;
-    let mut map = weights.map;
-    let mut vb = VarBuilder::new(&mut map, &device);
-    let model = LoadedModel::<CpuRuntime>::load(&config, &mut vb)?;
+    let model = seeded_model(seed, VOCAB, &config, &device)?;
 
     let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
     enable_paged(&mut blazr_config, paged);
@@ -232,6 +264,8 @@ fn seeded_on(
 /// congruential generator.
 struct SeededWeights {
     state: u64,
+    /// Rows of the embedding and the LM head.
+    vocab: usize,
     map: VarMap<CpuRuntime>,
 }
 
@@ -269,7 +303,7 @@ impl SeededWeights {
         self.put(
             device,
             "model.embed_tokens.weight",
-            &[VOCAB, HIDDEN],
+            &[self.vocab, HIDDEN],
             -1.0,
             1.0,
         )?;
@@ -300,7 +334,8 @@ impl SeededWeights {
         self.linear(device, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN)?;
         self.linear(device, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER)?;
         self.put(device, "model.norm.weight", &[HIDDEN], 0.5, 1.5)?;
-        self.linear(device, "lm_head.weight", VOCAB, HIDDEN)
+        let vocab = self.vocab;
+        self.linear(device, "lm_head.weight", vocab, HIDDEN)
     }
 }
 

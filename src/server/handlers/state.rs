@@ -224,3 +224,20 @@ impl AppState {
         self.budget.try_admit(tokens)
     }
 }
+
+/// An [`AppState`] whose scheduler searches `dir` for models, for the
+/// server tests. It holds a device handle only. No model loads.
+#[cfg(test)]
+pub(crate) fn test_state(dir: &std::path::Path) -> AppState {
+    #[cfg(feature = "cuda")]
+    let device = boostr::CudaDevice::new(0);
+    #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+    let device = boostr::runtime::wgpu::WgpuDevice::new(0);
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    let device = boostr::CpuDevice::new();
+    let scheduler = Arc::new(Scheduler::<ServerRuntime>::new(dir.to_path_buf(), device));
+    let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .build_recorder()
+        .handle();
+    AppState::new(scheduler, metrics_handle)
+}

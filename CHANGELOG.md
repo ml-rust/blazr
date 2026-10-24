@@ -18,6 +18,7 @@ preview on crates.io that shares no code with it.
 - **Speculative decoding** — `inference.speculative.enabled` drafts tokens by prompt lookup and checks them in one forward. It applies to single-sequence requests, on a contiguous KV cache and on paged attention. Greedy output equals plain decoding. Constrained, mirostat, DRY, typical and dynamic-temperature requests decode without it. `blazr_speculative_*` counters report drafts, accepts and fallbacks.
 - **Draft-model speculation** — `inference.speculative.drafter: model` drafts with the small model `inference.speculative.draft_model` names. It loads once on the target's device and dtype. Each request gets its own contiguous draft KV cache, also over a paged target. Sampled requests verify against each draft's distribution, so the output follows the target's distribution. A draft whose tokenizer or vocabulary differs from the target fails the load. `drafter: model` with no `draft_model` fails the config check.
 - **Logprob bytes** — each logprob entry and `top_logprobs` item now has `bytes`, the UTF-8 bytes of its token, in streaming and non-streaming responses.
+- **Streaming tool calls** — a streamed chat request with tools now sends each call as `delta.tool_calls` for `tool_choice` `auto` or absent, as it does for a forced call. Before, an `auto` call leaked into `delta.content` and the stream finished with `stop`. Content before a call streams live. Each call is held until it closes, then goes out as one entry with `id`, `type` and `function.name`, followed by `function.arguments` fragments. The stream finishes with `tool_calls`. A forced call now streams the same way and no longer waits for the end of the output. A held token still sends its logprob entry.
 
 ### Fixed
 
@@ -49,6 +50,7 @@ preview on crates.io that shares no code with it.
 - **Constrained graphs** — `run --graphs` decodes eagerly with a grammar.
 - **Compile cache** — the server keeps up to 64 compiled DFAs, at most 256 MiB, and evicts the least recently used. A request compiles its constraint once, at admission, off the async runtime.
 - **Config `generation.grammar`** — GBNF text works as before. The key also takes `{json_schema: <schema>}` and `{json_object: true}`.
+- **Bare JSON tool calls** — a bare `{"name": ..., "arguments": ...}` object now counts as a call only at the start of the output or at the start of a line, in streaming and non-streaming responses. A bare object mid-line, or one whose first key is not `name` or `arguments`, stays content. A call whose name no declared tool has, or one that is unterminated, stays content as text. Text after the first call is dropped, and further calls still parse.
 
 ### Removed
 

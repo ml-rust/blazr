@@ -52,7 +52,7 @@ data: {"error":{"message":"...","type":"server_error"}}
 
 With batching on, a streamed text request runs in the continuous batch, as a non-streamed one does. Requests with images or audio stream from the executor. Both paths give the same text, finish reason and logprobs.
 
-Tool calls stream as `delta.tool_calls` only when `tool_choice` is `required` or a named function. See [Tools](#tools).
+A chat request with tools streams each tool call as `delta.tool_calls`. See [Streaming tool calls](#streaming-tool-calls).
 
 ### Streaming logprobs
 
@@ -60,7 +60,7 @@ With `logprobs` set, each completions and chat chunk carries `choices[0].logprob
 
 - `logprobs.content` holds one entry per chunk: the token that chunk carries.
 - An entry has `token`, `logprob`, `bytes` (the UTF-8 bytes of `token`), and `top_logprobs`. Each `top_logprobs` item has `token`, `logprob`, and `bytes`. Non-streaming responses use the same entry.
-- A stop-sequence prefix or a partial reasoning tag holds text back. The chunk for that token then has an empty `delta`, or a `delta.text` of `""`, and still carries the token's entry. The held text arrives in a later chunk.
+- A stop-sequence prefix, a partial reasoning tag, or a tool call that has not closed holds text back. The chunk for that token then has an empty `delta`, or a `delta.text` of `""`, and still carries the token's entry. The held text arrives in a later chunk.
 - Each token's entry appears once. The final chunk carries the last token's entry beside `finish_reason`.
 
 ```json
@@ -78,7 +78,7 @@ Completions and chat streams take `"stream_options": {"include_usage": true}`. I
 - Every chunk carries `"usage": null`.
 - After the final `finish_reason` chunk, one more chunk has `"choices": []` and `usage` set to `prompt_tokens`, `completion_tokens`, and `total_tokens`. Then `data: [DONE]` follows.
 - The counts match the non-streaming `usage`. `completion_tokens` counts every generated token, the tokens of a matched stop sequence included.
-- A forced tool-call stream sends the usage chunk after its `tool_calls` finish chunk.
+- A stream with tool calls sends the usage chunk after its `tool_calls` finish chunk.
 - A stream that ends on a generation error sends no usage chunk. A client that disconnects receives nothing more.
 - `include_usage` absent, `null`, or `false` leaves every chunk without a `usage` member.
 - A non-streaming request accepts `stream_options` and ignores it.
@@ -441,9 +441,13 @@ Tool definitions use the OpenAI shape.
 
 - A Jinja chat template receives `tools` and renders them.
 - A built-in template receives a system prompt that lists the tools.
-- The model calls a tool with `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`. The server also reads an XML form and a bare JSON object with `name` and `arguments`.
+- The model calls a tool with `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`, anywhere in the output.
+- The server also reads `<tool_call><function=...><parameter=...>...</parameter></function></tool_call>`.
+- The server reads a bare JSON object with `name` and `arguments` only at the start of the output or at the start of a line. Its first key must be `name` or `arguments`. A bare object mid-line stays content.
 - A parsed call returns `finish_reason` `tool_calls`. `message.content` holds the text before the first call. It is `null` when that text is empty.
-- The server drops a call whose name no declared tool has.
+- Text after the first call is dropped. Further calls still parse.
+- A call whose name no declared tool has stays in the content as text.
+- A call that is unterminated or not valid JSON stays in the content as text.
 
 `tool_choice` values:
 
@@ -462,7 +466,7 @@ Each returned call has this shape. The server generates `id`.
 
 ```json
 {
-  "id": "5c0e8f1a2b3d4c5e6f708192a3b4c5d6",
+  "id": "call_5c0e8f1a2b3d4c5e6f708192",
   "type": "function",
   "function": {
     "name": "get_weather",
@@ -473,7 +477,28 @@ Each returned call has this shape. The server generates `id`.
 
 Send the result back as a `tool` message with `tool_call_id` set to the call `id`.
 
-Streaming responses carry tool calls only for a forced `tool_choice`. The server buffers the output and sends one `delta.tool_calls` chunk, then `finish_reason` `tool_calls`. Logprobs are not sent. With `auto`, a streamed call arrives as `delta.content` text and is not parsed.
+#### Streaming tool calls
+
+A streamed request with tools reads calls as a complete response does, for `auto`, `required` and a named function alike. `"none"` parses no call.
+
+- Content before a call streams as `delta.content` as it arrives.
+- The server holds each call back until its close: `</tool_call>`, or the last brace of a bare object. No piece of a call goes out as `delta.content`.
+- Whitespace right before a call is dropped.
+- A closed call streams as one `delta.tool_calls` entry with `index`, `id`, `type`, `function.name`, and `function.arguments` of `""`.
+- Entries with the same `index` and the next fragment of `function.arguments` follow. The fragments concatenate to the arguments JSON.
+- Calls take `index` 0, 1, and so on in output order.
+- A stream that sent a call finishes with `finish_reason` `tool_calls`, also when the output hit `max_tokens` or a stop sequence after the call.
+- A call still open when the output ends streams as `delta.content`, and the upstream finish reason stays.
+- A token whose text the server holds back still sends its logprob entry, in a chunk with an empty `delta`.
+- A generation error mid-call drops the held call.
+
+```
+data: {"id":"chatcmpl-6b1d2e3f-0000-4000-8000-000000000002","object":"chat.completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_5c0e8f1a2b3d4c5e6f708192","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}
+
+data: {"id":"chatcmpl-6b1d2e3f-0000-4000-8000-000000000002","object":"chat.completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"Kuala Lumpur\"}"}}]}}]}
+
+data: {"id":"chatcmpl-6b1d2e3f-0000-4000-8000-000000000002","object":"chat.completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+```
 
 ### Reasoning output
 

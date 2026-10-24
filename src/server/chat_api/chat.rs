@@ -9,15 +9,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use super::chat_sse::chat_sse;
 use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
 use super::chat_vision::{decode_request_media, image_route, ImageRoute};
 use super::route_stream::stream_for_media;
 use super::tool_calls::extract_tool_calls;
 use super::tool_choice::ToolChoice;
-use super::tool_stream::create_tool_call_stream;
 use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg, Tool};
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, ChatTemplate};
-use crate::server::chat_stream::create_chat_stream;
 use crate::server::generation::{
     admit_constraint, apply_keep_alive, chat_prompt_error_response, convert_logprobs,
     decode_context_prefix, error_response, overloaded_response, policy_error_response,
@@ -239,14 +238,14 @@ pub async fn chat_completions(
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let parser = ReasoningParser::for_output(reasoning_format, &prompt);
         let rx_stream = Box::pin(rx_stream);
-        if tool_choice.forces_call() {
-            // A forced call has no tool-call deltas until the output ends.
-            let declared = visible_tools.to_vec();
-            create_tool_call_stream(id, model_name, rx_stream, parser, declared, include_usage)
-                .into_response()
-        } else {
-            create_chat_stream(id, model_name, rx_stream, parser, include_usage).into_response()
-        }
+        chat_sse(
+            id,
+            model_name,
+            rx_stream,
+            parser,
+            visible_tools,
+            include_usage,
+        )
     } else {
         let _slot = DecodeSlot::enter();
         let _permit = permit;

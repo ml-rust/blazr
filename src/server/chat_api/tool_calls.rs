@@ -1,106 +1,40 @@
-//! Tool calls parsed out of model output.
+//! Tool calls parsed out of a complete model output, and the two call spellings.
 
+use super::tool_parser::ToolCallParser;
 use super::tools::{Tool, ToolCall, ToolCallFunction};
 
-/// Extract tool calls from model-generated text.
+/// Extract tool calls from a complete model output.
 ///
-/// Supported spellings:
-/// 1. `<tool_call>{"name": "fn", "arguments": {...}}</tool_call>`
-/// 2. `<tool_call>\n<function=fn>\n<parameter=k>\nv\n</parameter>\n</function>\n</tool_call>`
-/// 3. `{"name": "fn", "arguments": {...}}` (bare JSON object with name+arguments keys)
+/// The output goes through [`ToolCallParser`] in one piece, so a complete
+/// response and a stream read calls the same way. The parser documents the
+/// spellings it reads.
 ///
-/// A call whose name is not in `declared` is dropped. Its text stays in the
-/// content. An empty `declared` keeps every call.
+/// - With no call, the content is `text` unchanged.
+/// - With a call, the content is the text before the first call, trimmed.
+///   It is `None` when that text is empty.
 pub fn extract_tool_calls(
     text: &str,
     declared: &[Tool],
 ) -> (Option<String>, Option<Vec<ToolCall>>) {
-    let is_declared = |call: &ToolCall| {
-        declared.is_empty()
-            || declared
-                .iter()
-                .any(|t| t.function.name == call.function.name)
-    };
-    let mut calls = Vec::new();
-    let tag_start = "<tool_call>";
-    let tag_end = "</tool_call>";
-
-    if text.contains(tag_start) {
-        let mut search = text;
-        while let Some(start) = search.find(tag_start) {
-            let after_tag = &search[start + tag_start.len()..];
-            if let Some(end) = after_tag.find(tag_end) {
-                let body = after_tag[..end].trim();
-                let parsed = parse_tool_call_json(body).or_else(|| parse_tool_call_xml(body));
-                if let Some(call) = parsed.filter(is_declared) {
-                    calls.push(call);
-                }
-                search = &after_tag[end + tag_end.len()..];
-            } else {
-                break;
-            }
-        }
-        if !calls.is_empty() {
-            let remaining = text
-                .split(tag_start)
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let content = if remaining.is_empty() {
-                None
-            } else {
-                Some(remaining)
-            };
-            return (content, Some(calls));
-        }
+    let mut parser = ToolCallParser::new(declared.to_vec());
+    let mut events = parser.feed(text);
+    let tail = parser.finish();
+    events.content.push_str(&tail.content);
+    events.calls.extend(tail.calls);
+    if events.calls.is_empty() {
+        return (Some(events.content), None);
     }
+    let content = events.content.trim();
+    let content = (!content.is_empty()).then(|| content.to_string());
+    (content, Some(events.calls))
+}
 
-    // A whole text that is one call, the shape a forced tool call has.
-    if let Some(call) = parse_tool_call_json(text.trim()).filter(is_declared) {
-        return (None, Some(vec![call]));
-    }
-
-    // Bare JSON object with "name" and "arguments" keys: scan backwards for
-    // each '{' and try parsing as a tool call.
-    let mut search_from = text.len();
-    while search_from > 0 {
-        let prefix = &text[..search_from];
-        let Some(start) = prefix.rfind('{') else {
-            break;
-        };
-        let candidate = &text[start..];
-        let mut depth = 0;
-        let mut end_pos = None;
-        for (i, ch) in candidate.char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end_pos = Some(i + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(end) = end_pos {
-            let json_str = &candidate[..end];
-            if let Some(call) = parse_tool_call_json(json_str).filter(is_declared) {
-                let content_before = text[..start].trim();
-                let content = if content_before.is_empty() {
-                    None
-                } else {
-                    Some(content_before.to_string())
-                };
-                return (content, Some(vec![call]));
-            }
-        }
-        search_from = start;
-    }
-
-    (Some(text.to_string()), None)
+/// True when `call` names a tool in `declared`. An empty `declared` admits every call.
+pub(super) fn is_declared(declared: &[Tool], call: &ToolCall) -> bool {
+    declared.is_empty()
+        || declared
+            .iter()
+            .any(|t| t.function.name == call.function.name)
 }
 
 /// A fresh `call_` id.
@@ -111,8 +45,10 @@ fn new_call_id() -> String {
     )
 }
 
-/// Parse a JSON string as a tool call
-fn parse_tool_call_json(json_str: &str) -> Option<ToolCall> {
+/// Parse `{"name": ..., "arguments": ...}` as a tool call.
+///
+/// Object `arguments` are serialized compact. String `arguments` are kept as they are.
+pub(super) fn parse_tool_call_json(json_str: &str) -> Option<ToolCall> {
     let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let obj = v.as_object()?;
     let name = obj.get("name")?.as_str()?;
@@ -139,7 +75,7 @@ fn parse_tool_call_json(json_str: &str) -> Option<ToolCall> {
 /// A parameter value that parses as JSON is kept as that value. Any other is
 /// a string. The result is the same `arguments` JSON object the JSON spelling
 /// carries.
-fn parse_tool_call_xml(body: &str) -> Option<ToolCall> {
+pub(super) fn parse_tool_call_xml(body: &str) -> Option<ToolCall> {
     let body = body.trim();
     let open = body.strip_prefix("<function=")?;
     let name_end = open.find('>')?;
@@ -304,5 +240,22 @@ mod tests {
             calls.unwrap()[0].function.arguments,
             r#"{"note":"a {b} c"}"#
         );
+    }
+
+    #[test]
+    fn bare_json_mid_line_stays_content() {
+        let text = r#"Use {"name": "search", "arguments": {}} to search."#;
+        let (content, calls) = extract_tool_calls(text, &[]);
+        assert!(calls.is_none());
+        assert_eq!(content.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn a_call_id_is_call_and_24_hex_digits() {
+        let (_, calls) = extract_tool_calls(r#"{"name":"f","arguments":{}}"#, &[]);
+        let id = calls.unwrap()[0].id.clone();
+        let hex = id.strip_prefix("call_").unwrap();
+        assert_eq!(hex.len(), 24, "{id}");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
     }
 }

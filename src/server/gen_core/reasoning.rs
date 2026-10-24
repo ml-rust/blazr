@@ -5,6 +5,7 @@
 //! can emit the open tag as its first output. The parser handles both, and
 //! feeds one piece at a time so a stream stays incremental.
 
+use super::tag_prefix::partial_prefix_len;
 use crate::config::ReasoningFormat;
 
 /// Tag pair that brackets reasoning in model output.
@@ -143,15 +144,6 @@ impl ReasoningParser {
             State::AfterClose => (String::new(), String::new()),
         }
     }
-}
-
-/// Length of the longest suffix of `text` that is a strict prefix of `tag`.
-fn partial_prefix_len(text: &str, tag: &str) -> usize {
-    let max = text.len().min(tag.len() - 1);
-    (1..=max)
-        .rev()
-        .find(|&k| text.is_char_boundary(text.len() - k) && text.ends_with(&tag[..k]))
-        .unwrap_or(0)
 }
 
 /// Split a complete output for `format`, or pass it through unsplit when

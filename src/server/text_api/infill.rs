@@ -191,6 +191,7 @@ impl HasSamplingFields for InfillRequest {
             top_k: self.top_k,
             min_p: self.min_p,
             repeat_penalty: None,
+            repeat_last_n: None,
             frequency_penalty: None,
             presence_penalty: None,
             stop: self.stop.clone(),

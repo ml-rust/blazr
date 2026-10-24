@@ -142,6 +142,7 @@ Completions and chat accept these fields. Infill accepts a subset.
 | `top_k`                 | integer          | `0`     | Top-k sampling limit.                                                         |
 | `min_p`                 | number           | `0.05`  | Minimum probability relative to the top token.                                |
 | `repeat_penalty`        | number           | `1.1`   | Repetition penalty.                                                           |
+| `repeat_last_n`         | integer          | `64`    | Recent tokens the repetition penalty covers.                                  |
 | `frequency_penalty`     | number           | `0.0`   | Frequency penalty.                                                            |
 | `presence_penalty`      | number           | `0.0`   | Presence penalty.                                                             |
 | `typical_p`             | number           | `0.0`   | Typical sampling.                                                             |

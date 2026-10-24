@@ -35,6 +35,9 @@ pub struct CompletionRequest {
     pub min_p: Option<f32>,
     #[serde(default)]
     pub repeat_penalty: Option<f32>,
+    /// Recent tokens the repetition penalty covers.
+    #[serde(default)]
+    pub repeat_last_n: Option<usize>,
     #[serde(default)]
     pub frequency_penalty: Option<f32>,
     #[serde(default)]
@@ -145,6 +148,7 @@ impl HasSamplingFields for CompletionRequest {
             top_k: self.top_k,
             min_p: self.min_p,
             repeat_penalty: self.repeat_penalty,
+            repeat_last_n: self.repeat_last_n,
             frequency_penalty: self.frequency_penalty,
             presence_penalty: self.presence_penalty,
             stop: self.stop.clone(),
@@ -199,6 +203,13 @@ mod tests {
             body.extend(extra.clone());
         }
         serde_json::from_value(body).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn repeat_last_n_reaches_the_sampling_params() {
+        assert_eq!(request(json!({})).sampling_params().repeat_last_n, None);
+        let set = request(json!({"repeat_last_n": 16}));
+        assert_eq!(set.sampling_params().repeat_last_n, Some(16));
     }
 
     #[test]

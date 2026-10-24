@@ -99,6 +99,7 @@ impl HasSamplingFields for AnthropicRequest {
             top_k: self.top_k,
             min_p: None,
             repeat_penalty: None,
+            repeat_last_n: None,
             frequency_penalty: None,
             presence_penalty: None,
             stop: self.stop_sequences.clone(),

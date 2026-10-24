@@ -32,6 +32,8 @@ pub struct SamplingParams {
     pub top_k: Option<usize>,
     pub min_p: Option<f32>,
     pub repeat_penalty: Option<f32>,
+    /// Recent tokens the repetition penalty covers.
+    pub repeat_last_n: Option<usize>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
     pub stop: Option<Vec<String>>,
@@ -96,7 +98,7 @@ impl SamplingParams {
             constraint: d.constraint,
             compiled: None,
             lora_adapter: self.lora_adapter.or(d.lora_adapter),
-            repeat_last_n: d.repeat_last_n,
+            repeat_last_n: self.repeat_last_n.unwrap_or(d.repeat_last_n),
             verbose_prompt: d.verbose_prompt,
         }
     }
@@ -165,6 +167,7 @@ mod tests {
             top_k: None,
             min_p: None,
             repeat_penalty: None,
+            repeat_last_n: None,
             frequency_penalty: None,
             presence_penalty: None,
             stop: None,
@@ -216,5 +219,19 @@ mod tests {
         assert_eq!(config.temperature, 0.0);
         assert!(config.stop_sequences.is_empty());
         assert_eq!(config.top_logprobs, 20);
+    }
+
+    #[test]
+    fn repeat_last_n_takes_the_request_value_else_the_default() {
+        let defaults = GenerationConfig {
+            repeat_last_n: 9,
+            ..Default::default()
+        };
+        let set = SamplingParams {
+            repeat_last_n: Some(3),
+            ..params()
+        };
+        assert_eq!(set.into_gen_config(&defaults).repeat_last_n, 3);
+        assert_eq!(params().into_gen_config(&defaults).repeat_last_n, 9);
     }
 }

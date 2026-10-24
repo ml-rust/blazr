@@ -223,3 +223,52 @@ async fn complete_reply(
     apply_keep_alive(state, &model_name, &request.keep_alive).await;
     (StatusCode::OK, Json(response)).into_response()
 }
+
+/// End-to-end runs through the router on a loaded seeded model.
+#[cfg(all(test, not(any(feature = "cuda", feature = "wgpu"))))]
+mod tests {
+    use std::time::Duration;
+
+    use anyhow::{anyhow, Result};
+    use serde_json::json;
+
+    use crate::server::ollama_api::e2e_rig::{Rig, MODEL};
+
+    #[tokio::test]
+    async fn streaming_with_more_than_one_choice_is_a_400() -> Result<()> {
+        let rig = Rig::new().await?;
+        let body = json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+            "n": 2,
+        });
+        let (status, raw) = rig.post("/v1/chat/completions", &body).await?;
+        assert_eq!(status, 400, "{raw}");
+        assert!(raw.contains("streaming supports n = 1"), "{raw}");
+        assert!(raw.contains("invalid_request_error"), "{raw}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_streamed_request_applies_keep_alive_after_its_last_token() -> Result<()> {
+        let rig = Rig::new().await?;
+        let body = json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+            "max_tokens": 3,
+            "temperature": 0,
+            "keep_alive": "0",
+        });
+        let (status, raw) = rig.post("/v1/chat/completions", &body).await?;
+        assert_eq!(status, 200, "{raw}");
+        for _ in 0..200 {
+            if !rig.state.scheduler.is_loaded(MODEL).await {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err(anyhow!("the model is still loaded after the stream ended"))
+    }
+}

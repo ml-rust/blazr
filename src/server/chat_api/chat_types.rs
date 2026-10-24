@@ -137,10 +137,14 @@ impl ChatRequest {
         StreamOptions::include_usage(self.stream_options.as_ref())
     }
 
-    /// Check the sampling fields and `stop`. The handler answers 400 on an error.
+    /// Check the sampling fields, `stop` and `n`. The handler answers 400 on an error.
     pub fn check_fields(&self) -> Result<(), String> {
         validate_generation_params(self.temperature, self.top_p, self.effective_max_tokens())?;
-        check_stop(self.stop.as_deref())
+        check_stop(self.stop.as_deref())?;
+        if self.stream.unwrap_or(false) && self.n.unwrap_or(1) > 1 {
+            return Err("streaming supports n = 1".to_string());
+        }
+        Ok(())
     }
 
     /// Template variables for this request.
@@ -329,6 +333,20 @@ mod tests {
         assert!(five.check_fields().is_err());
         let four = request(json!({"stop": ["1", "2", "3", "4"]}));
         assert!(four.check_fields().is_ok());
+    }
+
+    #[test]
+    fn streaming_with_more_than_one_choice_is_an_error() {
+        let streamed = request(json!({"stream": true, "n": 2}));
+        assert_eq!(
+            streamed.check_fields().unwrap_err(),
+            "streaming supports n = 1"
+        );
+        assert!(request(json!({"stream": true, "n": 1}))
+            .check_fields()
+            .is_ok());
+        assert!(request(json!({"stream": true})).check_fields().is_ok());
+        assert!(request(json!({"n": 2})).check_fields().is_ok());
     }
 
     #[test]

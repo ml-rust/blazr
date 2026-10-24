@@ -91,10 +91,16 @@ pub async fn infill(
         let model_name = request.model.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
 
+        // The keep-alive applies once the last token is out, as on the
+        // non-streaming path.
+        let keep_alive_state = Arc::clone(&state);
+        let keep_alive_model = model_name.clone();
+        let keep_alive = request.keep_alive.clone();
         let slot = DecodeSlot::enter();
         tokio::spawn(async move {
             let _guards = (permit, slot);
             stream_routed(&placement, prompt_tokens, gen_config, tx).await;
+            apply_keep_alive(&keep_alive_state, &keep_alive_model, &keep_alive).await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);

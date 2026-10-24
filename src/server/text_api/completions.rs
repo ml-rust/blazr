@@ -113,10 +113,16 @@ pub async fn completions(
             let _ = tx.try_send(StreamToken::text(prompt.echo, None));
         }
 
+        // The keep-alive applies once the last token is out, as on the
+        // non-streaming path.
+        let keep_alive_state = Arc::clone(&state);
+        let keep_alive_model = model_name.clone();
+        let keep_alive = request.keep_alive.clone();
         let slot = DecodeSlot::enter();
         tokio::spawn(async move {
             let _guards = (permit, slot);
             stream_routed(&placement, prompt.tokens, gen_config, tx).await;
+            apply_keep_alive(&keep_alive_state, &keep_alive_model, &keep_alive).await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -179,5 +185,49 @@ pub async fn completions(
         );
         apply_keep_alive(&state, &model_name, &request.keep_alive).await;
         (StatusCode::OK, Json(response)).into_response()
+    }
+}
+
+/// End-to-end runs through the router on a loaded seeded model.
+#[cfg(all(test, not(any(feature = "cuda", feature = "wgpu"))))]
+mod tests {
+    use std::time::Duration;
+
+    use anyhow::{anyhow, Result};
+    use serde_json::json;
+
+    use crate::server::ollama_api::e2e_rig::{Rig, MODEL};
+
+    #[tokio::test]
+    async fn streaming_with_more_than_one_choice_is_a_400() -> Result<()> {
+        let rig = Rig::new().await?;
+        let body = json!({"model": MODEL, "prompt": "Hi", "stream": true, "n": 2});
+        let (status, raw) = rig.post("/v1/completions", &body).await?;
+        assert_eq!(status, 400, "{raw}");
+        assert!(raw.contains("streaming supports n = 1"), "{raw}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_streamed_request_applies_keep_alive_after_its_last_token() -> Result<()> {
+        let rig = Rig::new().await?;
+        let body = json!({
+            "model": MODEL,
+            "prompt": "Hi",
+            "stream": true,
+            "max_tokens": 3,
+            "temperature": 0,
+            "keep_alive": "0",
+        });
+        let (status, raw) = rig.post("/v1/completions", &body).await?;
+        assert_eq!(status, 200, "{raw}");
+        // The stream closes before the task applies the keep-alive.
+        for _ in 0..200 {
+            if !rig.state.scheduler.is_loaded(MODEL).await {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err(anyhow!("the model is still loaded after the stream ended"))
     }
 }

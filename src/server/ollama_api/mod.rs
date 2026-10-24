@@ -1,7 +1,7 @@
 //! Ollama API: `/api/chat`, `/api/generate`, `/api/embed`, `/api/embeddings`.
 
 #[cfg(all(test, not(any(feature = "cuda", feature = "wgpu"))))]
-mod e2e_rig;
+pub(in crate::server) mod e2e_rig;
 pub(super) mod model_name;
 pub(super) mod ndjson;
 pub(super) mod ollama_chat;

@@ -317,7 +317,7 @@ Generates an assistant reply from a message list.
 | `reasoning_format`                                                  | string            | server default | `deepseek` or `none`. See [Reasoning output](#reasoning-output).                             |
 | `stream`                                                            | boolean           | `false`        | Stream the response as SSE.                                                                  |
 | `stream_options`                                                    | object            | none           | `include_usage: true` adds a usage chunk before `[DONE]`. See [Streaming usage](#streaming-usage). |
-| `n`                                                                 | integer           | `1`            | Number of choices. Non-streaming only.                                                       |
+| `n`                                                                 | integer           | `1`            | Number of choices. Streaming with `n` above `1` returns `400`.                               |
 | `context`                                                           | array of integers | none           | Token IDs decoded and prepended to the prompt.                                               |
 | `lora_adapter`                                                      | string            | none           | Registered adapter of `model`. See [LoRA adapters](#lora-adapters).                          |
 | `grammar`, `response_format`, `keep_alive`, `user`, sampling fields |                   |                | See [Shared request fields](#shared-request-fields).                                         |

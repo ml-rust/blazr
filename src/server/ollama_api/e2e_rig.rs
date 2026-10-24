@@ -12,14 +12,14 @@ use crate::server::handlers::{test_state, AppState};
 use crate::server::routes::api_routes;
 
 /// The name the model loads under.
-pub(super) const MODEL: &str = "m";
+pub(in crate::server) const MODEL: &str = "m";
 /// The name a client sends: Ollama clients add `:latest`.
-pub(super) const REQUESTED: &str = "m:latest";
+pub(in crate::server) const REQUESTED: &str = "m:latest";
 /// The seed of the model's weights.
 const SEED: u64 = 0x011a;
 
 /// The server state and the model directory it searches.
-pub(super) struct Rig {
+pub(in crate::server) struct Rig {
     pub state: Arc<AppState>,
     /// Holds the model directory open for the rig's life.
     _dir: tempfile::TempDir,
@@ -27,7 +27,7 @@ pub(super) struct Rig {
 
 impl Rig {
     /// A server whose model [`MODEL`] is loaded.
-    pub(super) async fn new() -> Result<Self> {
+    pub(in crate::server) async fn new() -> Result<Self> {
         let dir = tempfile::tempdir()?;
         std::fs::create_dir(dir.path().join(MODEL))?;
         std::fs::write(dir.path().join(MODEL).join("config.json"), "{}")?;
@@ -44,7 +44,7 @@ impl Rig {
     }
 
     /// The status and raw body of `POST path` with `body`.
-    pub(super) async fn post(&self, path: &str, body: &Value) -> Result<(u16, String)> {
+    pub(in crate::server) async fn post(&self, path: &str, body: &Value) -> Result<(u16, String)> {
         let request = Request::post(path)
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))?;
@@ -55,7 +55,7 @@ impl Rig {
     }
 
     /// The JSON body of `POST path`, which must answer 200.
-    pub(super) async fn ok(&self, path: &str, body: &Value) -> Result<Value> {
+    pub(in crate::server) async fn ok(&self, path: &str, body: &Value) -> Result<Value> {
         let (status, raw) = self.post(path, body).await?;
         if status != 200 {
             return Err(anyhow!("{path} answered {status}: {raw}"));
@@ -64,7 +64,7 @@ impl Rig {
     }
 
     /// The NDJSON lines of `POST path`, which must answer 200.
-    pub(super) async fn lines(&self, path: &str, body: &Value) -> Result<Vec<Value>> {
+    pub(in crate::server) async fn lines(&self, path: &str, body: &Value) -> Result<Vec<Value>> {
         let (status, raw) = self.post(path, body).await?;
         if status != 200 {
             return Err(anyhow!("{path} answered {status}: {raw}"));

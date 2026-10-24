@@ -11,7 +11,7 @@ use crate::config::{Constraint, ReasoningFormat};
 use crate::model::chat_template::RenderOptions;
 use crate::server::generation::{
     check_stop, resolve_constraint, string_or_array, validate_generation_params, HasSamplingFields,
-    LogprobResult, ResponseFormat, SamplingParams, Usage,
+    LogprobResult, ResponseFormat, SamplingParams, StreamOptions, Usage,
 };
 
 // ── Request/Response types ──
@@ -46,6 +46,9 @@ pub struct ChatRequest {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub stream: Option<bool>,
+    /// `include_usage` adds a usage chunk to a stream. See [`StreamOptions`].
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
     /// One string or up to four.
     #[serde(default, deserialize_with = "string_or_array")]
     pub stop: Option<Vec<String>>,
@@ -119,6 +122,11 @@ impl ChatRequest {
     /// The token limit: `max_completion_tokens` when set, else `max_tokens`.
     pub fn effective_max_tokens(&self) -> Option<usize> {
         self.max_completion_tokens.or(self.max_tokens)
+    }
+
+    /// Whether a stream ends with a usage chunk: `stream_options.include_usage`.
+    pub fn include_usage(&self) -> bool {
+        StreamOptions::include_usage(self.stream_options.as_ref())
     }
 
     /// Check the sampling fields and `stop`. The handler answers 400 on an error.
@@ -305,6 +313,18 @@ mod tests {
         assert!(five.check_fields().is_err());
         let four = request(json!({"stop": ["1", "2", "3", "4"]}));
         assert!(four.check_fields().is_ok());
+    }
+
+    #[test]
+    fn stream_options_sets_include_usage() {
+        let on = request(json!({"stream": true, "stream_options": {"include_usage": true}}));
+        assert!(on.include_usage());
+        assert!(!request(json!({"stream": true})).include_usage());
+        let off = request(json!({"stream_options": {"include_usage": false}}));
+        assert!(!off.include_usage());
+        // A non-streaming request accepts the field and ignores it.
+        let unstreamed = request(json!({"stream_options": {"include_usage": true}}));
+        assert!(unstreamed.check_fields().is_ok());
     }
 
     #[test]

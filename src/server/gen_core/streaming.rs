@@ -10,6 +10,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 
 use super::gen_types::{logprob_entry, LogprobResult};
+use super::stream_usage::{usage_event, ChunkUsage, StreamUsage};
 use crate::engine::{FinishReason, GeneratedToken, TokenLogprob};
 
 /// Token with optional finish reason, sent through the streaming channel
@@ -23,6 +24,9 @@ pub struct StreamToken {
     pub logprob: Option<TokenLogprob>,
     /// The top alternatives of `logprob`'s token, when the request asks.
     pub top_logprobs: Option<Vec<TokenLogprob>>,
+    /// The request's token counts. Every producer sets it on the item that
+    /// carries `finish_reason`, and on no other item.
+    pub usage: Option<StreamUsage>,
 }
 
 impl StreamToken {
@@ -34,7 +38,14 @@ impl StreamToken {
             error: None,
             logprob: None,
             top_logprobs: None,
+            usage: None,
         }
+    }
+
+    /// `self` with the request's token counts `usage`.
+    pub fn with_usage(mut self, usage: StreamUsage) -> Self {
+        self.usage = Some(usage);
+        self
     }
 
     /// An item that reports a generation error and ends the stream.
@@ -109,7 +120,12 @@ pub struct StreamCompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<StreamChoice>,
+    #[serde(skip_serializing_if = "ChunkUsage::is_absent")]
+    pub usage: ChunkUsage,
 }
+
+/// The `object` of a completions stream chunk.
+const COMPLETION_CHUNK_OBJECT: &str = "text_completion.chunk";
 
 /// Create SSE stream from an async token stream (true streaming, no buffering)
 ///
@@ -118,14 +134,20 @@ pub struct StreamCompletionChunk {
 /// so a chunk can carry a token's logprob with empty `delta.text`. The
 /// held text arrives in a later chunk. Every token's entry appears once,
 /// in the chunk of the item that carries it.
+///
+/// With `include_usage` set, every chunk carries `"usage": null`. After the
+/// final chunk, one more chunk with empty `choices` carries the token counts.
+/// A stream that ends on an error sends no usage chunk.
 pub fn create_completion_stream(
     id: String,
     model: String,
     tokens: Pin<Box<dyn Stream<Item = StreamToken> + Send>>,
+    include_usage: bool,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = async_stream::stream! {
         let created = chrono::Utc::now().timestamp();
         let mut tokens = tokens;
+        let usage = ChunkUsage::for_request(include_usage);
 
         while let Some(token) = tokens.next().await {
             if let Some(ref err) = token.error {
@@ -141,7 +163,7 @@ pub fn create_completion_stream(
 
             let chunk = StreamCompletionChunk {
                 id: id.clone(),
-                object: "text_completion.chunk".to_string(),
+                object: COMPLETION_CHUNK_OBJECT.to_string(),
                 created,
                 model: model.clone(),
                 choices: vec![StreamChoice {
@@ -150,6 +172,7 @@ pub fn create_completion_stream(
                     finish_reason: finish_str,
                     logprobs,
                 }],
+                usage,
             };
 
             if let Ok(data) = serde_json::to_string(&chunk) {
@@ -157,6 +180,12 @@ pub fn create_completion_stream(
             }
 
             if is_final {
+                if include_usage {
+                    let evt = usage_event(&id, COMPLETION_CHUNK_OBJECT, created, &model, token.usage);
+                    if let Some(evt) = evt {
+                        yield Ok(evt);
+                    }
+                }
                 break;
             }
         }
@@ -221,10 +250,45 @@ pub(crate) mod sse_test {
         })
     }
 
+    /// The raw SSE body of `sse`.
+    pub(crate) async fn body(sse: impl IntoResponse) -> anyhow::Result<String> {
+        let body = axum::body::to_bytes(sse.into_response().into_body(), usize::MAX).await?;
+        Ok(String::from_utf8(body.to_vec())?)
+    }
+
+    /// Check the tail of a stream that asked for usage.
+    ///
+    /// `got` ends with the usage chunk, then `[DONE]`. The usage chunk has
+    /// `object`, empty `choices` and `usage` equal to `want`. Every chunk
+    /// before it carries `"usage": null`.
+    pub(crate) fn assert_usage_tail(got: &[Value], object: &str, want: super::StreamUsage) {
+        let [chunks @ .., usage, done] = got else {
+            panic!("a usage stream has at least two events: {got:?}");
+        };
+        assert_eq!(*done, json!("[DONE]"));
+        assert_eq!(usage["object"], object, "{usage}");
+        assert_eq!(usage["choices"], json!([]), "{usage}");
+        assert_eq!(
+            usage["usage"],
+            json!({
+                "prompt_tokens": want.prompt_tokens,
+                "completion_tokens": want.completion_tokens,
+                "total_tokens": want.prompt_tokens + want.completion_tokens,
+            })
+        );
+        assert!(!chunks.is_empty(), "content chunks precede the usage chunk");
+        for chunk in chunks {
+            assert_eq!(chunk.get("usage"), Some(&Value::Null), "{chunk}");
+        }
+    }
+
     /// Each `data:` payload of `sse`, in order. `[DONE]` reads as a JSON string.
     pub(crate) async fn events(sse: impl IntoResponse) -> anyhow::Result<Vec<Value>> {
-        let body = axum::body::to_bytes(sse.into_response().into_body(), usize::MAX).await?;
-        let text = String::from_utf8(body.to_vec())?;
+        parse_events(&body(sse).await?)
+    }
+
+    /// Each `data:` payload of the raw SSE body `text`, as [`events`] reads it.
+    pub(crate) fn parse_events(text: &str) -> anyhow::Result<Vec<Value>> {
         text.split("\n\n")
             .filter(|event| !event.trim().is_empty())
             .map(|event| {
@@ -244,7 +308,7 @@ pub(crate) mod sse_test {
 
 #[cfg(test)]
 mod tests {
-    use super::sse_test::{entry, events, expected_entry, feed, token};
+    use super::sse_test::{assert_usage_tail, body, entry, events, expected_entry, feed, token};
     use super::*;
     use serde_json::json;
 
@@ -270,7 +334,7 @@ mod tests {
             ),
             token(3, "Eb", Some(FinishReason::Length)),
         ];
-        let sse = create_completion_stream("c".into(), "m".into(), feed(items));
+        let sse = create_completion_stream("c".into(), "m".into(), feed(items), false);
         let got = events(sse).await?;
 
         assert_eq!(got.len(), 4, "{got:?}");
@@ -288,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn completion_without_logprobs_has_no_member() -> anyhow::Result<()> {
         let items = vec![StreamToken::text("a".into(), Some(FinishReason::Eos))];
-        let sse = create_completion_stream("c".into(), "m".into(), feed(items));
+        let sse = create_completion_stream("c".into(), "m".into(), feed(items), false);
         let got = events(sse).await?;
         assert_eq!(got.len(), 2);
         assert!(got[0]["choices"][0].get("logprobs").is_none());
@@ -303,12 +367,46 @@ mod tests {
             StreamToken::error("decode error".into()),
             token(2, "never sent", None),
         ];
-        let sse = create_completion_stream("c".into(), "m".into(), feed(items));
+        let sse = create_completion_stream("c".into(), "m".into(), feed(items), true);
         let got = events(sse).await?;
-        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(
+            got.len(),
+            3,
+            "an error stream sends no usage chunk: {got:?}"
+        );
         assert_eq!(got[1]["error"]["message"], "decode error");
         assert_eq!(got[1]["error"]["type"], "server_error");
         assert_eq!(got[2], json!("[DONE]"));
+        Ok(())
+    }
+
+    /// Two content chunks, the final one with the counts its producer set.
+    fn finished_items() -> Vec<StreamToken> {
+        vec![
+            token(1, "a", None),
+            token(2, "b", Some(FinishReason::Stop)).with_usage(StreamUsage::new(5, 3)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn include_usage_adds_a_usage_chunk_before_done() -> anyhow::Result<()> {
+        let sse = create_completion_stream("c".into(), "m".into(), feed(finished_items()), true);
+        let got = events(sse).await?;
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(got[1]["choices"][0]["finish_reason"], "stop");
+        assert_usage_tail(&got, "text_completion.chunk", StreamUsage::new(5, 3));
+        assert_eq!(got[2]["id"], "c");
+        assert_eq!(got[2]["model"], "m");
+        assert_eq!(got[2]["created"], got[0]["created"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn without_include_usage_no_chunk_names_usage() -> anyhow::Result<()> {
+        let sse = create_completion_stream("c".into(), "m".into(), feed(finished_items()), false);
+        let raw = body(sse).await?;
+        assert!(!raw.contains("usage"), "{raw}");
+        assert_eq!(raw.matches("data:").count(), 3, "{raw}");
         Ok(())
     }
 }

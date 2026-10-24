@@ -6,6 +6,7 @@
 
 use std::time::Instant;
 
+use super::stream_usage::StreamUsage;
 use crate::server::metrics;
 
 /// The clock and token count of one streamed request.
@@ -42,6 +43,11 @@ impl StreamMetrics {
         self.last_token = now;
     }
 
+    /// The token counts so far: the prompt ids and every recorded token.
+    pub fn usage(&self) -> StreamUsage {
+        StreamUsage::new(self.prompt_tokens, self.completion_tokens)
+    }
+
     /// Record the end of the stream: end-to-end time, token counts and
     /// throughput. A stream with no token records nothing.
     pub fn finish(self) {
@@ -71,6 +77,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
             stream.token();
         }
+        assert_eq!(stream.usage(), StreamUsage::new(5, 3));
         stream.finish();
         let rendered = recorder.render();
         let itl = series_value(&rendered, &format!("{INTER_TOKEN_LATENCY}_count"), &[]);

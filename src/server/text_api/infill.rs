@@ -98,7 +98,7 @@ pub async fn infill(
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        create_completion_stream(id, model_name, Box::pin(rx_stream)).into_response()
+        create_completion_stream(id, model_name, Box::pin(rx_stream), false).into_response()
     } else {
         let _slot = DecodeSlot::enter();
         let _permit = permit;

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::completion_prompt::CompletionPrompt;
 use crate::server::generation::{
     check_stop, string_or_array, validate_generation_params, HasSamplingFields, LogprobResult,
-    LogprobsRequest, ResponseFormat, SamplingParams, Usage,
+    LogprobsRequest, ResponseFormat, SamplingParams, StreamOptions, Usage,
 };
 
 #[derive(Deserialize)]
@@ -41,6 +41,9 @@ pub struct CompletionRequest {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub stream: Option<bool>,
+    /// `include_usage` adds a usage chunk to a stream. See [`StreamOptions`].
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
     /// One string or up to four.
     #[serde(default, deserialize_with = "string_or_array")]
     pub stop: Option<Vec<String>>,
@@ -102,6 +105,11 @@ impl CompletionRequest {
     /// Choices per prompt: `n`, at least 1.
     pub fn choices_per_prompt(&self) -> usize {
         self.n.unwrap_or(1).max(1)
+    }
+
+    /// Whether a stream ends with a usage chunk: `stream_options.include_usage`.
+    pub fn include_usage(&self) -> bool {
+        StreamOptions::include_usage(self.stream_options.as_ref())
     }
 
     /// Check the fields that need no model. The handler answers 400 on an error.
@@ -264,6 +272,16 @@ mod tests {
         assert!(request(json!({"n": 2, "prompt": ["a", "b"]}))
             .check_fields()
             .is_ok());
+    }
+
+    #[test]
+    fn stream_options_sets_include_usage() {
+        let on = request(json!({"stream": true, "stream_options": {"include_usage": true}}));
+        assert!(on.include_usage());
+        assert!(!request(json!({"stream": true})).include_usage());
+        // A non-streaming request accepts the field and ignores it.
+        let unstreamed = request(json!({"stream_options": {"include_usage": true}}));
+        assert!(unstreamed.check_fields().is_ok());
     }
 
     #[test]

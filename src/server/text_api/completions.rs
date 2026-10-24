@@ -120,7 +120,8 @@ pub async fn completions(
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        create_completion_stream(id, model_name, Box::pin(rx_stream)).into_response()
+        let include_usage = request.include_usage();
+        create_completion_stream(id, model_name, Box::pin(rx_stream), include_usage).into_response()
     } else {
         let _slot = DecodeSlot::enter();
         let _permit = permit;

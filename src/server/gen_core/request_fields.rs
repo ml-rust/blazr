@@ -1,6 +1,25 @@
-//! Request field forms that chat and completions share: `stop` and `logprobs`.
+//! Request field forms that chat and completions share: `stop`, `logprobs`
+//! and `stream_options`.
 
 use serde::{Deserialize, Deserializer};
+
+/// The `stream_options` field of a streamed request.
+///
+/// A non-streaming request ignores it.
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamOptions {
+    /// Send a usage chunk with empty `choices` before `[DONE]`.
+    /// Every other chunk then carries `"usage": null`.
+    #[serde(default)]
+    pub include_usage: Option<bool>,
+}
+
+impl StreamOptions {
+    /// Whether `options` asks for the usage chunk. Absent or `null` reads as no.
+    pub fn include_usage(options: Option<&Self>) -> bool {
+        options.and_then(|o| o.include_usage).unwrap_or(false)
+    }
+}
 
 /// The most stop sequences a request can carry.
 pub const MAX_STOP_SEQUENCES: usize = 4;
@@ -129,6 +148,40 @@ mod tests {
         assert_eq!(LogprobsRequest::Flag(true).resolve(), (true, None));
         assert_eq!(LogprobsRequest::Top(0).resolve(), (true, Some(0)));
         assert_eq!(LogprobsRequest::Top(5).resolve(), (true, Some(5)));
+    }
+
+    #[derive(Deserialize)]
+    struct StreamBody {
+        #[serde(default)]
+        stream_options: Option<StreamOptions>,
+    }
+
+    fn include_usage(json: &str) -> bool {
+        let parsed: StreamBody = serde_json::from_str(json).unwrap_or_else(|e| panic!("{e}"));
+        StreamOptions::include_usage(parsed.stream_options.as_ref())
+    }
+
+    #[test]
+    fn include_usage_reads_true_only_when_set() {
+        assert!(include_usage(
+            r#"{"stream_options":{"include_usage":true}}"#
+        ));
+        assert!(!include_usage(
+            r#"{"stream_options":{"include_usage":false}}"#
+        ));
+        assert!(!include_usage(
+            r#"{"stream_options":{"include_usage":null}}"#
+        ));
+        assert!(!include_usage(r#"{"stream_options":{}}"#));
+        assert!(!include_usage(r#"{"stream_options":null}"#));
+        assert!(!include_usage("{}"));
+    }
+
+    #[test]
+    fn a_non_boolean_include_usage_is_a_parse_error() {
+        let parsed =
+            serde_json::from_str::<StreamBody>(r#"{"stream_options":{"include_usage":1}}"#);
+        assert!(parsed.is_err());
     }
 
     #[test]

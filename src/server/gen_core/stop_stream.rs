@@ -79,6 +79,10 @@ pub async fn stream_images_with_stop_sequences(
 ///
 /// A stream that ends with no finish token closes with `Length`, as the
 /// non-streaming collector reads it.
+///
+/// The item that carries the finish reason carries the token counts: the
+/// prompt ids and every engine token, held-back stop text included. A
+/// closed `tx` sends no final item.
 async fn forward_with_stop_sequences<S>(
     stream: S,
     prompt_len: usize,
@@ -105,7 +109,7 @@ async fn forward_with_stop_sequences<S>(
                 let item = StreamToken::text(cut.text, cut.finish)
                     .with_logprobs(&token, gen_config.logprobs);
                 if cut.finish.is_some() {
-                    let _ = tx.send(item).await;
+                    let _ = tx.send(item.with_usage(metrics.usage())).await;
                     ended = true;
                     break;
                 }
@@ -128,9 +132,8 @@ async fn forward_with_stop_sequences<S>(
     if !ended {
         // The stream ended without a final token: flush the held-back text.
         let tail = matcher.finish();
-        let _ = tx
-            .send(StreamToken::text(tail, Some(FinishReason::Length)))
-            .await;
+        let close = StreamToken::text(tail, Some(FinishReason::Length)).with_usage(metrics.usage());
+        let _ = tx.send(close).await;
     }
     metrics.finish();
 }
@@ -139,6 +142,7 @@ async fn forward_with_stop_sequences<S>(
 mod tests {
     use super::*;
     use crate::engine::FinishReason;
+    use crate::server::stream_usage::StreamUsage;
 
     fn tok(
         text: &str,
@@ -241,6 +245,48 @@ mod tests {
             texts,
             ["a", "ENx", ""],
             "held tokens send nothing without logprobs"
+        );
+    }
+
+    /// The token counts of each item, in order.
+    async fn usages(
+        tokens: Vec<anyhow::Result<crate::engine::GeneratedToken>>,
+        stops: &[&str],
+    ) -> Vec<Option<StreamUsage>> {
+        forward_items(tokens, stops, false)
+            .await
+            .into_iter()
+            .map(|t| t.usage)
+            .collect()
+    }
+
+    /// Only the final item carries counts. Held-back and stop tokens count.
+    #[tokio::test]
+    async fn the_final_item_carries_every_generated_token() {
+        let counts = StreamUsage::new(3, 3);
+        let stop = usages(
+            vec![tok("hi E", None), tok("N", None), tok("D!", None)],
+            &["END"],
+        )
+        .await;
+        assert_eq!(stop, vec![None, Some(counts)], "stop sequence");
+
+        let eos = usages(
+            vec![
+                tok("a", None),
+                tok("b", None),
+                tok("c", Some(FinishReason::Eos)),
+            ],
+            &[],
+        )
+        .await;
+        assert_eq!(eos, vec![None, None, Some(counts)], "engine finish");
+
+        let ended = usages(vec![tok("x EN", None), tok("D", None)], &["ENDX"]).await;
+        assert_eq!(
+            ended,
+            vec![None, Some(StreamUsage::new(3, 2))],
+            "a stream end with held text closes with the counts"
         );
     }
 

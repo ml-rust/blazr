@@ -39,6 +39,7 @@ pub async fn stream_routed(
 /// The scheduler's engine applies the stop sequences, the `max_tokens`
 /// clamp and the finish reasons, so no second stop pass runs here. With
 /// `gen_config.logprobs` set, each item carries its token's logprobs.
+/// The item that carries the finish reason carries the token counts.
 ///
 /// A closed `tx` means the client left. This function then returns, which
 /// drops the request's handle, and the handle's `Drop` cancels the request.
@@ -71,8 +72,11 @@ pub async fn stream_via_scheduler(
             Some(Ok(token)) => {
                 metrics.token();
                 let finished = token.finish_reason.is_some();
-                let item = StreamToken::text(token.text.clone(), token.finish_reason)
+                let mut item = StreamToken::text(token.text.clone(), token.finish_reason)
                     .with_logprobs(&token, logprobs);
+                if finished {
+                    item = item.with_usage(metrics.usage());
+                }
                 if tx.send(item).await.is_err() || finished {
                     break;
                 }
@@ -84,7 +88,8 @@ pub async fn stream_via_scheduler(
             }
             None => {
                 // The engine closed the stream with no finish token.
-                let close = StreamToken::text(String::new(), Some(FinishReason::Length));
+                let close = StreamToken::text(String::new(), Some(FinishReason::Length))
+                    .with_usage(metrics.usage());
                 let _ = tx.send(close).await;
                 break;
             }
@@ -104,6 +109,7 @@ mod tests {
         alone_tokens, drain, free_blocks, greedy, rig, tick, Rig, POOL,
     };
     use crate::engine::{GeneratedToken, RequestHandle, RequestRegistry};
+    use crate::server::stream_usage::StreamUsage;
     use crate::server::streaming::{create_completion_stream, sse_test};
 
     /// Logprobs of the two paths agree to this much.
@@ -194,6 +200,39 @@ mod tests {
         let items = stream(&mut rig, &prompt, split_stop).await?;
         assert_eq!(read(&items)?, expected);
         assert!(!rig.scheduler.has_work());
+        Ok(())
+    }
+
+    /// The final item's counts equal the non-streaming `usage`, on a length
+    /// finish and on a stop sequence. The SSE stream sends them as its usage chunk.
+    #[tokio::test]
+    async fn streamed_usage_matches_the_non_streaming_counts() -> Result<()> {
+        let mut rig = rig(POOL)?;
+        let prompt = [1, 2, 3];
+        let alone = alone_tokens(&rig.executor, &prompt, &greedy(6)).await?;
+        let text: String = alone.iter().map(|t| t.text.as_str()).collect();
+        if text.len() != alone.len() || !text.is_ascii() {
+            return Err(anyhow!("{text:?} is not one ASCII character per token"));
+        }
+        let split_stop = GenerationConfig {
+            stop_sequences: vec![text[1..3].to_string()],
+            ..greedy(6)
+        };
+        for cfg in [greedy(6), greedy(1), split_stop] {
+            let result = rig.executor.generate_text(&prompt, &cfg).await?;
+            let want = StreamUsage::new(result.prompt_tokens, result.completion_tokens);
+            let items = stream(&mut rig, &prompt, cfg).await?;
+            let (last, rest) = items
+                .split_last()
+                .ok_or_else(|| anyhow!("the stream sent no item"))?;
+            assert_eq!(last.usage, Some(want), "{:?}", result.finish_reason);
+            assert!(rest.iter().all(|t| t.usage.is_none()));
+
+            let tokens = Box::pin(futures::stream::iter(items));
+            let sse = create_completion_stream("c".into(), "m".into(), tokens, true);
+            let events = sse_test::events(sse).await?;
+            sse_test::assert_usage_tail(&events, "text_completion.chunk", want);
+        }
         Ok(())
     }
 
@@ -302,7 +341,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         stream_via_scheduler(&scheduler, vec![1, 2], greedy(8), tx).await;
         let tokens = Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx));
-        let sse = create_completion_stream("c".into(), "m".into(), tokens);
+        let sse = create_completion_stream("c".into(), "m".into(), tokens, false);
         let events = sse_test::events(sse).await?;
 
         assert_eq!(events.len(), 3, "{events:?}");

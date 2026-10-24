@@ -15,6 +15,7 @@ use std::pin::Pin;
 
 use crate::engine::FinishReason;
 use crate::server::reasoning::ReasoningParser;
+use crate::server::stream_usage::StreamUsage;
 use crate::server::streaming::StreamToken;
 
 /// The Anthropic name for a finish reason.
@@ -150,7 +151,16 @@ impl EventBuilder {
     }
 
     /// The closing events for a run that ended with `reason`.
-    fn finish(&mut self, reason: Option<FinishReason>) -> Vec<(&'static str, Value)> {
+    ///
+    /// `usage` is the final item's token counts. Its `completion_tokens`
+    /// counts every generated token, held-back stop text included. Without
+    /// it, the count is the number of items fed.
+    fn finish(
+        &mut self,
+        reason: Option<FinishReason>,
+        usage: Option<StreamUsage>,
+    ) -> Vec<(&'static str, Value)> {
+        let output_tokens = usage.map_or(self.output_tokens, |u| u.completion_tokens);
         let mut events = Vec::new();
         for index in [self.thinking_index.take(), self.text_index.take()]
             .into_iter()
@@ -169,7 +179,7 @@ impl EventBuilder {
                     "stop_reason": reason.map(stop_reason),
                     "stop_sequence": Value::Null,
                 },
-                "usage": {"output_tokens": self.output_tokens},
+                "usage": {"output_tokens": output_tokens},
             }),
         ));
         events.push(("message_stop", json!({"type": "message_stop"})));
@@ -216,6 +226,7 @@ pub(in crate::server) fn create_message_stream(
         }
 
         let mut reason = None;
+        let mut usage = None;
         while let Some(token) = tokens.next().await {
             if let Some(ref err) = token.error {
                 let (name, payload) = error_event(err);
@@ -225,6 +236,7 @@ pub(in crate::server) fn create_message_stream(
                 return;
             }
             reason = token.finish_reason;
+            usage = token.usage;
             for (name, payload) in builder.feed(&token) {
                 if let Some(event) = sse(name, &payload) {
                     yield Ok(event);
@@ -235,7 +247,7 @@ pub(in crate::server) fn create_message_stream(
             }
         }
 
-        for (name, payload) in builder.finish(reason) {
+        for (name, payload) in builder.finish(reason, usage) {
             if let Some(event) = sse(name, &payload) {
                 yield Ok(event);
             }
@@ -272,13 +284,23 @@ mod tests {
         let second = builder.feed(&token(" there", None));
         assert_eq!(names(&second), ["content_block_delta"]);
         assert_eq!(second[0].1["delta"]["text"], " there");
-        let end = builder.finish(Some(FinishReason::Stop));
+        let end = builder.finish(Some(FinishReason::Stop), None);
         assert_eq!(
             names(&end),
             ["content_block_stop", "message_delta", "message_stop"]
         );
         assert_eq!(end[1].1["delta"]["stop_reason"], "end_turn");
         assert_eq!(end[1].1["usage"]["output_tokens"], 2);
+    }
+
+    /// The producer's count wins over the item count: held-back stop
+    /// tokens send no item but still count.
+    #[test]
+    fn output_tokens_come_from_the_final_item_counts() {
+        let mut builder = EventBuilder::new("msg_5".into(), "m".into(), 7, None);
+        builder.feed(&token("Hello", Some(FinishReason::Stop)));
+        let end = builder.finish(Some(FinishReason::Stop), Some(StreamUsage::new(7, 4)));
+        assert_eq!(end[1].1["usage"]["output_tokens"], 4);
     }
 
     /// Reasoning text opens a thinking block that closes when the reply
@@ -306,7 +328,7 @@ mod tests {
         assert_eq!(reply[0].1["index"], 0);
         assert_eq!(reply[1].1["index"], 1);
         assert_eq!(reply[2].1["delta"]["text"], "done");
-        let end = builder.finish(Some(FinishReason::Length));
+        let end = builder.finish(Some(FinishReason::Length), None);
         assert_eq!(
             names(&end),
             ["content_block_stop", "message_delta", "message_stop"]
@@ -321,7 +343,7 @@ mod tests {
         let parser = ReasoningParser::new(ReasoningTags::THINK, true);
         let mut builder = EventBuilder::new("msg_3".into(), "m".into(), 1, Some(parser));
         builder.feed(&token("still thinking", None));
-        let end = builder.finish(Some(FinishReason::Length));
+        let end = builder.finish(Some(FinishReason::Length), None);
         assert_eq!(
             names(&end),
             ["content_block_stop", "message_delta", "message_stop"]

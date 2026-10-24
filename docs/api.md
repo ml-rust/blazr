@@ -71,6 +71,26 @@ With `logprobs` set, each completions and chat chunk carries `choices[0].logprob
 {"id":"cmpl-3f2a9c1e-0000-4000-8000-000000000001","object":"text_completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[{"index":0,"delta":{"text":" Paris"},"finish_reason":null,"logprobs":{"content":[{"token":" Paris","logprob":-0.31,"bytes":[32,80,97,114,105,115],"top_logprobs":[]}]}}]}
 ```
 
+### Streaming usage
+
+Completions and chat streams take `"stream_options": {"include_usage": true}`. Infill and Anthropic streams do not.
+
+- Every chunk carries `"usage": null`.
+- After the final `finish_reason` chunk, one more chunk has `"choices": []` and `usage` set to `prompt_tokens`, `completion_tokens`, and `total_tokens`. Then `data: [DONE]` follows.
+- The counts match the non-streaming `usage`. `completion_tokens` counts every generated token, the tokens of a matched stop sequence included.
+- A forced tool-call stream sends the usage chunk after its `tool_calls` finish chunk.
+- A stream that ends on a generation error sends no usage chunk. A client that disconnects receives nothing more.
+- `include_usage` absent, `null`, or `false` leaves every chunk without a `usage` member.
+- A non-streaming request accepts `stream_options` and ignores it.
+
+```
+data: {"id":"chatcmpl-6b1d2e3f-0000-4000-8000-000000000002","object":"chat.completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-6b1d2e3f-0000-4000-8000-000000000002","object":"chat.completion.chunk","created":1767225600,"model":"llama-3.2-1b","choices":[],"usage":{"prompt_tokens":31,"completion_tokens":3,"total_tokens":34}}
+
+data: [DONE]
+```
+
 ## Endpoint index
 
 | Method    | Path                         | Purpose                            | Gate          |
@@ -187,6 +207,7 @@ Generates text from a prompt.
 | `model`           | string            | required | Model name.                                                             |
 | `prompt`          | string, array of strings, array of integers, or array of integer arrays | required | Prompt text, or token IDs that skip the tokenizer. An ID at or above the vocabulary size returns `400`. |
 | `stream`          | boolean           | `false`  | Stream the response as SSE.                                             |
+| `stream_options`  | object            | none     | `include_usage: true` adds a usage chunk before `[DONE]`. See [Streaming usage](#streaming-usage). |
 | `n`               | integer           | `1`      | Choices per prompt. Streaming with `n` above `1` returns `400`.         |
 | `best_of`         | integer           | none     | Must not exceed `n`. A larger value returns `400`.                      |
 | `echo`            | boolean           | `false`  | Prepend the prompt to each choice. Streaming sends it as the first chunk. Token prompts echo as decoded text. |
@@ -258,7 +279,7 @@ With `"stream": true`, each event has this shape. The stream ends with `data: [D
 }
 ```
 
-The final chunk sets `finish_reason` to `stop` or `length`. See [Streaming logprobs](#streaming-logprobs) for `logprobs`.
+The final chunk sets `finish_reason` to `stop` or `length`. See [Streaming logprobs](#streaming-logprobs) for `logprobs` and [Streaming usage](#streaming-usage) for `stream_options`.
 
 ```bash
 curl -N http://localhost:8080/v1/completions \
@@ -286,6 +307,7 @@ Generates an assistant reply from a message list.
 | `chat_template_kwargs`                                              | object            | none           | Extra template variables. Passed to the template as given.                                   |
 | `reasoning_format`                                                  | string            | server default | `deepseek` or `none`. See [Reasoning output](#reasoning-output).                             |
 | `stream`                                                            | boolean           | `false`        | Stream the response as SSE.                                                                  |
+| `stream_options`                                                    | object            | none           | `include_usage: true` adds a usage chunk before `[DONE]`. See [Streaming usage](#streaming-usage). |
 | `n`                                                                 | integer           | `1`            | Number of choices. Non-streaming only.                                                       |
 | `context`                                                           | array of integers | none           | Token IDs decoded and prepended to the prompt.                                               |
 | `lora_adapter`                                                      | string            | none           | Registered adapter of `model`. See [LoRA adapters](#lora-adapters).                          |
@@ -361,7 +383,7 @@ Example values are illustrative.
 
 ### Streaming chunk
 
-Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`, `content`, or `reasoning_content`, and only the fields with a value appear. `finish_reason` appears only on the final chunk. See [Streaming logprobs](#streaming-logprobs) for `logprobs`.
+Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`, `content`, or `reasoning_content`, and only the fields with a value appear. `finish_reason` appears only on the final chunk. See [Streaming logprobs](#streaming-logprobs) for `logprobs` and [Streaming usage](#streaming-usage) for `stream_options`.
 
 ```json
 {

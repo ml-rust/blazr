@@ -226,6 +226,7 @@ pub async fn chat_completions(
 
     if request.stream.unwrap_or(false) {
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+        let include_usage = request.include_usage();
         let model_name = request.model;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
 
@@ -240,10 +241,11 @@ pub async fn chat_completions(
         let rx_stream = Box::pin(rx_stream);
         if tool_choice.forces_call() {
             // A forced call has no tool-call deltas until the output ends.
-            create_tool_call_stream(id, model_name, rx_stream, parser, visible_tools.to_vec())
+            let declared = visible_tools.to_vec();
+            create_tool_call_stream(id, model_name, rx_stream, parser, declared, include_usage)
                 .into_response()
         } else {
-            create_chat_stream(id, model_name, rx_stream, parser).into_response()
+            create_chat_stream(id, model_name, rx_stream, parser, include_usage).into_response()
         }
     } else {
         let _slot = DecodeSlot::enter();

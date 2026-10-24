@@ -8,6 +8,7 @@ pub(super) mod reasoning;
 pub(super) mod request_fields;
 pub(super) mod stop_stream;
 pub(super) mod stream_metrics;
+pub(super) mod stream_usage;
 pub(super) mod streaming;
 
 pub use chat_stream::create_chat_stream;

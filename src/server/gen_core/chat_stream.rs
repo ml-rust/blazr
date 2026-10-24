@@ -9,6 +9,7 @@ use std::pin::Pin;
 
 use super::gen_types::LogprobResult;
 use super::reasoning::ReasoningParser;
+use super::stream_usage::{usage_event, ChunkUsage};
 use super::streaming::{error_event, StreamToken};
 
 /// Chat completion streaming delta
@@ -55,7 +56,12 @@ pub struct ChatStreamChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<ChatStreamChoice>,
+    #[serde(skip_serializing_if = "ChunkUsage::is_absent")]
+    pub usage: ChunkUsage,
 }
+
+/// The `object` of a chat stream chunk.
+pub(in crate::server) const CHAT_CHUNK_OBJECT: &str = "chat.completion.chunk";
 
 /// Create SSE stream for chat completions (true streaming, no buffering).
 ///
@@ -68,22 +74,29 @@ pub struct ChatStreamChunk {
 /// token arrives, with an empty or partial `delta`. The held text follows
 /// in a later chunk. No entry is dropped or sent twice. The final chunk
 /// carries the last token's entry beside its `finish_reason`.
+///
+/// With `include_usage` set, every chunk carries `"usage": null`. After the
+/// final chunk, one more chunk with empty `choices` carries the token counts.
+/// A stream that ends on an error sends no usage chunk.
 pub fn create_chat_stream(
     id: String,
     model: String,
     tokens: Pin<Box<dyn Stream<Item = StreamToken> + Send>>,
     reasoning: Option<ReasoningParser>,
+    include_usage: bool,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = async_stream::stream! {
         let created = chrono::Utc::now().timestamp();
         let mut tokens = tokens;
         let mut reasoning = reasoning;
+        let usage = ChunkUsage::for_request(include_usage);
         let chunk = |delta, finish_reason, logprobs| ChatStreamChunk {
             id: id.clone(),
-            object: "chat.completion.chunk".to_string(),
+            object: CHAT_CHUNK_OBJECT.to_string(),
             created,
             model: model.clone(),
             choices: vec![ChatStreamChoice::new(delta, finish_reason, logprobs)],
+            usage,
         };
 
         // First chunk with role
@@ -137,6 +150,12 @@ pub fn create_chat_stream(
             }
 
             if is_final {
+                if include_usage {
+                    let evt = usage_event(&id, CHAT_CHUNK_OBJECT, created, &model, token.usage);
+                    if let Some(evt) = evt {
+                        yield Ok(evt);
+                    }
+                }
                 break;
             }
         }
@@ -152,7 +171,10 @@ mod tests {
     use super::*;
     use crate::engine::FinishReason;
     use crate::server::reasoning::ReasoningTags;
-    use crate::server::streaming::sse_test::{entry, events, expected_entry, feed, token};
+    use crate::server::stream_usage::StreamUsage;
+    use crate::server::streaming::sse_test::{
+        assert_usage_tail, body, entry, events, expected_entry, feed, token,
+    };
     use serde_json::json;
 
     /// `<th` and `</` sit inside the reasoning tags, so the parser holds
@@ -169,7 +191,7 @@ mod tests {
             })
             .collect();
         let parser = ReasoningParser::new(ReasoningTags::THINK, false);
-        let sse = create_chat_stream("c".into(), "m".into(), feed(items), Some(parser));
+        let sse = create_chat_stream("c".into(), "m".into(), feed(items), Some(parser), false);
         let got = events(sse).await?;
 
         assert_eq!(got.len(), 2 + pieces.len(), "{got:?}");
@@ -199,7 +221,7 @@ mod tests {
             StreamToken::text("ink>a</think>b".into(), Some(FinishReason::Eos)),
         ];
         let parser = ReasoningParser::new(ReasoningTags::THINK, false);
-        let sse = create_chat_stream("c".into(), "m".into(), feed(items), Some(parser));
+        let sse = create_chat_stream("c".into(), "m".into(), feed(items), Some(parser), false);
         let got = events(sse).await?;
         assert_eq!(got.len(), 3, "{got:?}");
         assert_eq!(
@@ -216,11 +238,54 @@ mod tests {
             token(1, "a", None),
             StreamToken::error("decode error".into()),
         ];
-        let sse = create_chat_stream("c".into(), "m".into(), feed(items), None);
+        let sse = create_chat_stream("c".into(), "m".into(), feed(items), None, true);
         let got = events(sse).await?;
-        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(
+            got.len(),
+            4,
+            "an error stream sends no usage chunk: {got:?}"
+        );
         assert_eq!(got[2]["error"]["message"], "decode error");
         assert_eq!(got[3], json!("[DONE]"));
+        Ok(())
+    }
+
+    /// A held-back reasoning prefix, then a final item with its producer's counts.
+    fn finished_items() -> Vec<StreamToken> {
+        vec![
+            StreamToken::text("<th".into(), None),
+            StreamToken::text("ink>a</think>b".into(), Some(FinishReason::Stop))
+                .with_usage(StreamUsage::new(9, 2)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn include_usage_adds_a_usage_chunk_before_done() -> anyhow::Result<()> {
+        let parser = ReasoningParser::new(ReasoningTags::THINK, false);
+        let items = feed(finished_items());
+        let sse = create_chat_stream("c".into(), "m".into(), items, Some(parser), true);
+        let got = events(sse).await?;
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(got[0]["choices"][0]["delta"], json!({"role": "assistant"}));
+        assert_eq!(got[1]["choices"][0]["finish_reason"], "stop");
+        assert_usage_tail(&got, "chat.completion.chunk", StreamUsage::new(9, 2));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn without_include_usage_no_chunk_names_usage() -> anyhow::Result<()> {
+        let parser = ReasoningParser::new(ReasoningTags::THINK, false);
+        let items = feed(finished_items());
+        let raw = body(create_chat_stream(
+            "c".into(),
+            "m".into(),
+            items,
+            Some(parser),
+            false,
+        ))
+        .await?;
+        assert!(!raw.contains("usage"), "{raw}");
+        assert_eq!(raw.matches("data:").count(), 3, "{raw}");
         Ok(())
     }
 }

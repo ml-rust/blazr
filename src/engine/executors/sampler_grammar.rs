@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_json_schema_run_ends_by_eos_on_a_valid_instance() -> Result<()> {
-        let exec = full_vocab_executor(None)?;
+        let exec = std::sync::Arc::new(full_vocab_executor(None)?);
         for (temperature, seed) in [(0.0, None), (0.7, Some(11))] {
             let cfg = GenerationConfig {
                 max_tokens: 40,
@@ -210,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_object_mode_yields_an_object() -> Result<()> {
-        let exec = full_vocab_executor(None)?;
+        let exec = std::sync::Arc::new(full_vocab_executor(None)?);
         let cfg = GenerationConfig {
             max_tokens: 40,
             repeat_penalty: 1.0,

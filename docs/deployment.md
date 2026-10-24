@@ -342,7 +342,7 @@ CORS is enabled by default. With `server.cors_origins` empty, the server allows 
 | Limit                  | Default                  | Key                           | Exceeded response                     |
 | ---------------------- | ------------------------ | ----------------------------- | ------------------------------------- |
 | Request body           | 10 MB (`10485760` bytes) | `server.max_body_size`        | `413 Payload Too Large`               |
-| Concurrent requests    | 16                       | `server.max_concurrent_requests` | Extra requests wait. No error.     |
+| Concurrent requests    | 16                       | `server.max_concurrent_requests` | Extra requests wait. No error. An open stream holds its slot. |
 | Request timeout        | 300 seconds              | `server.request_timeout_secs` | `408 Request Timeout`                 |
 | In-flight token budget | `0`, unlimited           | `server.max_inflight_tokens`  | `503` with `retry-after: 5`, when set |
 

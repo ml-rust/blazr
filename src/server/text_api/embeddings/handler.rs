@@ -15,7 +15,7 @@ use crate::engine::pooling::{pool_cls, pool_last, pool_mean};
 use crate::engine::Executor;
 use crate::server::encoding::encode_f32_base64;
 use crate::server::generation::{error_response, policy_error_response};
-use crate::server::handlers::{lookup_error_response, AppState, ServerRuntime};
+use crate::server::handlers::{lookup_error_response, AppState, ServerRuntime, VisionEmbedder};
 use crate::server::multimodal::decode_image;
 
 /// The last hidden states of `ids`, computed on a blocking thread so the
@@ -32,6 +32,25 @@ pub(crate) async fn hidden_states(
     tokio::task::spawn_blocking(move || executor.get_embeddings(&ids))
         .await
         .map_err(|e| anyhow::anyhow!("the embedding task stopped: {e}"))?
+}
+
+/// The embedding of one encoded image, computed on a blocking thread so the
+/// encoder forward never holds an async worker.
+///
+/// # Errors
+///
+/// The encoder's error, or the blocking task's when it panicked.
+async fn image_embedding(
+    embedder: Arc<VisionEmbedder>,
+    image: Vec<u8>,
+) -> anyhow::Result<Vec<f32>> {
+    tokio::task::spawn_blocking(move || {
+        let device = <ServerRuntime as boostr::Runtime>::default_device();
+        embedder.embed_bytes_default(&image, &device)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("the image embedding task stopped: {e}"))?
+    .map_err(anyhow::Error::from)
 }
 
 fn bad_request(message: &str) -> Response {
@@ -150,9 +169,7 @@ pub async fn embeddings(
                     Ok(d) => d,
                     Err(e) => return bad_request(&format!("Failed to decode image: {e}")),
                 };
-                let device =
-                    <crate::server::handlers::ServerRuntime as boostr::Runtime>::default_device();
-                match embedder.embed_bytes_default(&decoded.data, &device) {
+                match image_embedding(Arc::clone(embedder), decoded.data).await {
                     Ok(v) => v,
                     Err(e) => {
                         return error_response(

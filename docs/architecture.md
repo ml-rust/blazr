@@ -30,8 +30,8 @@ The engine builds without the CLI and the HTTP server, as a library. The `cli` a
 1. The route table in `api_routes` (`src/server/routes.rs`) sends the request to a function, such as `chat_completions` in `src/server/chat_api/chat.rs`.
 2. The function calls `Scheduler::get_executor` (`src/engine/lifecycle/scheduler.rs`) through `state.route` (`src/server/handlers/route.rs`). The route returns the executor and scheduler for the request's model.
 3. With a replica set, the router picks one replica. With a request scheduler set, `generate_via_scheduler` (`src/server/gen_core/generation.rs`) submits to `RequestScheduler::submit`. Without one, the function calls the executor directly.
-4. `BatchEngine::run` (`src/engine/requests/batch_engine.rs`) takes batches from `RequestScheduler::schedule_batch` and runs prefill and decode steps.
-5. `Executor::generate` (`src/engine/executors/executor_generate.rs`) runs the forward pass through the boostr `LoadedModel`.
+4. `BatchEngine::run_until` (`src/engine/requests/batch_run.rs`) takes batches from `RequestScheduler::schedule_batch` and runs prefill and decode steps, on the `blazr-batch` thread.
+5. Without a scheduler, the request's generation runs on its own `blazr-decode` thread (`src/engine/executors/blocking_stream.rs`). There, `Executor::generate` (`src/engine/executors/executor_generate.rs`) runs the forward pass through the boostr `LoadedModel`.
 6. The sampler (`src/engine/decoding/sampling/`) picks each token. A constrained request carries a DFA that admission compiled through `GrammarCache` (`src/engine/decoding/grammar_cache.rs`). boostr's device mask applies it each step (`src/engine/executors/sampler_grammar.rs`).
 7. Tokens return on a channel. `create_chat_stream` (`src/server/gen_core/streaming.rs`) sends them as SSE. `generate_text` (`src/engine/executors/generate_text.rs`) collects them into one response.
 
@@ -102,6 +102,29 @@ When a load needs room, the scheduler removes the least recently used model. The
 | Other model with paged attention on  | Paged batch     | `RequestScheduler` and `BatchEngine`              |
 | Other model with paged attention off | Single sequence | None                                              |
 
+## Threads
+
+A forward pass blocks its thread. No forward pass runs on a Tokio worker, so `/health`, SSE writes and accepts keep running under load.
+
+| Work                       | Thread                                                         | Source                                                                                  |
+| -------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Single-sequence generation | One `blazr-decode` thread per request, streamed or not         | `src/engine/executors/blocking_stream.rs`, `decode_thread.rs`, `decode_output.rs`       |
+| Paged continuous batch     | One `blazr-batch` thread for the server's life                 | `src/engine/requests/engine_thread.rs`, `batch_run.rs`                                  |
+| `qwen35` lanes             | One `blazr-lanes` thread for the server's life (`cuda` feature) | `src/engine/requests/engine_thread.rs`, `src/engine/lanes/lane_engine.rs`               |
+| Text and image embeddings  | The Tokio blocking pool                                        | `src/server/text_api/embeddings/handler.rs`                                             |
+| Tensor-parallel followers  | One thread per rank above 0                                    | `src/engine/parallel/tp_group.rs`                                                       |
+
+- Each decode and engine thread drives its work on a current-thread Tokio runtime with the timer on. Channels to the server's runtime work as they do between tasks.
+- A decode thread builds its stream on that thread. The stream, its KV lease and its tensor-parallel guard never leave it.
+- A decode thread sends each item on a bounded channel of 32. It stops within one token after the reader drops the channel.
+- A reader that takes no item for `inference.decode_idle_timeout_secs` stops the generation, and the thread exits.
+- A panic on a decode thread reaches the client as an error item. The server keeps running.
+- The caller of a decode waits for the thread to exit, so its admission permit outlives the decode. A caller that leaves first frees its permit up to one decode step before the thread exits.
+- `server.max_concurrent_requests` bounds the decode threads. A streamed response holds its slot until its body drops.
+- The scheduler `configure_batching` returns owns its engine thread. When the server state drops the scheduler, the thread gets its stop signal and is joined. The loop reads the signal between steps.
+- CUDA needs no setup per thread. cudarc makes its context current in every safe call. numr does the same before each raw driver call.
+- A WebAssembly target starts no threads. There a generation runs on the caller, with no idle timeout.
+
 ## State per model kind
 
 The executor picks the state type by model capability. GDN state is checked first, then SSM state, then the KV cache.
@@ -134,7 +157,7 @@ The five generation handlers call `state.route` for each request. Without a repl
 
 - `src/telemetry/slo.rs` checks TTFT, ITL, and end-to-end latency against `server.slo`. A breach adds to `blazr_slo_violations_total{metric,percentile}`.
 - `src/engine/requests/slo_policy.rs` holds batch growth while the rolling P95 TTFT or ITL exceeds its target. Running sequences keep decoding.
-- `src/engine/requests/queue_depth.rs` feeds `blazr_queue_depth`. `src/server/serving/concurrency.rs` limits HTTP requests with `server.max_concurrent_requests`. `/health` and `/metrics` skip that limit.
+- `src/engine/requests/queue_depth.rs` feeds `blazr_queue_depth`. `src/server/serving/concurrency.rs` limits HTTP requests with `server.max_concurrent_requests`. A streamed response holds its slot until its body drops. `/health` and `/metrics` skip that limit.
 
 ### Pipeline (swarm)
 

@@ -319,19 +319,4 @@ where
             tracing::info!(phase = "decode_end", backend = "multimodal");
         }
     }
-
-    /// Non-streaming multimodal text generation.
-    ///
-    /// Collects all tokens from `generate_multimodal` into a `GenerationResult`,
-    /// handling stop sequences and logprobs the same way as `generate_text`.
-    pub async fn generate_multimodal_text(
-        &self,
-        prompt_tokens: &[u32],
-        images: &[Vec<u8>],
-        audio_segments: &[Vec<f32>],
-        gen_config: &GenerationConfig,
-    ) -> Result<super::types::GenerationResult> {
-        let stream = self.generate_multimodal(prompt_tokens, images, audio_segments, gen_config);
-        super::generate_text::collect_generation(stream, prompt_tokens.len(), gen_config).await
-    }
 }

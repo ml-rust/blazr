@@ -209,6 +209,7 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use boostr::inference::BlockAllocator;
     use boostr::CpuRuntime;
@@ -253,9 +254,10 @@ mod tests {
     }
 
     /// The seeded llama with speculation off, and its twin with `k` drafts.
-    fn twins(ctx: usize, k: usize) -> Result<(Exec, Exec)> {
+    fn twins(ctx: usize, k: usize) -> Result<(Arc<Exec>, Arc<Exec>)> {
         let plain = seeded_executor_ctx(SEED, ctx)?;
-        Ok((plain, speculating(seeded_executor_ctx(SEED, ctx)?, k)))
+        let spec = speculating(seeded_executor_ctx(SEED, ctx)?, k);
+        Ok((Arc::new(plain), Arc::new(spec)))
     }
 
     fn shape(tokens: &[GeneratedToken]) -> Vec<(u32, String, Option<FinishReason>)> {

@@ -78,6 +78,12 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub kv_pool_blocks: usize,
 
+    /// Seconds a single-sequence decode thread waits for its reader to take
+    /// a token. A reader that takes none for this long stops the generation
+    /// and frees the thread. 0 waits without limit. Default: 60.
+    #[serde(default = "default_decode_idle_timeout_secs")]
+    pub decode_idle_timeout_secs: u64,
+
     /// Speculative decoding config. Unset or `enabled: false` turns it off.
     /// Single-sequence contiguous-KV requests read it.
     #[serde(default)]
@@ -145,6 +151,10 @@ fn default_ram_tier_capacity() -> usize {
     5000
 }
 
+fn default_decode_idle_timeout_secs() -> u64 {
+    60
+}
+
 fn default_one() -> usize {
     1
 }
@@ -163,6 +173,7 @@ impl Default for InferenceConfig {
             gpu_prefix_cache_ram_tier: default_ram_tier_capacity(),
             prefill_chunk_size: 0,
             kv_pool_blocks: 0,
+            decode_idle_timeout_secs: default_decode_idle_timeout_secs(),
             speculative: None,
             tensor_parallel_size: default_one(),
             data_parallel: default_one(),

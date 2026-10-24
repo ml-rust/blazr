@@ -12,60 +12,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use boostr::model::ModelClient;
-use boostr::ops::TensorOps;
-use boostr::{
-    ActivationOps, BinaryOps, ConvOps, CpuRuntime, DType, NormalizationOps, Runtime, SamplingOps,
-    ScalarOps, TypeConversionOps, UnaryOps,
-};
+use boostr::CpuRuntime;
 
 use super::error::{BlazrStatus, FfiError};
+pub(crate) use crate::engine::executor::EngineClient;
 use crate::engine::Executor;
 
 /// An opaque loaded model. C code holds only a pointer to it.
 pub struct BlazrModel {
     _private: [u8; 0],
-}
-
-/// Every client trait the engine needs from a runtime.
-pub(crate) trait EngineClient<R: Runtime<DType = DType>>:
-    TensorOps<R>
-    + ScalarOps<R>
-    + ConvOps<R>
-    + NormalizationOps<R>
-    + UnaryOps<R>
-    + ActivationOps<R>
-    + BinaryOps<R>
-    + TypeConversionOps<R>
-    + SamplingOps<R>
-    + boostr::GrammarDfaOps<R>
-    + ModelClient<R>
-    + boostr::RoPEPackedOps<R>
-    + boostr::quant::DequantOps<R>
-    + boostr::quant::QuantMatmulOps<R>
-    + boostr::inference::speculative::SpeculativeClient<R>
-{
-}
-
-impl<R, C> EngineClient<R> for C
-where
-    R: Runtime<DType = DType>,
-    C: TensorOps<R>
-        + ScalarOps<R>
-        + ConvOps<R>
-        + NormalizationOps<R>
-        + UnaryOps<R>
-        + ActivationOps<R>
-        + BinaryOps<R>
-        + TypeConversionOps<R>
-        + SamplingOps<R>
-        + boostr::GrammarDfaOps<R>
-        + ModelClient<R>
-        + boostr::RoPEPackedOps<R>
-        + boostr::quant::DequantOps<R>
-        + boostr::quant::QuantMatmulOps<R>
-        + boostr::inference::speculative::SpeculativeClient<R>,
-{
 }
 
 /// An executor on whichever runtime the load options chose.

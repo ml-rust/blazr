@@ -1,6 +1,9 @@
 //! Test fixtures shared by the engine's unit tests.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
@@ -76,6 +79,20 @@ fn enable_paged(config: &mut BlazrConfig, paged: Option<PagedPool>) {
         config.inference.kv_pool_blocks = pool.blocks;
         config.inference.max_batch_size = 2;
     }
+}
+
+/// Free blocks in `exec`'s shared KV pool.
+pub(crate) fn free_pool_blocks(exec: &Executor<CpuRuntime>) -> Result<usize> {
+    use boostr::inference::BlockAllocator;
+
+    let shared = exec
+        .shared_allocator()
+        .ok_or_else(|| anyhow!("the executor has no shared allocator"))?;
+    let free = shared
+        .lock()
+        .map_err(|e| anyhow!("lock poisoned: {e}"))?
+        .free_block_count();
+    Ok(free)
 }
 
 /// The id of the one-token piece `piece` in `exec`'s vocab.
@@ -285,4 +302,32 @@ impl SeededWeights {
         self.put(device, "model.norm.weight", &[HIDDEN], 0.5, 1.5)?;
         self.linear(device, "lm_head.weight", VOCAB, HIDDEN)
     }
+}
+
+/// How long a wait in a test hook may block before the test calls it
+/// stuck. It guards against a hang, never decides a pass.
+pub(crate) const WAIT_LIMIT: Duration = Duration::from_secs(5);
+
+/// Block this thread until `counter` passes `seen`. Returns false when
+/// [`WAIT_LIMIT`] runs out first.
+pub(crate) fn wait_past(counter: &AtomicUsize, seen: usize) -> bool {
+    let deadline = Instant::now() + WAIT_LIMIT;
+    while counter.load(Ordering::SeqCst) <= seen {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
+}
+
+/// A task on the runtime that counts up every millisecond.
+pub(crate) fn ticker(ticks: &Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
+    let ticks = Arc::clone(ticks);
+    tokio::spawn(async move {
+        loop {
+            ticks.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
 }

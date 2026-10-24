@@ -19,8 +19,7 @@ use crate::config::GenerationConfig;
 
 use super::executor::Executor;
 use super::executor_generate_qwen35::DecodeSetup;
-use super::generate_text::collect_generation;
-use super::types::{GeneratedToken, GenerationResult};
+use super::types::GeneratedToken;
 use super::vision_tower::{grid_of, NO_TOWER_ERROR};
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -125,17 +124,5 @@ where
                 yield item;
             }
         }
-    }
-
-    /// Non-streaming form of [`Executor::generate_with_images`], with the
-    /// stop-sequence and logprob handling of `generate_text`.
-    pub async fn generate_images_text(
-        &self,
-        prompt_tokens: &[u32],
-        images: &[Vec<u8>],
-        gen_config: &GenerationConfig,
-    ) -> Result<GenerationResult> {
-        let stream = self.generate_with_images(prompt_tokens, images, gen_config);
-        collect_generation(stream, prompt_tokens.len(), gen_config).await
     }
 }

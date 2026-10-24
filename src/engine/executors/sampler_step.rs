@@ -496,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_tokens_cuts_a_constrained_run_with_length() -> Result<()> {
-        let exec = full_vocab_executor(None)?;
+        let exec = std::sync::Arc::new(full_vocab_executor(None)?);
         let seven = piece_id(&exec, b"7")?;
         let cfg = GenerationConfig {
             max_tokens: 2,

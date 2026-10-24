@@ -230,6 +230,7 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | `paged_attention`                    | boolean  | `false`             | Enables the paged KV cache. `run` and `generate` also take `--paged-attention`.                                              |
 | `block_size`                         | integer  | `16`                | Tokens per block for paged attention                                                                                         |
 | `kv_pool_blocks`                     | integer  | `0`                 | Blocks in the shared pool. `0` computes the count from `max_context_len` and `max_batch_size`.                               |
+| `decode_idle_timeout_secs`           | integer  | `60`                | Seconds a single-sequence generation waits for its reader to take a token. A reader that takes none stops the generation. `0` waits without limit. |
 | `prefix_cache`                       | boolean  | `false`             | Reuses KV blocks for repeated prompt prefixes. Requires `paged_attention`.                                                   |
 | `max_cached_blocks`                  | integer  | `10000`             | Cached prefix blocks to retain. Used when `prefix_cache` is `true`.                                                          |
 | `gpu_prefix_cache`                   | boolean  | `false`             | GPU prefix cache lookup. Falls back to CPU lookup without CUDA.                                                              |
@@ -274,7 +275,7 @@ Blazr reads this section from `config.yaml`. `blazr serve`, the swarm leader, an
 | ------------------------- | -------------- | ------------------------------ | -------------------- | ---------------------------------------------------------------------------------------- |
 | `port`                    | integer        | `8080`                         | `--port`             | Port to listen on                                                                        |
 | `host`                    | string         | `0.0.0.0`                      | `--host`             | Address to bind to                                                                       |
-| `max_concurrent_requests` | integer        | `16`                           | none                 | HTTP requests in flight. Extra requests wait for a slot.                                 |
+| `max_concurrent_requests` | integer        | `16`                           | none                 | HTTP requests in flight, open streams included. Extra requests wait for a slot.          |
 | `request_timeout_secs`    | integer        | `300`                          | none                 | Request timeout. An exceeded request returns `408`.                                      |
 | `cors_enabled`            | boolean        | `true`                         | none                 | Enables CORS headers                                                                     |
 | `cors_origins`            | string array   | empty, which allows any origin | none                 | Allowed origins                                                                          |

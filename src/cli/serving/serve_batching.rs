@@ -3,9 +3,13 @@
 //! Two kinds exist, and a model takes at most one:
 //!
 //! - Models that need GDN state decode in `qwen35` lanes: [`LaneScheduler`]
-//!   plus the [`LaneEngine`] task. Paged attention plays no part here.
+//!   plus the [`LaneEngine`] loop. Paged attention plays no part here.
 //! - Every other model with paged attention on decodes in the paged
-//!   continuous batch: [`RequestScheduler`] plus the [`BatchEngine`] task.
+//!   continuous batch: [`RequestScheduler`] plus the [`BatchEngine`] loop.
+//!
+//! Each loop runs on its own thread for the server's life: `blazr-lanes`
+//! or `blazr-batch`. The returned scheduler owns the thread. It stops and
+//! joins the thread when the server state drops it.
 //!
 //! With `inference.max_batch_size` at 1 neither is built, and the handlers
 //! take the single-sequence path.
@@ -18,7 +22,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::engine::{BatchEngine, Executor, GenerationScheduler, RequestScheduler, SloBatchPolicy};
+use crate::engine::{
+    BatchEngine, EngineThread, Executor, GenerationScheduler, RequestScheduler, SloBatchPolicy,
+    ThreadedScheduler,
+};
 use crate::runtime::ServerRuntime;
 
 /// Which scheduler a model's decode path takes.
@@ -26,9 +33,9 @@ use crate::runtime::ServerRuntime;
 pub enum BatchingChoice {
     /// Handlers generate one sequence at a time, no scheduler built.
     Single,
-    /// `LaneScheduler` plus the `LaneEngine` task (GDN-state models).
+    /// `LaneScheduler` plus the `LaneEngine` thread (GDN-state models).
     Lanes,
-    /// `RequestScheduler` plus the `BatchEngine` task (paged continuous batch).
+    /// `RequestScheduler` plus the `BatchEngine` thread (paged continuous batch).
     Paged,
 }
 
@@ -52,7 +59,7 @@ pub fn batching_choice(
     BatchingChoice::Paged
 }
 
-/// Build the scheduler `executor`'s model calls for, spawn the task that
+/// Build the scheduler `executor`'s model calls for, start the thread that
 /// drives it, and return it for the server state.
 ///
 /// `Ok(None)` means the handlers generate one sequence at a time. `device`
@@ -80,7 +87,7 @@ pub async fn configure_batching(
     }
 }
 
-/// `max_batch` `qwen35` decode lanes, driven by a [`LaneEngine`] task.
+/// `max_batch` `qwen35` decode lanes, driven by a [`LaneEngine`] thread.
 #[cfg(feature = "cuda")]
 async fn lane_batching(
     executor: Arc<Executor<ServerRuntime>>,
@@ -93,7 +100,7 @@ async fn lane_batching(
     let lane_scheduler = LaneScheduler::with_slo_policy(max_batch, slo_policy)?;
     let engine = LaneEngine::open(executor, Arc::clone(&lane_scheduler)).await?;
     let mode = engine.mode();
-    tokio::spawn(engine.run());
+    let thread = EngineThread::spawn("blazr-lanes", move |stop| engine.run_until(stop))?;
 
     eprintln!(
         "  Batching: {} (lanes={}, decode={:?}, device={})",
@@ -103,7 +110,8 @@ async fn lane_batching(
         device,
     );
 
-    let configured: Arc<dyn GenerationScheduler> = lane_scheduler;
+    let configured: Arc<dyn GenerationScheduler> =
+        Arc::new(ThreadedScheduler::new(lane_scheduler, thread));
     Ok(Some(configured))
 }
 
@@ -125,7 +133,7 @@ async fn lane_batching(
     Ok(None)
 }
 
-/// A paged continuous batch, driven by a [`BatchEngine`] task.
+/// A paged continuous batch, driven by a [`BatchEngine`] thread.
 fn paged_batching(
     executor: Arc<Executor<ServerRuntime>>,
     max_batch: usize,
@@ -166,9 +174,7 @@ fn paged_batching(
         RequestScheduler::build(allocator, sched_config, prefix_cache, slo_policy);
 
     let batch_engine = BatchEngine::new(executor, Arc::clone(&request_scheduler))?;
-    tokio::spawn(async move {
-        batch_engine.run().await;
-    });
+    let thread = EngineThread::spawn("blazr-batch", move |stop| batch_engine.run_until(stop))?;
 
     eprintln!(
         "  Batching: {} (max_batch={}, blocks={}, device={})",
@@ -178,7 +184,8 @@ fn paged_batching(
         device,
     );
 
-    let configured: Arc<dyn GenerationScheduler> = request_scheduler;
+    let configured: Arc<dyn GenerationScheduler> =
+        Arc::new(ThreadedScheduler::new(request_scheduler, thread));
     Ok(configured)
 }
 

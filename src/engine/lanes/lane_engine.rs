@@ -90,8 +90,18 @@ impl LaneEngine {
 
     /// Admit, step and forward until the scheduler's wakeup channel closes.
     ///
-    /// Spawn this as a background task once per server.
-    pub async fn run(mut self) {
+    /// Run this once per server. A lane step blocks its thread, so run it on
+    /// a thread of its own, as [`crate::engine::EngineThread`] does.
+    pub async fn run(self) {
+        self.run_until(std::future::pending()).await;
+    }
+
+    /// [`Self::run`] until `stop` resolves. The loop reads `stop` while it
+    /// waits for work and between steps, then closes the lane session.
+    pub async fn run_until(mut self, stop: impl std::future::Future<Output = ()>) {
+        use futures::FutureExt;
+
+        let mut stop = std::pin::pin!(stop);
         let Some(mut notify_rx) = self.scheduler.take_notify_rx() else {
             tracing::error!(
                 "the lane scheduler's wakeup receiver was already taken; only one LaneEngine may \
@@ -110,7 +120,16 @@ impl LaneEngine {
             self.admit_waiting().await;
 
             if self.live == 0 {
-                match notify_rx.recv().await {
+                // `select` polls `stop` first.
+                let wakeup = std::pin::pin!(notify_rx.recv());
+                let next = match futures::future::select(stop.as_mut(), wakeup).await {
+                    futures::future::Either::Left(((), _)) => {
+                        tracing::info!("lane decode loop stop requested, shutting down");
+                        break;
+                    }
+                    futures::future::Either::Right((next, _)) => next,
+                };
+                match next {
                     Some(()) => continue,
                     None => {
                         tracing::info!("lane scheduler closed its wakeup channel, shutting down");
@@ -126,6 +145,11 @@ impl LaneEngine {
             match self.executor.qwen35_lane_step().await {
                 Ok(tokens) => self.forward_step(tokens).await,
                 Err(e) => self.fail_live_lanes(&e).await,
+            }
+
+            if stop.as_mut().now_or_never().is_some() {
+                tracing::info!("lane decode loop stop requested, shutting down");
+                break;
             }
         }
 

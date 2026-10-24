@@ -245,25 +245,15 @@ impl Drop for PoolLease<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boostr::CpuRuntime;
 
-    use crate::engine::test_support::{seeded_executor, PagedPool};
+    use crate::engine::test_support::{
+        free_pool_blocks as free_blocks, seeded_executor, PagedPool,
+    };
 
     const POOL: PagedPool = PagedPool {
         block_size: 4,
         blocks: 16,
     };
-
-    fn free_blocks(exec: &Executor<CpuRuntime>) -> Result<usize> {
-        let shared = exec
-            .shared_allocator()
-            .ok_or_else(|| anyhow!("the executor has no shared allocator"))?;
-        let free = shared
-            .lock()
-            .map_err(|e| anyhow!("lock poisoned: {e}"))?
-            .free_block_count();
-        Ok(free)
-    }
 
     #[test]
     fn the_pool_holds_every_block_of_the_shared_allocator() -> Result<()> {

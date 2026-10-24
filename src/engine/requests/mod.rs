@@ -4,8 +4,10 @@ pub mod batch_decode;
 mod batch_emit;
 pub mod batch_engine;
 mod batch_prefill;
+mod batch_run;
 #[cfg(test)]
 pub(crate) mod batch_test_rig;
+mod engine_thread;
 pub(in crate::engine) mod kv_recompute;
 pub mod latency_window;
 pub(super) mod queue_depth;
@@ -17,6 +19,7 @@ pub mod slo_policy;
 pub mod slots;
 
 pub use batch_engine::BatchEngine;
+pub use engine_thread::{EngineThread, ThreadedScheduler};
 pub use queue_depth::{QueueDepth, Waiting};
 pub use request_registry::{CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry};
 pub use request_scheduler::RequestScheduler;

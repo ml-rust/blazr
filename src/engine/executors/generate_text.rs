@@ -1,4 +1,6 @@
-//! Non-streaming text generation.
+//! Non-streaming generation: each `*_text` method collects one stream.
+
+use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -15,6 +17,7 @@ use boostr::{
 use crate::config::GenerationConfig;
 use crate::engine::StopMatcher;
 
+use super::blocking_stream::{collect_on_decode_thread, DecodeJob};
 use super::executor::Executor;
 use super::types::{FinishReason, GeneratedToken, GenerationResult};
 
@@ -40,14 +43,60 @@ where
     /// result with metadata.
     ///
     /// The ids come from the handler's validated encode; this path never
-    /// re-tokenizes.
+    /// re-tokenizes. The decode runs on its own thread, see
+    /// `blocking_stream`.
     pub async fn generate_text(
-        &self,
+        self: &Arc<Self>,
         prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
-    ) -> Result<GenerationResult> {
-        let stream = self.generate(prompt_tokens, gen_config);
-        collect_generation(stream, prompt_tokens.len(), gen_config).await
+    ) -> Result<GenerationResult>
+    where
+        Self: Send + Sync + 'static,
+    {
+        let job = DecodeJob::text(Arc::clone(self), prompt_tokens.to_vec(), gen_config.clone());
+        collect_on_decode_thread(job).await
+    }
+
+    /// Non-streaming form of [`Executor::generate_multimodal`], with the
+    /// stop-sequence and logprob handling of `generate_text`.
+    pub async fn generate_multimodal_text(
+        self: &Arc<Self>,
+        prompt_tokens: &[u32],
+        images: &[Vec<u8>],
+        audio_segments: &[Vec<f32>],
+        gen_config: &GenerationConfig,
+    ) -> Result<GenerationResult>
+    where
+        Self: Send + Sync + 'static,
+    {
+        let job = DecodeJob::multimodal(
+            Arc::clone(self),
+            prompt_tokens.to_vec(),
+            images.to_vec(),
+            audio_segments.to_vec(),
+            gen_config.clone(),
+        );
+        collect_on_decode_thread(job).await
+    }
+
+    /// Non-streaming form of [`Executor::generate_with_images`], with the
+    /// stop-sequence and logprob handling of `generate_text`.
+    pub async fn generate_images_text(
+        self: &Arc<Self>,
+        prompt_tokens: &[u32],
+        images: &[Vec<u8>],
+        gen_config: &GenerationConfig,
+    ) -> Result<GenerationResult>
+    where
+        Self: Send + Sync + 'static,
+    {
+        let job = DecodeJob::images(
+            Arc::clone(self),
+            prompt_tokens.to_vec(),
+            images.to_vec(),
+            gen_config.clone(),
+        );
+        collect_on_decode_thread(job).await
     }
 }
 
@@ -138,7 +187,7 @@ mod tests {
     use crate::engine::test_support::seeded_executor;
 
     /// Token ids generated from a fixed prompt, greedy.
-    async fn greedy_count(exec: &Executor<boostr::CpuRuntime>) -> Result<(String, usize)> {
+    async fn greedy_count(exec: &Arc<Executor<boostr::CpuRuntime>>) -> Result<(String, usize)> {
         let cfg = GenerationConfig {
             max_tokens: 6,
             temperature: 0.0,
@@ -156,6 +205,7 @@ mod tests {
             enabled: true,
             ..SpeculativeDecodingConfig::default()
         });
+        let (plain, with_spec) = (Arc::new(plain), Arc::new(with_spec));
         assert_eq!(greedy_count(&plain).await?, greedy_count(&with_spec).await?);
         Ok(())
     }

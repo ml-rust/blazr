@@ -38,6 +38,47 @@ fn with_runtime_dtype<R: Runtime<DType = DType>>(mut config: BlazrConfig) -> Res
     Ok(config)
 }
 
+/// Every client trait the engine needs from a runtime.
+pub(crate) trait EngineClient<R: Runtime<DType = DType>>:
+    TensorOps<R>
+    + ScalarOps<R>
+    + ConvOps<R>
+    + NormalizationOps<R>
+    + UnaryOps<R>
+    + ActivationOps<R>
+    + BinaryOps<R>
+    + TypeConversionOps<R>
+    + SamplingOps<R>
+    + boostr::GrammarDfaOps<R>
+    + ModelClient<R>
+    + boostr::RoPEPackedOps<R>
+    + boostr::quant::DequantOps<R>
+    + boostr::quant::QuantMatmulOps<R>
+    + boostr::inference::speculative::SpeculativeClient<R>
+{
+}
+
+impl<R, C> EngineClient<R> for C
+where
+    R: Runtime<DType = DType>,
+    C: TensorOps<R>
+        + ScalarOps<R>
+        + ConvOps<R>
+        + NormalizationOps<R>
+        + UnaryOps<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + TypeConversionOps<R>
+        + SamplingOps<R>
+        + boostr::GrammarDfaOps<R>
+        + ModelClient<R>
+        + boostr::RoPEPackedOps<R>
+        + boostr::quant::DequantOps<R>
+        + boostr::quant::QuantMatmulOps<R>
+        + boostr::inference::speculative::SpeculativeClient<R>,
+{
+}
+
 /// Inference executor
 ///
 /// Wraps a loaded model and provides text generation capabilities.

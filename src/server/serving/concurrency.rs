@@ -3,13 +3,18 @@
 //! A request over the limit waits for a free slot. Each waiting request
 //! counts in `blazr_queue_depth`. `/health` and `/metrics` skip the limit,
 //! so probes and scrapes answer while the server is saturated.
+//!
+//! A streamed response holds its slot until its body drops, so the limit
+//! also bounds the decode threads behind open streams.
 
 use std::sync::Arc;
 
+use axum::body::{Body, HttpBody};
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use tokio::sync::Semaphore;
+use futures::StreamExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::engine::QueueDepth;
 
@@ -38,7 +43,8 @@ impl ConcurrencyLimit {
     }
 }
 
-/// Middleware: hold one slot for the whole request.
+/// Middleware: hold one slot for the whole request, a streamed body
+/// included.
 pub async fn limit_concurrency(
     State(limit): State<Arc<ConcurrencyLimit>>,
     request: Request,
@@ -48,18 +54,36 @@ pub async fn limit_concurrency(
         return next.run(request).await;
     }
     // The semaphore is never closed, so the acquire always yields a permit.
-    let _permit = {
+    let permit = {
         // The guard leaves the queue when the wait ends or the client leaves.
         let _waiting = limit.waiting.enter();
         Arc::clone(&limit.slots).acquire_owned().await.ok()
     };
-    next.run(request).await
+    let response = next.run(request).await;
+    match permit {
+        Some(permit) => hold_for_body(response, permit),
+        None => response,
+    }
+}
+
+/// A body of unknown length streams after the handler returns. Its slot
+/// drops with the body. A body of known length is complete, so its slot
+/// drops here.
+fn hold_for_body(response: Response, permit: OwnedSemaphorePermit) -> Response {
+    if response.body().size_hint().exact().is_some() {
+        return response;
+    }
+    response.map(|body| {
+        Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let _slot = &permit;
+            chunk
+        }))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
     use axum::routing::get;
     use axum::Router;
     use tokio::sync::Notify;
@@ -119,5 +143,43 @@ mod tests {
         let _ = second.await;
         assert_eq!(limit.waiting(), 0);
         assert_eq!(recorder.value(QUEUE_DEPTH, &[]), Some(0.0));
+    }
+
+    /// A streamed body keeps its slot until the body drops. A sized body
+    /// gives its slot back when the handler returns.
+    #[tokio::test]
+    async fn a_streamed_body_holds_its_slot_until_it_drops() -> anyhow::Result<()> {
+        let limit = ConcurrencyLimit::new(1);
+        let open = || futures::stream::pending::<Result<axum::body::Bytes, std::io::Error>>();
+        let app = Router::new()
+            .route(
+                "/stream",
+                get(move || async move { Body::from_stream(open()) }),
+            )
+            .route("/sized", get(|| async { "done" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&limit),
+                limit_concurrency,
+            ));
+        let call = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                let request = Request::builder().uri(path).body(Body::empty())?;
+                anyhow::Ok(app.oneshot(request).await?)
+            }
+        };
+
+        let sized = call("/sized").await?;
+        assert_eq!(limit.slots.available_permits(), 1);
+        drop(sized);
+        let streamed = call("/stream").await?;
+        assert_eq!(
+            limit.slots.available_permits(),
+            0,
+            "the open stream holds its slot"
+        );
+        drop(streamed);
+        assert_eq!(limit.slots.available_permits(), 1);
+        Ok(())
     }
 }

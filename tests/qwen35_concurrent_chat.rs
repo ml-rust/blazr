@@ -1,7 +1,7 @@
 //! Concurrent `/v1/chat/completions` over `qwen35` decode lanes.
 //!
 //! Starts the real HTTP surface with a [`LaneScheduler`] behind it and a
-//! [`LaneEngine`] task driving the lanes, then checks two things end to end:
+//! [`LaneEngine`] thread driving the lanes, then checks two things end to end:
 //!
 //! - Three prompts of different lengths sent at once return exactly what each
 //!   returns when it is the only request in flight.
@@ -32,7 +32,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use blazr::engine::{GenerationScheduler, LaneEngine, LaneScheduler, Scheduler};
+use blazr::engine::{
+    EngineThread, GenerationScheduler, LaneEngine, LaneScheduler, Scheduler, ThreadedScheduler,
+};
 use blazr::server::handlers::{ServeReplica, Serving};
 use blazr::server::{api_routes, metrics, AppState};
 use boostr::{CudaDevice, CudaRuntime};
@@ -138,16 +140,18 @@ async fn concurrent_chat_requests_match_their_solo_answers() {
     // Lanes serve the models that need GDN state, which is what `qwen35` is.
     assert_eq!(executor.config().model_type(), "qwen35");
 
-    // The lane scheduler and the task that drives its lanes.
+    // The lane scheduler and the thread that drives its lanes.
     let lane_scheduler = LaneScheduler::new(LANES).unwrap_or_else(|e| panic!("LaneScheduler: {e}"));
     let engine = LaneEngine::open(Arc::clone(&executor), Arc::clone(&lane_scheduler))
         .await
         .unwrap_or_else(|e| panic!("LaneEngine::open: {e}"));
     println!("lane decode mode: {:?}", engine.mode());
-    tokio::spawn(engine.run());
+    let engine = EngineThread::spawn("blazr-lanes", move |stop| engine.run_until(stop))
+        .unwrap_or_else(|e| panic!("EngineThread::spawn: {e}"));
 
     let handle = metrics::install_recorder().unwrap_or_else(|e| panic!("metrics recorder: {e}"));
-    let scheduler_for_state: Arc<dyn GenerationScheduler> = lane_scheduler.clone();
+    let scheduler_for_state: Arc<dyn GenerationScheduler> =
+        Arc::new(ThreadedScheduler::new(lane_scheduler.clone(), engine));
     let serving = Serving::Single(ServeReplica {
         executor: Arc::clone(&executor),
         scheduler: Some(scheduler_for_state),

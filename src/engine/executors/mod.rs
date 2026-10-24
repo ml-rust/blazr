@@ -1,5 +1,9 @@
 //! The `Executor`: generate, embed, multimodal, cache, warmup, and load paths.
 
+pub(crate) mod blocking_stream;
+pub(crate) mod decode_output;
+#[cfg(not(target_family = "wasm"))]
+mod decode_thread;
 pub(crate) mod executor;
 pub(super) mod executor_cache;
 pub(super) mod executor_embed;

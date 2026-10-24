@@ -30,7 +30,7 @@ impl fmt::Display for BlockingStopped {
 impl std::error::Error for BlockingStopped {}
 
 /// The message of a panic payload.
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(text) = payload.downcast_ref::<&str>() {
         (*text).to_string()
     } else if let Some(text) = payload.downcast_ref::<String>() {

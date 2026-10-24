@@ -68,7 +68,7 @@ where
             return Err(crate::engine::qwen35_unsupported(
                 "continuous batching",
                 None,
-                Some("disable paged attention or set max_batch_size = 1"),
+                Some("set max_batch_size = 1, or use CUDA lanes with paged_attention off"),
             ));
         }
         let config = executor.config();

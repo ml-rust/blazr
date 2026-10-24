@@ -227,7 +227,7 @@ Blazr reads this section from `config.json`. The `inference` section of `config.
 | ------------------------------------ | -------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `max_context_len`                    | integer  | unset               | Overrides the model maximum sequence length. Blazr does not compare the two values.                                          |
 | `max_batch_size`                     | integer  | `1`                 | Batch size. Values of 1 or less use the single-sequence path.                                                                |
-| `paged_attention`                    | boolean  | `false`             | Enables the paged KV cache. `run` and `generate` also take `--paged-attention`.                                              |
+| `paged_attention`                    | boolean  | `false`             | Enables the paged KV cache. `run` and `generate` also take `--paged-attention`. GDN, SSM and hybrid models refuse it at load. |
 | `block_size`                         | integer  | `16`                | Tokens per block for paged attention                                                                                         |
 | `kv_pool_blocks`                     | integer  | `0`                 | Blocks in the shared pool. `0` computes the count from `max_context_len` and `max_batch_size`.                               |
 | `decode_idle_timeout_secs`           | integer  | `60`                | Seconds a single-sequence generation waits for its reader to take a token. A reader that takes none stops the generation. `0` waits without limit. |

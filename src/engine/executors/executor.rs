@@ -452,3 +452,66 @@ where
         self.num_ctx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use boostr::model::{LoadedModel, UniversalConfig};
+    use boostr::nn::{VarBuilder, VarMap};
+    use boostr::{CpuDevice, CpuRuntime, DType, Tensor};
+
+    use crate::config::BlazrConfig;
+    use crate::engine::Executor;
+
+    const MAMBA2_YAML: &str = "model_type: mamba2\nvocab_size: 16\nhidden_size: 8\nnum_layers: 1\n\
+        max_seq_len: 16\ntie_word_embeddings: true\nssm:\n  variant: mamba2\n  num_heads: 2\n  \
+        head_dim: 8\n  state_size: 4\n  chunk_size: 4\n  n_groups: 1\n  conv_kernel: 4\n  expand: 2\n";
+
+    /// A one-layer Mamba2 with all-zero weights.
+    fn tiny_mamba2(paged: bool, prefix_cache: bool) -> anyhow::Result<Executor<CpuRuntime>> {
+        let device = CpuDevice::new();
+        let config: UniversalConfig = serde_saphyr::from_str(MAMBA2_YAML)?;
+        let mut map = VarMap::<CpuRuntime>::new();
+        for (name, shape) in [
+            ("model.embed_tokens.weight", vec![16, 8]),
+            ("model.layers.0.input_layernorm.weight", vec![8]),
+            ("model.layers.0.mixer.in_proj.weight", vec![42, 8]),
+            ("model.layers.0.mixer.conv1d.weight", vec![24, 1, 4]),
+            ("model.layers.0.mixer.out_proj.weight", vec![8, 16]),
+            ("model.layers.0.mixer.A_log", vec![2]),
+            ("model.layers.0.mixer.dt_bias", vec![2]),
+            ("model.layers.0.mixer.D", vec![2]),
+            ("model.norm.weight", vec![8]),
+        ] {
+            map.insert(
+                name.to_string(),
+                Tensor::<CpuRuntime>::zeros(&shape, DType::F32, &device)?,
+            );
+        }
+        let mut vb = VarBuilder::new(&mut map, &device);
+        let model = LoadedModel::<CpuRuntime>::load(&config, &mut vb)?;
+        let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
+        blazr_config.inference.paged_attention = paged;
+        blazr_config.inference.prefix_cache = prefix_cache;
+        let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
+        Executor::new(model, blazr_config, tokenizer, device, 16)
+    }
+
+    #[test]
+    fn paged_attention_is_an_error_for_an_ssm_model() {
+        let err = tiny_mamba2(true, false)
+            .err()
+            .expect("paged must be refused");
+        let text = err.to_string();
+        assert!(text.contains("'mamba2'"), "{text}");
+        assert!(text.contains("turn paged attention off"), "{text}");
+        let err = tiny_mamba2(true, true)
+            .err()
+            .expect("prefix cache must be refused");
+        assert!(err.to_string().contains("'mamba2'"), "{err}");
+    }
+
+    #[test]
+    fn an_ssm_model_builds_with_paged_attention_off() {
+        assert!(tiny_mamba2(false, false).is_ok());
+    }
+}

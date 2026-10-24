@@ -212,6 +212,11 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_with_batch_above_one_and_paged_off_gives_lanes() {
+        assert_eq!(batching_choice(true, 8, false), BatchingChoice::Lanes);
+    }
+
+    #[test]
     fn non_gdn_model_with_paged_off_gives_single() {
         assert_eq!(batching_choice(false, 4, false), BatchingChoice::Single);
     }

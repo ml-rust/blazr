@@ -98,7 +98,7 @@ When a load needs room, the scheduler removes the least recently used model. The
 | Condition                            | Path            | Scheduler                                         |
 | ------------------------------------ | --------------- | ------------------------------------------------- |
 | `inference.max_batch_size` is 0 or 1 | Single sequence | None. Handlers call the executor.                 |
-| Model needs GDN state                | Lanes           | `LaneScheduler` and `LaneEngine` (`cuda` feature) |
+| Model needs GDN state                | Lanes           | `LaneScheduler` and `LaneEngine` (`cuda` feature). `paged_attention = true` is an error at load. |
 | Other model with paged attention on  | Paged batch     | `RequestScheduler` and `BatchEngine`              |
 | Other model with paged attention off | Single sequence | None                                              |
 

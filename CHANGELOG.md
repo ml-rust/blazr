@@ -23,6 +23,7 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
+- **`paged_attention` on GDN, SSM and hybrid models** — `inference.paged_attention = true` is an error at load for `qwen35`, `hybrid` and `mamba` models. These models keep recurrent state that the paged KV cache does not hold. `prefix_cache` and `gpu_prefix_cache` require `paged_attention`, so they are rejected on the same path. Set `paged_attention = false`. A `qwen35` model with `max_batch_size` above `1` serves through CUDA lanes without it.
 - **Server liveness under load** — no forward pass runs on an async runtime worker now. `/health`, SSE writes and new connections no longer stall behind a decode. Each single-sequence generation, streamed or not, runs on its own `blazr-decode` thread. The paged continuous batch runs on one `blazr-batch` thread, and the `qwen35` lanes on one `blazr-lanes` thread. Image embeddings run on the blocking pool. A client that leaves stops its decode within one token. A panic during a decode ends that request with an error, and the server keeps running.
 - **Concurrency limit on streams** — `server.max_concurrent_requests` now counts open streams. A streamed response holds its slot until the stream ends. Before, a stream gave its slot back when the response started, so open streams were unbounded.
 - **Streaming token metrics** — streamed requests now count their prompt and generated tokens and record tokens per second, as non-streamed requests do.

@@ -24,7 +24,7 @@ impl EncodingFormat {
 
 /// How token states combine into one vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Pooling {
+pub(crate) enum Pooling {
     Mean,
     Cls,
     Last,

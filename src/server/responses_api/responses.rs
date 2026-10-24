@@ -23,7 +23,7 @@ use crate::server::generation::{
     record_generation_metrics, validate_generation_params,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
-use crate::server::scheduled::generate_text_routed;
+use crate::server::route_stream::generate_for_media;
 
 /// POST /v1/responses — OpenAI Responses API
 pub async fn responses(
@@ -143,7 +143,6 @@ pub async fn responses(
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
     let placement = state.route(executor, &prompt_tokens);
-    let executor = Arc::clone(&placement.executor);
 
     let _slot = DecodeSlot::enter();
     let _permit = permit;
@@ -152,17 +151,8 @@ pub async fn responses(
 
     // The media route picks the generator; text may go through the batching
     // scheduler.
-    let gen_result = if route == ImageRoute::Tower {
-        executor
-            .generate_images_text(&prompt_tokens, &media.images, &gen_config)
-            .await
-    } else if route == ImageRoute::Multimodal {
-        executor
-            .generate_multimodal_text(&prompt_tokens, &media.images, &media.audio, &gen_config)
-            .await
-    } else {
-        generate_text_routed(&placement, &prompt_tokens, &gen_config).await
-    };
+    let gen_result =
+        generate_for_media(&placement, route, &prompt_tokens, &media, &gen_config).await;
 
     match gen_result {
         Ok(result) => {

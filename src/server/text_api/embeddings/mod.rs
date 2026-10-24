@@ -1,7 +1,7 @@
 //! Embeddings endpoint (`POST /v1/embeddings`).
 
-pub(super) mod handler;
-pub(super) mod options;
+pub(in crate::server) mod handler;
+pub(in crate::server) mod options;
 pub(super) mod request;
 pub(super) mod response;
 

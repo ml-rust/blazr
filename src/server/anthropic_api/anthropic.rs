@@ -26,9 +26,7 @@ use crate::server::generation::{
 };
 use crate::server::handlers::{classify_lookup, AppState, DecodeSlot};
 use crate::server::reasoning::ReasoningParser;
-use crate::server::route_stream::stream_for_media;
-use crate::server::scheduled::generate_text_routed;
-use crate::server::streaming::StreamToken;
+use crate::server::route_stream::{generate_for_media, spawn_media_stream};
 
 /// POST /v1/messages — Anthropic Messages API
 pub async fn messages(
@@ -122,21 +120,21 @@ pub async fn messages(
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
     let placement = state.route(executor, &prompt_tokens);
-    let executor = Arc::clone(&placement.executor);
 
     if request.stream.unwrap_or(false) {
         let id = format!("msg_{}", uuid::Uuid::new_v4());
         let model_name = request.model;
         let input_tokens = prompt_tokens.len();
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
+        let rx_stream = spawn_media_stream(
+            permit,
+            placement,
+            route,
+            prompt_tokens,
+            media,
+            gen_config,
+            std::future::ready(()),
+        );
 
-        let slot = DecodeSlot::enter();
-        tokio::spawn(async move {
-            let _guards = (permit, slot);
-            stream_for_media(&placement, route, prompt_tokens, media, gen_config, tx).await;
-        });
-
-        let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let parser = ReasoningParser::for_output(reasoning_format, &prompt);
         create_message_stream(id, model_name, input_tokens, Box::pin(rx_stream), parser)
             .into_response()
@@ -148,17 +146,8 @@ pub async fn messages(
 
         // The media route picks the generator; text may go through the
         // batching scheduler.
-        let gen_result = if route == ImageRoute::Tower {
-            executor
-                .generate_images_text(&prompt_tokens, &media.images, &gen_config)
-                .await
-        } else if route == ImageRoute::Multimodal {
-            executor
-                .generate_multimodal_text(&prompt_tokens, &media.images, &media.audio, &gen_config)
-                .await
-        } else {
-            generate_text_routed(&placement, &prompt_tokens, &gen_config).await
-        };
+        let gen_result =
+            generate_for_media(&placement, route, &prompt_tokens, &media, &gen_config).await;
 
         match gen_result {
             Ok(result) => {

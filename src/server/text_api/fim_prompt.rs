@@ -37,7 +37,7 @@ fn missing_markers(tokenizer: &splintr::AnyTokenizer) -> Vec<&'static str> {
 /// # Errors
 ///
 /// The tokenizer lacks a marker. The error names every missing marker.
-pub(super) fn build_fim_prompt(
+pub(in crate::server) fn build_fim_prompt(
     tokenizer: &splintr::AnyTokenizer,
     prefix: &str,
     suffix: &str,

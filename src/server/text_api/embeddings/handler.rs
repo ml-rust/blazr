@@ -58,7 +58,11 @@ fn bad_request(message: &str) -> Response {
 }
 
 /// Pool the hidden states of `token_ids` into one vector.
-async fn embed_tokens(
+///
+/// # Errors
+///
+/// The `500` response of a failed forward pass.
+pub(crate) async fn embed_tokens(
     executor: &Arc<Executor<ServerRuntime>>,
     token_ids: Vec<u32>,
     pooling: Pooling,
@@ -78,6 +82,46 @@ async fn embed_tokens(
         Pooling::Last => pool_last(&hidden, num_tokens, hidden_size),
         Pooling::None => hidden,
     })
+}
+
+/// The finished vector of caller `text` and its token count.
+///
+/// The text has no template around it, so it encodes under
+/// `SpecialMode::Ordinary`: nothing in it can become a control token.
+/// The pooled vector then takes `dimensions` and `normalize`.
+///
+/// # Errors
+///
+/// `400` for text that spells a control token or a vector that does not
+/// take `dimensions`, `500` for a failed forward pass.
+pub(crate) async fn embed_text(
+    executor: &Arc<Executor<ServerRuntime>>,
+    text: &str,
+    pooling: Pooling,
+    dimensions: Option<usize>,
+    normalize: bool,
+) -> Result<(Vec<f32>, usize), Box<Response>> {
+    let ids = executor
+        .tokenizer()
+        .encode_with(text, &splintr::SpecialMode::Ordinary)
+        .map_err(|e| Box::new(policy_error_response(&e)))?;
+    let num_tokens = ids.len();
+    let pooled = embed_tokens(executor, ids, pooling).await?;
+    Ok((finished(pooled, dimensions, normalize)?, num_tokens))
+}
+
+/// `vector` cut to `dimensions` and normalized when `normalize` is set.
+///
+/// # Errors
+///
+/// The `400` response of a vector that does not take `dimensions`.
+fn finished(
+    mut vector: Vec<f32>,
+    dimensions: Option<usize>,
+    normalize: bool,
+) -> Result<Vec<f32>, Box<Response>> {
+    finish_vector(&mut vector, dimensions, normalize).map_err(|msg| Box::new(bad_request(&msg)))?;
+    Ok(vector)
 }
 
 /// Embeddings endpoint
@@ -137,26 +181,31 @@ pub async fn embeddings(
     let mut prompt_tokens = 0usize;
 
     for (index, item) in items.into_iter().enumerate() {
-        let mut embedding = match item {
+        let embedding = match item {
             EmbedItem::Text(text) => {
-                // Raw caller text with no template around it: nothing in it can
-                // become a control token.
-                let ids = match executor
-                    .tokenizer()
-                    .encode_with(text, &splintr::SpecialMode::Ordinary)
+                match embed_text(
+                    &executor,
+                    text,
+                    pooling,
+                    request.dimensions,
+                    request.normalize,
+                )
+                .await
                 {
-                    Ok(ids) => ids,
-                    Err(e) => return policy_error_response(&e),
-                };
-                prompt_tokens += ids.len();
-                match embed_tokens(&executor, ids, pooling).await {
-                    Ok(v) => v,
+                    Ok((embedding, num_tokens)) => {
+                        prompt_tokens += num_tokens;
+                        embedding
+                    }
                     Err(resp) => return *resp,
                 }
             }
             EmbedItem::Tokens(ids) => {
                 prompt_tokens += ids.len();
-                match embed_tokens(&executor, ids.to_vec(), pooling).await {
+                let pooled = match embed_tokens(&executor, ids.to_vec(), pooling).await {
+                    Ok(v) => v,
+                    Err(resp) => return *resp,
+                };
+                match finished(pooled, request.dimensions, request.normalize) {
                     Ok(v) => v,
                     Err(resp) => return *resp,
                 }
@@ -169,7 +218,7 @@ pub async fn embeddings(
                     Ok(d) => d,
                     Err(e) => return bad_request(&format!("Failed to decode image: {e}")),
                 };
-                match image_embedding(Arc::clone(embedder), decoded.data).await {
+                let pooled = match image_embedding(Arc::clone(embedder), decoded.data).await {
                     Ok(v) => v,
                     Err(e) => {
                         return error_response(
@@ -178,13 +227,13 @@ pub async fn embeddings(
                             "server_error",
                         );
                     }
+                };
+                match finished(pooled, request.dimensions, request.normalize) {
+                    Ok(v) => v,
+                    Err(resp) => return *resp,
                 }
             }
         };
-
-        if let Err(msg) = finish_vector(&mut embedding, request.dimensions, request.normalize) {
-            return bad_request(&msg);
-        }
 
         let value = match encoding {
             EncodingFormat::Base64 => EmbeddingValue::Base64(encode_f32_base64(&embedding)),

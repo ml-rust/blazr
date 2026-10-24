@@ -12,6 +12,7 @@
 
 use anyhow::{anyhow, Result};
 
+use boostr::inference::sampling::MirostatV2;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -20,7 +21,6 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
-use crate::engine::sampling::MirostatState;
 use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
@@ -31,7 +31,7 @@ use super::types::FinishReason;
 pub(in crate::engine) struct SamplerState<R: Runtime<DType = DType>> {
     /// Prompt ids, extended with each sampled id for repetition penalty.
     pub token_history: Vec<u32>,
-    pub mirostat: Option<MirostatState>,
+    pub mirostat: Option<MirostatV2>,
     /// The request's constraint: its DFA, device mask and current state.
     pub grammar: Option<GrammarState<R>>,
     /// The request's text decoder, primed with the prompt.
@@ -72,11 +72,9 @@ where
         + boostr::quant::traits::DequantOps<R>,
 {
     /// Mirostat v2 state for one request, when `gen_config` enables it.
-    pub(in crate::engine) fn mirostat_state(
-        gen_config: &GenerationConfig,
-    ) -> Option<MirostatState> {
+    pub(in crate::engine) fn mirostat_state(gen_config: &GenerationConfig) -> Option<MirostatV2> {
         if gen_config.mirostat_mode >= 2 {
-            Some(MirostatState::new(
+            Some(MirostatV2::new(
                 gen_config.mirostat_tau,
                 gen_config.mirostat_eta,
                 gen_config.seed,

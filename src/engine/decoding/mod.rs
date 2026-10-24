@@ -1,7 +1,6 @@
-//! Token selection: sampling, mirostat, grammar constraints.
+//! Token selection: sampling, grammar constraints, stop matching.
 
 pub mod grammar_cache;
-pub(crate) mod mirostat;
 pub(crate) mod sampling;
 mod stop_matcher;
 mod token_budget;

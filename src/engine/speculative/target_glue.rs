@@ -4,6 +4,7 @@
 use anyhow::anyhow;
 
 use boostr::error::{Error, Result};
+use boostr::inference::sampling::LogitBias;
 use boostr::inference::speculative::{verify_logits, Draw, SampleRule, SpeculativeClient, Verdict};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
@@ -86,7 +87,12 @@ where
     if gen.logit_bias.is_empty() {
         return Ok(None);
     }
-    Ok(Some(exec.logit_bias_tensor(&gen.logit_bias, DType::F32)?))
+    let bias = LogitBias::new(&gen.logit_bias).to_tensor::<R>(
+        exec.vocab_size(),
+        DType::F32,
+        exec.device(),
+    )?;
+    Ok(Some(bias))
 }
 
 /// Check that `logits` has one row per fed token, then add the bias.

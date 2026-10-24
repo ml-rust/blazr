@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 
+use boostr::inference::sampling::MirostatV2;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -17,8 +18,6 @@ use crate::tokenizer::{token_piece, TokenTextStream};
 use crate::engine::executor::Executor;
 use crate::engine::host_read::last_logits_row;
 use crate::engine::types::{FinishReason, GeneratedToken, TokenLogprob};
-
-use super::MirostatState;
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -56,7 +55,7 @@ where
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
         seed: Option<SampleSeed>,
-        mirostat: &mut Option<MirostatState>,
+        mirostat: &mut Option<MirostatV2>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
         scratch: Option<&SamplingScratch<R>>,
     ) -> Result<(Tensor<R>, Option<u32>)> {
@@ -94,14 +93,20 @@ where
     /// Sample a token using Mirostat v2 from logits on device.
     ///
     /// Pulls logits to CPU, runs mirostat sampling, returns token as GPU tensor.
+    ///
+    /// # Errors
+    ///
+    /// An error when the row holds a NaN or `+inf` logit, or no finite one.
     fn mirostat_sample_on_device(
         &self,
         logits: &Tensor<R>,
-        mirostat: &mut MirostatState,
+        mirostat: &mut MirostatV2,
         gen_config: &GenerationConfig,
     ) -> Result<(Tensor<R>, u32)> {
         let last_logits = last_logits_row(logits)?;
-        let (token_id, _logprob) = mirostat.sample(&last_logits, gen_config.temperature);
+        let (token_id, _logprob) = mirostat
+            .sample(&last_logits, gen_config.temperature)
+            .map_err(|e| anyhow::anyhow!("mirostat sample failed: {e}"))?;
 
         let token_tensor = Tensor::from_slice(&[token_id as i64], &[1], logits.device())?;
         Ok((token_tensor, token_id))

@@ -37,11 +37,8 @@ pub(in crate::engine) fn sample_rule(gen: &GenerationConfig) -> Option<SampleRul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    use boostr::CpuRuntime;
-
-    use crate::engine::Executor;
+    use boostr::inference::sampling::penalty_window;
 
     fn greedy_plain() -> GenerationConfig {
         GenerationConfig {
@@ -122,20 +119,6 @@ mod tests {
         assert_eq!(sample_rule(&unseeded).and_then(|r| r.seed), None);
     }
 
-    /// Token counts of boostr's window: the last `n` tokens, or all for 0.
-    fn boostr_counts(prefix: &[u32], n: usize) -> HashMap<i64, i32> {
-        let window = if n == 0 {
-            prefix
-        } else {
-            &prefix[prefix.len().saturating_sub(n)..]
-        };
-        let mut counts = HashMap::new();
-        for &tok in window {
-            *counts.entry(i64::from(tok)).or_insert(0) += 1;
-        }
-        counts
-    }
-
     #[test]
     fn the_window_matches_the_plain_sampler() {
         let prefix = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3];
@@ -146,13 +129,17 @@ mod tests {
                 ..GenerationConfig::default()
             };
             let rule = sample_rule(&gen).expect("sampled");
-            let (ids, cnts) = Executor::<CpuRuntime>::penalty_window(&prefix, repeat_last_n);
-            let plain: HashMap<i64, i32> = ids.into_iter().zip(cnts).collect();
             assert_eq!(
-                boostr_counts(&prefix, rule.penalty_last_n),
-                plain,
+                penalty_window(&prefix, rule.penalty_last_n),
+                penalty_window(&prefix, gen.repeat_last_n),
                 "repeat_last_n {repeat_last_n}"
             );
         }
+        // boostr's rule: the last `n` tokens, or the whole prefix for 0.
+        assert_eq!(
+            penalty_window(&prefix, 4),
+            (vec![2, 3, 5, 6], vec![1, 1, 1, 1])
+        );
+        assert_eq!(penalty_window(&prefix, 0), penalty_window(&prefix, 64));
     }
 }

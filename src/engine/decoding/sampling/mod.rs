@@ -1,10 +1,6 @@
-//! Token sampling strategies
-//!
-//! Contains temperature-based sampling, mirostat v2, DRY penalty,
-//! typical filtering, logprob computation, and logit bias application.
+//! Token sampling: the fused device sampler, mirostat dispatch, logprobs,
+//! and the glue to boostr's host-side logit shaping.
 
-mod host_filters;
+mod host_params;
 mod logits_to_token;
 mod token;
-
-pub use super::mirostat::MirostatState;

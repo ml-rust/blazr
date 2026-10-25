@@ -151,12 +151,7 @@ impl Cluster {
         let mut clients = clients.into_iter().map(Arc::new);
         let mut next = || clients.next().ok_or_else(|| anyhow!("too few ranks"));
         let (router, prefill_c, decode_c) = (next()?, next()?, next()?);
-        let config = DisaggConfig {
-            prefill_workers: vec![1],
-            decode_workers: vec![2],
-            router_rank: 0,
-            max_kv_transfer_bytes: 1 << 26,
-        };
+        let config = DisaggConfig::standard(1, 1, 1 << 26)?;
         let sampler = CpuClient::new(CpuDevice::new());
         let p = PrefillWorker::new(prefill_c, 1, 0, 1 << 26, sampler.clone(), prefill);
         let d = DecodeWorker::new(decode_c, 2, 0, vec![1], 1 << 26, sampler, open);

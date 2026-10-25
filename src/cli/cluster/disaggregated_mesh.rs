@@ -94,7 +94,8 @@ pub(super) async fn serve_prefill(
         MAX_KV_TRANSFER_BYTES,
         sampler,
         prefill,
-    );
+    )
+    .with_handoff_timeout(layout.config.handoff_timeout);
     tracing::info!(rank = layout.rank, "Prefill worker entering run loop");
     let run = until_signal("prefill worker", worker.run_loop()).await;
     let shutdown = worker.shutdown(RELEASE_WITHIN).await;

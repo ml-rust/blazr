@@ -1,11 +1,9 @@
-//! Fused logits-to-token sampling: the CPU-side penalties, grammar mask and
-//! logit bias applied before the `SamplingOps` kernel call.
+//! Fused logits-to-token sampling: the `SamplingOps` kernel call over logits
+//! that `prepare` has shaped on the host.
 
 use anyhow::{anyhow, Result};
 
-use boostr::inference::sampling::{
-    apply_dry_penalty, apply_typical_filter, penalty_window, DryParams, DynaTemp, LogitBias,
-};
+use boostr::inference::sampling::DryParams;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -17,18 +15,6 @@ use boostr::{
 use crate::config::GenerationConfig;
 
 use crate::engine::executor::Executor;
-use crate::engine::host_read::last_logits_row;
-
-/// Logits ready to sample, and what `logits_to_token[_into]` samples them
-/// with: the penalty-window tensors, how many unique tokens they carry, and
-/// the temperature to sample at.
-struct PreparedLogitsToToken<R: Runtime> {
-    logits: Tensor<R>,
-    ids_tensor: Tensor<R>,
-    cnts_tensor: Tensor<R>,
-    num_unique: usize,
-    temperature: f32,
-}
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -50,16 +36,20 @@ where
     /// Returns `[1]` I64 tensor on device. All decode paths (greedy, greedy+penalties,
     /// non-greedy) return the same type, enabling uniform pipelined decode.
     /// With `gpu_grammar`, the device-side grammar DFA masks the logits first.
+    /// `dry` is the request's DRY penalty, its breakers resolved once at
+    /// the start of the request. `None` applies no DRY penalty.
     /// `seed` names this step's Philox draw. `None` samples unseeded.
     pub(crate) fn logits_to_token_on_device_with_grammar(
         &self,
         logits: &Tensor<R>,
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
+        dry: Option<&DryParams>,
         seed: Option<SampleSeed>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
     ) -> Result<Tensor<R>> {
-        let ready = self.prepare_logits_to_token(logits, recent_tokens, gen_config, gpu_grammar)?;
+        let ready =
+            self.prepare_logits_to_token(logits, recent_tokens, gen_config, dry, gpu_grammar)?;
         let client = R::default_client(self.device());
         client
             .logits_to_token(
@@ -82,16 +72,19 @@ where
     /// Like [`Self::logits_to_token_on_device_with_grammar`], but samples
     /// through [`SamplingOps::logits_to_token_into`], writing the token into
     /// `scratch.output` instead of allocating.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn logits_to_token_on_device_with_grammar_into(
         &self,
         logits: &Tensor<R>,
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
+        dry: Option<&DryParams>,
         seed: Option<SampleSeed>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
         scratch: &SamplingScratch<R>,
     ) -> Result<Tensor<R>> {
-        let ready = self.prepare_logits_to_token(logits, recent_tokens, gen_config, gpu_grammar)?;
+        let ready =
+            self.prepare_logits_to_token(logits, recent_tokens, gen_config, dry, gpu_grammar)?;
         let client = R::default_client(self.device());
         client
             .logits_to_token_into(
@@ -112,84 +105,6 @@ where
             .map_err(|e| anyhow!("logits_to_token_into failed: {}", e))?;
         Ok(scratch.output.clone())
     }
-
-    /// Everything [`Self::logits_to_token_on_device_with_grammar`] and its
-    /// `_into` sibling need before they call into [`SamplingOps`]: logits
-    /// with the CPU-side penalties, the grammar mask and the logit bias
-    /// already applied, the penalty-window tensors, and the temperature to
-    /// sample at.
-    ///
-    /// The DRY/typical rewrite, the grammar mask, the logit bias and the
-    /// penalty-window tensors allocate. This function shares those steps
-    /// between the allocating and the `_into` callers.
-    fn prepare_logits_to_token(
-        &self,
-        logits: &Tensor<R>,
-        recent_tokens: &[u32],
-        gen_config: &GenerationConfig,
-        gpu_grammar: Option<&DeviceGrammarDfa<R>>,
-    ) -> Result<PreparedLogitsToToken<R>> {
-        // Apply CPU-side penalties (DRY, typical) if enabled — these still need CPU
-        let needs_cpu = gen_config.dry_multiplier > 0.0 || gen_config.typical_p > 0.0;
-        let logits = if needs_cpu {
-            // Only the sampled position matters, so only its row copies.
-            let mut last_logits = last_logits_row(logits)?;
-            let vocab_size = last_logits.len();
-
-            if gen_config.dry_multiplier > 0.0 {
-                let dry = DryParams::from(gen_config);
-                dry.check()?;
-                apply_dry_penalty(&mut last_logits, recent_tokens, &dry);
-            }
-            if gen_config.typical_p > 0.0 {
-                apply_typical_filter(&mut last_logits, gen_config.typical_p);
-            }
-
-            Tensor::from_slice(&last_logits, &[1, 1, vocab_size], logits.device())?
-        } else {
-            logits.clone()
-        };
-
-        // Apply grammar DFA mask on device (no CPU<->GPU roundtrip)
-        let logits = if let Some(grammar) = gpu_grammar {
-            let client = R::default_client(self.device());
-            client
-                .grammar_dfa_mask_logits(&logits, grammar)
-                .map_err(|e| anyhow!("grammar_dfa_mask_logits failed: {}", e))?
-        } else {
-            logits
-        };
-
-        // Apply logit_bias before sampling if any biases are specified
-        let bias = LogitBias::new(&gen_config.logit_bias);
-        let logits = if !bias.is_empty() {
-            bias.apply(&logits, self.vocab_size())
-                .map_err(|e| anyhow!("logit_bias add failed: {e}"))?
-        } else {
-            logits
-        };
-
-        let (ids, cnts) = penalty_window(recent_tokens, gen_config.repeat_last_n);
-        let num_unique = ids.len();
-        let ids_tensor = Tensor::from_slice(&ids, &[ids.len()], self.device())?;
-        let cnts_tensor = Tensor::from_slice(&cnts, &[cnts.len()], self.device())?;
-
-        let temperature = if gen_config.is_greedy() {
-            0.0
-        } else if gen_config.dynatemp_range > 0.0 {
-            DynaTemp::from(gen_config).temperature(&last_logits_row(&logits)?)
-        } else {
-            gen_config.temperature
-        };
-
-        Ok(PreparedLogitsToToken {
-            logits,
-            ids_tensor,
-            cnts_tensor,
-            num_unique,
-            temperature,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -202,15 +117,23 @@ mod tests {
 
     use boostr::CpuRuntime;
 
-    use boostr::inference::sampling::MirostatV2;
+    use boostr::inference::sampling::{
+        apply_dry_penalty, apply_typical_filter, DynaTemp, MirostatV2,
+    };
 
+    use super::super::dry_params;
     use crate::engine::test_support::tiny_executor;
 
     // The four functions below are the only lines that name the
     // implementation under test.
 
-    fn dry(logits: &mut [f32], history: &[u32], gen: &GenerationConfig) {
-        apply_dry_penalty(logits, history, &DryParams::from(gen));
+    fn dry(logits: &mut [f32], history: &[u32], gen: &GenerationConfig) -> Result<()> {
+        let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
+        let params = dry_params(&tokenizer, gen)
+            .map_err(|e| anyhow!(e))?
+            .ok_or_else(|| anyhow!("DRY is off"))?;
+        apply_dry_penalty(logits, history, &params);
+        Ok(())
     }
 
     fn typical(logits: &mut [f32], typical_p: f32) {
@@ -278,14 +201,21 @@ mod tests {
     fn device_tokens(gen: &GenerationConfig) -> Result<Vec<i64>> {
         let exec = tiny_executor()?;
         let vocab = exec.vocab_size();
+        let dry = dry_params(exec.tokenizer(), gen).map_err(|e| anyhow!(e))?;
         let mut history = vec![5, 9, 2, 5, 9];
         let mut out = Vec::new();
         for step in 0..24u64 {
             let row = logits(vocab, 100 + step);
             let t = Tensor::<CpuRuntime>::from_slice(&row, &[1, 1, vocab], exec.device())?;
             let seed = Some(SampleSeed::new(11, step));
-            let token =
-                exec.logits_to_token_on_device_with_grammar(&t, &history, gen, seed, None)?;
+            let token = exec.logits_to_token_on_device_with_grammar(
+                &t,
+                &history,
+                gen,
+                dry.as_ref(),
+                seed,
+                None,
+            )?;
             let id = token.to_vec::<i64>()[0];
             history.push(id as u32);
             out.push(id);
@@ -316,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_penalty_matches_the_golden_bits() {
+    fn dry_penalty_matches_the_golden_bits() -> Result<()> {
         let cases: [(usize, f32, usize, usize, u64); 10] = [
             (32, 0.8, 2, 0, 0xa64f_eaef_d3c1_d3c1),
             (32, 1.5, 3, 0, 0x4028_28d5_8b23_f2fb),
@@ -331,7 +261,7 @@ mod tests {
         ];
         for (vocab, multiplier, base, allowed, want) in cases {
             let mut l = logits(vocab, 1);
-            dry(&mut l, &HISTORY, &dry_config(multiplier, base, allowed));
+            dry(&mut l, &HISTORY, &dry_config(multiplier, base, allowed))?;
             assert_eq!(
                 bits(&l),
                 want,
@@ -343,6 +273,7 @@ mod tests {
             0x5542_b013_8626_147b,
             "unpenalized row"
         );
+        Ok(())
     }
 
     #[test]

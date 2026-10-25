@@ -10,7 +10,7 @@ use crate::config::GenerationConfig;
 use crate::server::metrics;
 
 // Re-export types and utilities from gen_types so callers import from one place.
-pub use super::constraint_admission::admit_constraint;
+pub use super::constraint_admission::admit_generation;
 pub use super::gen_types::{
     apply_keep_alive, chat_prompt_error_response, convert_logprobs, encode_with_allowed_special,
     error_response, error_response_with_code, overloaded_response, policy_error_response,

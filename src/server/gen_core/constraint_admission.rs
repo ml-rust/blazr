@@ -1,9 +1,13 @@
-//! Request admission for a constrained request: compile once, before generation.
+//! Request admission: compile the constraint once and resolve DRY, before generation.
+
+use splintr::AnyTokenizer;
 
 use crate::config::{CompiledConstraint, Constraint, GenerationConfig};
+use crate::engine::dry_params;
 use crate::server::handlers::AppState;
 
 /// Set `gen_config`'s constraint and compile it through the shared cache.
+/// Then check the request's DRY fields against `tokenizer`.
 ///
 /// `requested` is the request's own constraint from `resolve_constraint`.
 /// It wins over the live `generation.grammar` default already in
@@ -13,8 +17,19 @@ use crate::server::handlers::AppState;
 /// # Errors
 ///
 /// The error string of a request the handler answers 400: an ambiguous
-/// constraint, or a grammar or schema that does not compile.
-pub async fn admit_constraint(
+/// constraint, a grammar or schema that does not compile, or an invalid DRY
+/// breaker or field.
+pub async fn admit_generation(
+    state: &AppState,
+    gen_config: &mut GenerationConfig,
+    requested: Result<Option<Constraint>, String>,
+    tokenizer: &AnyTokenizer,
+) -> Result<(), String> {
+    admit_constraint(state, gen_config, requested).await?;
+    dry_params(tokenizer, gen_config).map(drop)
+}
+
+async fn admit_constraint(
     state: &AppState,
     gen_config: &mut GenerationConfig,
     requested: Result<Option<Constraint>, String>,

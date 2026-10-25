@@ -16,7 +16,7 @@ use crate::engine::GenerationResult;
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage};
 use crate::server::fim_prompt::{build_fim_prompt, FIM_MARKERS};
 use crate::server::generation::{
-    admit_constraint, chat_prompt_error_response, decode_context_prefix, error_response,
+    admit_generation, chat_prompt_error_response, decode_context_prefix, error_response,
     overloaded_response, policy_error_response, HasSamplingFields,
 };
 use crate::server::handlers::{select_executor, AppState, BudgetPermit, Route};
@@ -209,9 +209,14 @@ pub(in crate::server) async fn prepare_chat<'r>(
     let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
-    admit_constraint(state, &mut gen_config, request.constraint(&tool_choice))
-        .await
-        .map_err(|e| bad_request(&e))?;
+    admit_generation(
+        state,
+        &mut gen_config,
+        request.constraint(&tool_choice),
+        executor.tokenizer(),
+    )
+    .await
+    .map_err(|e| bad_request(&e))?;
     let reasoning_format = request
         .reasoning_format
         .unwrap_or_else(|| state.reasoning_format());

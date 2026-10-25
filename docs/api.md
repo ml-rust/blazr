@@ -165,7 +165,7 @@ Completions and chat accept these fields. Infill accepts a subset.
 | `dry_multiplier`        | number           | `0.0`   | DRY repetition penalty multiplier.                                            |
 | `dry_base`              | integer          | `2`     | DRY base.                                                                     |
 | `dry_allowed_length`    | integer          | `0`     | DRY allowed repeat length.                                                    |
-| `dry_sequence_breakers` | array of strings | none    | DRY sequence breakers.                                                        |
+| `dry_sequence_breakers` | array of strings | none    | DRY sequence breakers. Each string encodes as plain text, and its first token is the breaker, as in llama.cpp. A DRY match never extends across a breaker. With `dry_multiplier` above `0`, an empty string is a `400`. Absent sets no breakers. |
 | `grammar`               | string           | none    | GBNF grammar that constrains output. An empty string sets none.               |
 | `response_format`       | object           | none    | Structured output. See [Structured output](#structured-output).               |
 | `keep_alive`            | string           | none    | Time the model stays loaded after the request. See [keep_alive](#keep_alive). |

@@ -22,7 +22,7 @@ use boostr::{
 use crate::config::GenerationConfig;
 
 use super::executor::Executor;
-use super::sampler_step::SamplerState;
+use super::sampler_state::SamplerState;
 use super::types::{FinishReason, GeneratedToken};
 
 /// Per-request state `generate` builds before it picks a decode arm.

@@ -117,8 +117,9 @@ pub struct GenerationConfig {
     #[serde(default)]
     pub dry_allowed_length: usize,
 
-    /// DRY penalty sequence breakers: tokens that break n-gram matching.
-    /// E.g., newline, period. Default: empty (no breakers).
+    /// DRY sequence breakers. Each string encodes as plain text, and its
+    /// first token id is the breaker, as in llama.cpp. No DRY match extends
+    /// across a breaker. Default: empty, so no breakers.
     #[serde(default)]
     pub dry_sequence_breakers: Vec<String>,
 

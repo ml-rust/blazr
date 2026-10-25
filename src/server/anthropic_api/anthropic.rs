@@ -21,7 +21,7 @@ use crate::model::chat_template::{
 };
 use crate::server::chat_vision::{decode_image_sources, image_route, ImageRoute};
 use crate::server::generation::{
-    admit_constraint, overloaded_response, record_generation_metrics, validate_generation_params,
+    admit_generation, overloaded_response, record_generation_metrics, validate_generation_params,
     HasSamplingFields,
 };
 use crate::server::handlers::{classify_lookup, AppState, DecodeSlot};
@@ -106,7 +106,8 @@ pub async fn messages(
     let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
-    if let Err(e) = admit_constraint(&state, &mut gen_config, Ok(None)).await {
+    if let Err(e) = admit_generation(&state, &mut gen_config, Ok(None), executor.tokenizer()).await
+    {
         return anthropic_error(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
     let reasoning_format = state.reasoning_format();

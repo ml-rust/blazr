@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::fim_prompt::{build_fim_prompt, FIM_MARKERS};
 use crate::server::generation::{
-    admit_constraint, apply_keep_alive, error_response, overloaded_response, policy_error_response,
+    admit_generation, apply_keep_alive, error_response, overloaded_response, policy_error_response,
     record_generation_metrics, validate_generation_params, HasSamplingFields, SamplingParams,
     Usage,
 };
@@ -61,7 +61,8 @@ pub async fn infill(
     let mut gen_config = request
         .sampling_params()
         .into_gen_config(&state.config().generation);
-    if let Err(e) = admit_constraint(&state, &mut gen_config, Ok(None)).await {
+    if let Err(e) = admit_generation(&state, &mut gen_config, Ok(None), executor.tokenizer()).await
+    {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
     // The infill wire format has no logprobs, so a `generation.logprobs` default is ignored.

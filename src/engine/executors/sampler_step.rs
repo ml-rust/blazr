@@ -12,7 +12,6 @@
 
 use anyhow::{anyhow, Result};
 
-use boostr::inference::sampling::MirostatV2;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -21,25 +20,10 @@ use boostr::{
 };
 
 use crate::config::GenerationConfig;
-use crate::tokenizer::TokenTextStream;
 
 use super::executor::Executor;
 use super::sampler_grammar::GrammarState;
-use super::types::FinishReason;
-
-/// Sampling state one request carries through its decode loop.
-pub(in crate::engine) struct SamplerState<R: Runtime<DType = DType>> {
-    /// Prompt ids, extended with each sampled id for repetition penalty.
-    pub token_history: Vec<u32>,
-    pub mirostat: Option<MirostatV2>,
-    /// The request's constraint: its DFA, device mask and current state.
-    pub grammar: Option<GrammarState<R>>,
-    /// The request's text decoder, primed with the prompt.
-    pub text: TokenTextStream,
-    /// Index of the next token this request samples, from 0. A seeded
-    /// request uses it as the Philox counter, so each step draws anew.
-    pub step: u64,
-}
+use super::sampler_state::SamplerState;
 
 /// Where a sampled token id comes from.
 enum TokenSource {
@@ -71,39 +55,6 @@ where
         + ModelClient<R>
         + boostr::quant::traits::DequantOps<R>,
 {
-    /// Mirostat v2 state for one request, when `gen_config` enables it.
-    pub(in crate::engine) fn mirostat_state(gen_config: &GenerationConfig) -> Option<MirostatV2> {
-        if gen_config.mirostat_mode >= 2 {
-            Some(MirostatV2::new(
-                gen_config.mirostat_tau,
-                gen_config.mirostat_eta,
-                gen_config.seed,
-            ))
-        } else {
-            None
-        }
-    }
-
-    /// Repetition history, mirostat state and grammar state for one request.
-    ///
-    /// # Errors
-    ///
-    /// An error when the request's constraint does not compile or does not
-    /// upload. A constrained request never decodes unconstrained.
-    pub(in crate::engine) fn sampler_state(
-        &self,
-        prompt_tokens: &[u32],
-        gen_config: &GenerationConfig,
-    ) -> Result<SamplerState<R>> {
-        Ok(SamplerState {
-            token_history: prompt_tokens.to_vec(),
-            mirostat: Self::mirostat_state(gen_config),
-            grammar: self.grammar_state(gen_config)?,
-            text: TokenTextStream::new(self.tokenizer(), prompt_tokens),
-            step: 0,
-        })
-    }
-
     /// Sample the next token from `logits` and leave its id on the device.
     ///
     /// Mirostat, the device grammar mask and the device filters apply as
@@ -125,6 +76,7 @@ where
             logits,
             &state.token_history,
             gen_config,
+            state.dry.as_ref(),
             seed,
             &mut state.mirostat,
             state.grammar.as_ref().map(GrammarState::device),
@@ -187,25 +139,6 @@ where
         self.sample_finish(&pending, state)
     }
 
-    /// Whether `next_token` ends generation, and why.
-    ///
-    /// Every decode loop and every lane uses it, so the eos and length
-    /// policy cannot drift between them.
-    pub(in crate::engine) fn decode_finish_reason(
-        &self,
-        next_token: u32,
-        step: usize,
-        max_tokens: usize,
-    ) -> Option<FinishReason> {
-        if self.tokenizer().is_eos(next_token) {
-            Some(FinishReason::Eos)
-        } else if step + 1 == max_tokens {
-            Some(FinishReason::Length)
-        } else {
-            None
-        }
-    }
-
     /// Advance the request's grammar past `next_token` on the host and the
     /// device. Without a grammar this does nothing.
     ///
@@ -223,14 +156,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
-    use boostr::inference::grammar::json_schema::SchemaOptions;
-    use boostr::inference::grammar::CompileLimits;
     use boostr::CpuRuntime;
 
-    use crate::config::{CompiledConstraint, Constraint};
-    use crate::engine::compile_constraint;
+    use super::super::types::FinishReason;
+    use crate::config::Constraint;
     use crate::engine::test_support::{full_vocab_executor, piece_id, tiny_executor};
 
     /// The logit the peak token gets. Every other token gets 0.
@@ -456,22 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn eos_ids_are_the_finish_ids_inside_the_model_vocab() -> Result<()> {
-        let tiny = tiny_executor()?;
-        assert!(tiny.eos_ids().is_empty(), "the EOS id is past 32 ids");
-        let full = full_vocab_executor(None)?;
-        let eos = full
-            .tokenizer()
-            .eos_token_id()
-            .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
-        assert_eq!(full.eos_ids(), vec![eos]);
-        for id in full.eos_ids() {
-            assert_eq!(full.decode_finish_reason(id, 0, 8), Some(FinishReason::Eos));
-        }
-        Ok(())
-    }
-
-    #[test]
     fn an_eos_id_before_a_complete_match_is_an_error() -> Result<()> {
         let exec = full_vocab_executor(None)?;
         let eos = exec
@@ -504,60 +418,6 @@ mod tests {
         let result = exec.generate_text(&[1], &cfg).await?;
         assert_eq!(result.text, "77");
         assert_eq!(result.finish_reason, FinishReason::Length);
-        Ok(())
-    }
-
-    #[test]
-    fn a_bad_constraint_fails_the_request_before_it_decodes() -> Result<()> {
-        let exec = tiny_executor()?;
-        let invalid = exec.sampler_state(&[1], &gbnf("root ::= ("));
-        assert!(invalid.is_err_and(|e| e.to_string().contains("does not compile")));
-        let schema = serde_json::json!({"type": "integer", "minimum": 0});
-        let unsupported = exec.sampler_state(&[1], &constrained(Constraint::JsonSchema(schema)));
-        assert!(unsupported.is_err_and(|e| e.to_string().contains("minimum")));
-        Ok(())
-    }
-
-    #[test]
-    fn an_admitted_dfa_is_used_and_a_stale_one_is_ignored() -> Result<()> {
-        let exec = tiny_executor()?;
-        let five = Constraint::Gbnf(r#"root ::= "5""#.to_string());
-        let dfa = Arc::new(compile_constraint(
-            &five,
-            &SchemaOptions::default(),
-            &CompileLimits::default(),
-        )?);
-        let admitted = GenerationConfig {
-            compiled: Some(CompiledConstraint::new(five.clone(), Arc::clone(&dfa))),
-            ..constrained(five)
-        };
-        assert!(exec.sampler_state(&[1], &admitted)?.grammar.is_some());
-
-        // The compiled DFA names another constraint, so the bad text compiles here.
-        let stale = GenerationConfig {
-            constraint: Some(Constraint::Gbnf("root ::= (".to_string())),
-            ..admitted
-        };
-        assert!(exec.sampler_state(&[1], &stale).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn finish_reason_is_eos_then_length_then_none() -> Result<()> {
-        let exec = tiny_executor()?;
-        let eos = exec
-            .tokenizer()
-            .eos_token_id()
-            .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
-        assert_eq!(
-            exec.decode_finish_reason(eos, 0, 4),
-            Some(FinishReason::Eos)
-        );
-        assert_eq!(
-            exec.decode_finish_reason(5, 3, 4),
-            Some(FinishReason::Length)
-        );
-        assert_eq!(exec.decode_finish_reason(5, 1, 4), None);
         Ok(())
     }
 }

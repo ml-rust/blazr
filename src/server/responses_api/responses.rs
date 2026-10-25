@@ -19,7 +19,7 @@ use super::responses_types::{
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, RenderOptions};
 use crate::server::chat_vision::{decode_image_sources, image_route, marked_text, ImageRoute};
 use crate::server::generation::{
-    admit_constraint, chat_prompt_error_response, error_response, overloaded_response,
+    admit_generation, chat_prompt_error_response, error_response, overloaded_response,
     record_generation_metrics, validate_generation_params,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
@@ -130,7 +130,14 @@ pub async fn responses(
             .unwrap_or(defaults.stop_sequences.clone()),
         ..defaults
     };
-    if let Err(e) = admit_constraint(&state, &mut gen_config, request.constraint()).await {
+    if let Err(e) = admit_generation(
+        &state,
+        &mut gen_config,
+        request.constraint(),
+        executor.tokenizer(),
+    )
+    .await
+    {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 

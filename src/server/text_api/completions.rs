@@ -13,7 +13,7 @@ use super::completion_choices::generate_choices;
 use super::completion_prompt::{resolve_prompt, PromptContext, ResolvedPrompt};
 use super::completion_types::{CompletionRequest, CompletionResponse};
 use crate::server::generation::{
-    admit_constraint, apply_keep_alive, decode_context_prefix, error_response, overloaded_response,
+    admit_generation, apply_keep_alive, decode_context_prefix, error_response, overloaded_response,
     record_generation_metrics, resolve_constraint, HasSamplingFields, Usage,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
@@ -53,7 +53,8 @@ pub async fn completions(
         .into_gen_config(&state.config().generation);
     let requested =
         resolve_constraint(request.grammar.as_deref(), request.response_format.as_ref());
-    if let Err(e) = admit_constraint(&state, &mut gen_config, requested).await {
+    if let Err(e) = admit_generation(&state, &mut gen_config, requested, executor.tokenizer()).await
+    {
         return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
     }
 

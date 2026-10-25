@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use boostr::inference::sampling::MirostatV2;
+use boostr::inference::sampling::{DryParams, MirostatV2};
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
 use boostr::{
@@ -46,6 +46,8 @@ where
     /// `scratch`: its state update needs the full distribution on the host,
     /// and it returns a freshly allocated tensor.
     ///
+    /// `dry` is the request's resolved DRY penalty. Mirostat ignores it.
+    ///
     /// `seed` names this step's Philox draw for the fused kernel. Mirostat
     /// ignores it: its host generator takes the request seed once.
     #[allow(clippy::too_many_arguments)]
@@ -54,6 +56,7 @@ where
         logits: &Tensor<R>,
         recent_tokens: &[u32],
         gen_config: &GenerationConfig,
+        dry: Option<&DryParams>,
         seed: Option<SampleSeed>,
         mirostat: &mut Option<MirostatV2>,
         gpu_grammar: Option<&DeviceGrammarDfa<R>>,
@@ -75,6 +78,7 @@ where
                 logits,
                 recent_tokens,
                 gen_config,
+                dry,
                 seed,
                 gpu_grammar,
                 scratch,
@@ -83,6 +87,7 @@ where
                 logits,
                 recent_tokens,
                 gen_config,
+                dry,
                 seed,
                 gpu_grammar,
             )?,

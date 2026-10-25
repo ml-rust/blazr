@@ -352,7 +352,7 @@ DRY and typical sampling:
 | `dry_multiplier`        | float        | `0.0`   | DRY penalty multiplier. `0` disables it.                     |
 | `dry_base`              | integer      | `2`     | Minimum n-gram length to penalize                            |
 | `dry_allowed_length`    | integer      | `0`     | Tokens scanned back for repeats. `0` scans the full history. |
-| `dry_sequence_breakers` | string array | `[]`    | Strings that break n-gram matching                           |
+| `dry_sequence_breakers` | string array | `[]`    | Strings no DRY match extends across. Each one's first token is the breaker. `[]` sets none. |
 | `typical_p`             | float        | `0.0`   | Typical sampling threshold. `0` disables it.                 |
 
 ## CLI flags

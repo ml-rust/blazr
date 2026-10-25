@@ -26,6 +26,7 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
+- **`dry_sequence_breakers`** — the DRY penalty now applies the breakers. Before, requests and `generation.dry_sequence_breakers` parsed them, and the penalty ignored them. Each string encodes as plain text, and its first token is the breaker, as in llama.cpp. A DRY match never extends across a breaker. A request resolves its breakers once, before its first token. With `dry_multiplier` above 0, a breaker that encodes to no token is a `400`. Absent breakers set none. blazr has no default breakers.
 - **Negative `keep_alive`** — every negative value, such as `"-5m"`, now keeps the model loaded. Before, only `"-1"` was explicit and other negative forms kept it loaded only because they did not parse.
 - **`keep_alive` on streamed chat** — a streamed chat request now applies `keep_alive` once its last token is out. Before, only a non-streaming request applied it.
 - **`keep_alive` on streamed completions and infill** — a streamed `/v1/completions` or infill request now applies `keep_alive` once its last token is out, as chat does.

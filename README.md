@@ -156,7 +156,9 @@ Without `--model`, the server loads `default_model` when that key is set. Otherw
 | Qwen2/2.5, Phi-3.5, Gemma 2, StarCoder2, GPT-NeoX/Pythia, Falcon-RW, Mixtral | SafeTensors tested against `transformers`: 32 of 32 greedy ids match  |
 | Qwen2-MoE, DBRX, Command-R (Cohere)                                          | SafeTensors tested against `transformers` on tiny random-weight files |
 | Qwen3.5 hybrid                                                               | GGUF tested                                                           |
-| Mamba2, Mamba3, DeepSeek-V2/V3, Mamba+attention hybrids                      | Supported in code, no test names a checkpoint                         |
+| oxidizr MLA, MLA+MoE, and Mamba2 + MLA+MoE hybrids                           | Tiny seeded oxidizr checkpoints generate through the loader           |
+| Mamba2, Mamba3, Mamba+attention hybrids                                      | Supported in code, no test names a checkpoint                         |
+| DeepSeek-V2/V3                                                               | Refused at load: no DeepSeek model implementation                     |
 | AWQ, GPTQ and GGUF files of those families, Phi-2                            | Routed to the Llama path, untested                                    |
 | InternLM2                                                                    | Routed to the Llama path. No tensor name map, so the load fails       |
 

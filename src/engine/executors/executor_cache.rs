@@ -132,6 +132,30 @@ where
         )?)
     }
 
+    /// The `[1, n]` input of prompt positions `range`: `input` itself when
+    /// the range covers the whole prompt.
+    ///
+    /// # Errors
+    ///
+    /// An error when the input tensor cannot be built.
+    pub(crate) fn prompt_piece(
+        &self,
+        input: &Tensor<R>,
+        prompt_tokens: &[u32],
+        range: std::ops::Range<usize>,
+    ) -> Result<Tensor<R>> {
+        if range == (0..prompt_tokens.len()) {
+            return Ok(input.clone());
+        }
+        let piece = prompt_tokens.get(range.clone()).ok_or_else(|| {
+            anyhow!(
+                "prompt positions {range:?} lie outside the {}-token prompt",
+                prompt_tokens.len()
+            )
+        })?;
+        self.create_input_tensor(piece)
+    }
+
     /// Greedy argmax on GPU — returns the token as a GPU tensor [1] i64.
     /// No CPU sync happens here; the result stays on device.
     pub(crate) fn argmax_on_gpu(&self, logits: &Tensor<R>) -> Result<Tensor<R>> {

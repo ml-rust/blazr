@@ -17,7 +17,6 @@ const SUPPORTED_GGUF_ARCHS: &[&str] = &[
     "llama3",
     "mistral",
     "deepseek",
-    "deepseek2",
     "mamba",
     "mamba2",
     "mamba3",
@@ -45,6 +44,10 @@ pub(crate) fn config_from_gguf_metadata(gguf: &mut Gguf) -> Result<BlazrConfig> 
         .architecture()
         .ok_or_else(|| anyhow!("GGUF missing general.architecture"))?
         .to_string();
+    // DeepSeek-V2/V3 (`deepseek2`) refuse before any of their keys is read.
+    if let Some(reason) = boostr::model::unsupported_model_refusal(&arch_name) {
+        return Err(anyhow!(reason));
+    }
     let rope_scaling = rope_scaling_from_gguf(gguf, &arch_name)?;
     let metadata = gguf.metadata();
     let arch = arch_name.as_str();
@@ -93,7 +96,7 @@ pub(crate) fn config_from_gguf_metadata(gguf: &mut Gguf) -> Result<BlazrConfig> 
     let model_type = match arch {
         "llama" | "llama2" | "llama3" => "llama",
         "mistral" => "mistral",
-        "deepseek" | "deepseek2" => "deepseek",
+        "deepseek" => "deepseek",
         "mamba" | "mamba2" => "mamba2",
         "mamba3" => "mamba3",
         "falcon" => "falcon",
@@ -381,6 +384,18 @@ mod tests {
         assert!(msg.contains("not_a_real_arch"), "{msg}");
         assert!(msg.contains("qwen35"), "{msg}");
         assert!(msg.contains("llama"), "{msg}");
+    }
+
+    #[test]
+    fn deepseek2_is_refused_as_an_unsupported_model() {
+        let pairs = [
+            ("general.architecture", Kv::Str("deepseek2")),
+            ("deepseek2.embedding_length", Kv::U32(64)),
+        ];
+        let err = config_from_gguf_metadata(&mut open(&pairs)).expect_err("deepseek2");
+        let msg = err.to_string();
+        assert!(msg.contains("no DeepSeek model implementation"), "{msg}");
+        assert!(msg.contains("deepseek2"), "{msg}");
     }
 
     #[test]

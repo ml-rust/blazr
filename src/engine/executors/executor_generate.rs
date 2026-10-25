@@ -122,6 +122,14 @@ where
                 for await item in inner {
                     yield item;
                 }
+            } else if model.num_ssm_layers().is_some_and(|n| n > 0) {
+                // ── hybrid path: KV cache (attention layers) + SSM state ──
+                // Checked before the Mamba2 path: needs_ssm_state() is also
+                // true here, and that path sizes no KV cache.
+                let inner = self.generate_hybrid(prompt_tokens, gen_config, input, max_tokens, sampler, cancel);
+                for await item in inner {
+                    yield item;
+                }
             } else if model.needs_ssm_state() {
                 // ── Mamba2 path: SSM state instead of KV cache ──
                 let mamba_config = model.mamba_config()
@@ -292,30 +300,6 @@ where
 
             tracing::debug!("Generation loop complete");
         }
-    }
-
-    /// The `[1, n]` input of prompt positions `range`: `input` itself when
-    /// the range covers the whole prompt.
-    ///
-    /// # Errors
-    ///
-    /// An error when the input tensor cannot be built.
-    pub(crate) fn prompt_piece(
-        &self,
-        input: &Tensor<R>,
-        prompt_tokens: &[u32],
-        range: std::ops::Range<usize>,
-    ) -> Result<Tensor<R>> {
-        if range == (0..prompt_tokens.len()) {
-            return Ok(input.clone());
-        }
-        let piece = prompt_tokens.get(range.clone()).ok_or_else(|| {
-            anyhow!(
-                "prompt positions {range:?} lie outside the {}-token prompt",
-                prompt_tokens.len()
-            )
-        })?;
-        self.create_input_tensor(piece)
     }
 }
 

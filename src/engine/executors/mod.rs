@@ -10,6 +10,7 @@ pub(crate) mod executor_access;
 pub(super) mod executor_cache;
 pub(super) mod executor_embed;
 pub(super) mod executor_generate;
+pub(super) mod executor_generate_hybrid;
 pub(super) mod executor_generate_qwen35;
 pub mod executor_load;
 pub(super) mod executor_multimodal;

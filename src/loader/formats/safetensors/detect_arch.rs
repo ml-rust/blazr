@@ -4,27 +4,29 @@ use anyhow::Result;
 
 use boostr::format::SafeTensorsLoader;
 
-use crate::model::detect::DetectedConfig;
+use crate::model::detect::{DetectedConfig, LayerType};
 
-/// Detect architecture from SafeTensorsLoader
+/// Detect architecture from SafeTensorsLoader: layer types from tensor
+/// names, and dimensions from tensor shapes through boostr's detectors.
+///
+/// A dense attention model keeps blazr's Llama defaults for its heads:
+/// head_dim 128 from layer 0's `q_proj` and `k_proj`.
 pub fn detect_architecture_from_loader(loader: &SafeTensorsLoader) -> Result<DetectedConfig> {
     let tensor_names = loader.tensor_names();
+    let names: Vec<&str> = tensor_names.iter().map(String::as_str).collect();
+    let shape_of = |name: &str| loader.tensor_info(name).ok().map(|info| info.shape.clone());
+    let mut config = boostr::model::detection::detect_architecture_from_shapes(&names, &shape_of)?;
 
-    let mut config = crate::model::detect::detect_architecture_from_names(&tensor_names)?;
-
-    let format = config.format;
-    let prefix = match format {
+    let prefix = match config.format {
         crate::model::detect::ModelFormat::HuggingFace => "model.",
         crate::model::detect::ModelFormat::Oxidizr => "",
     };
-
-    // Detect hidden_size and vocab_size from embedding layer
-    let embed_key = format!("{}embed_tokens.weight", prefix);
-    if let Ok(info) = loader.tensor_info(&embed_key) {
-        if info.shape.len() == 2 {
-            config.vocab_size = info.shape[0];
-            config.hidden_size = info.shape[1];
-        }
+    let is_mla = config
+        .layer_types
+        .iter()
+        .any(|t| matches!(t, LayerType::MlaWithMoe | LayerType::MlaWithMlp));
+    if is_mla {
+        return Ok(config);
     }
 
     // Detect intermediate_size from MLP if present
@@ -229,10 +231,11 @@ mod tests {
         ];
         for i in 0..num_layers {
             let p = format!("model.layers.{}.", i);
-            names.push(format!("{}self_attn.w_dkv.weight", p));
-            names.push(format!("{}self_attn.w_q.weight", p));
-            names.push(format!("{}self_attn.w_o.weight", p));
-            names.push(format!("{}moe.gate.weight", p));
+            names.push(format!("{}self_attn.q_a_proj.weight", p));
+            names.push(format!("{}self_attn.kv_a_proj_with_mqa.weight", p));
+            names.push(format!("{}self_attn.kv_b_proj.weight", p));
+            names.push(format!("{}self_attn.o_proj.weight", p));
+            names.push(format!("{}moe.router.gate.weight", p));
             names.push(format!("{}moe.experts.0.up_proj.weight", p));
             names.push(format!("{}moe.experts.0.down_proj.weight", p));
             names.push(format!("{}input_layernorm.weight", p));
@@ -270,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hf_deepseek_mla_moe() {
+    fn test_oxidizr_mla_moe() {
         let names = hf_mla_moe_names(8);
         let config = detect_architecture_from_names(&names).unwrap();
         assert_eq!(config.format, ModelFormat::HuggingFace);

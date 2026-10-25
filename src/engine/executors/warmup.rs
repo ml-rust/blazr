@@ -53,6 +53,8 @@ where
 
         if model.needs_gdn_state() {
             self.warmup_qwen35(&warmup_input)?;
+        } else if model.num_ssm_layers().is_some_and(|n| n > 0) {
+            self.warmup_hybrid(&warmup_input)?;
         } else if model.needs_ssm_state() {
             self.warmup_mamba(&warmup_input)?;
         } else if self.config().inference.paged_attention {
@@ -87,6 +89,22 @@ where
         let position = kv_cache.seq_len();
         let _ = model
             .forward_qwen35(warmup_input, &mut kv_cache, &mut gdn_state, position)
+            .map_err(|e| anyhow!("Warmup decode forward pass failed: {}", e))?;
+        Ok(())
+    }
+
+    /// KV cache for the attention layers, SSM state for the rest. Sized
+    /// through `hybrid_caches`, never by `num_layers()`.
+    fn warmup_hybrid(&self, warmup_input: &Tensor<R>) -> Result<()> {
+        let model = self.model()?;
+        let capacity = self.config().max_seq_len().min(16);
+        let (mut kv_cache, mut ssm_state) = self.hybrid_caches(capacity, capacity)?;
+        let _ = model
+            .forward_hybrid(warmup_input, &mut kv_cache, &mut ssm_state, 0)
+            .map_err(|e| anyhow!("Warmup prefill forward pass failed: {}", e))?;
+        let position = kv_cache.seq_len();
+        let _ = model
+            .forward_hybrid(warmup_input, &mut kv_cache, &mut ssm_state, position)
             .map_err(|e| anyhow!("Warmup decode forward pass failed: {}", e))?;
         Ok(())
     }

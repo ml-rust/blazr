@@ -3,10 +3,12 @@
 pub(super) mod hybrid_lane_admit;
 pub(super) mod hybrid_lane_engine;
 pub(super) mod lane_api;
+pub(super) mod lane_deliver;
 pub(super) mod lane_engine;
 pub(super) mod lane_prefill;
 pub(super) mod lane_scheduler;
 pub(super) mod lane_session;
+pub(super) mod lane_wakeup;
 
 #[cfg(feature = "cuda")]
 pub use boostr::inference::lane_decode::LaneDecodeMode;

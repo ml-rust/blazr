@@ -32,10 +32,13 @@ use boostr::CudaRuntime;
 
 use crate::config::GenerationConfig;
 
+use super::lane_deliver::deliver_token;
 use super::lane_scheduler::LaneScheduler;
 use super::lane_session::{LaneAdmitted, LaneToken};
+use super::lane_wakeup::{drain_wakeups, stop_requested, take_wakeups, wait_for_work, Wake};
 use crate::engine::executor::Executor;
-use crate::engine::types::{FinishReason, GeneratedToken};
+use crate::engine::seq_sampler::SampledToken;
+use crate::engine::types::FinishReason;
 
 /// Fills and steps the lanes of one `qwen35` lane session.
 pub struct LaneEngine {
@@ -100,14 +103,8 @@ impl LaneEngine {
     /// [`Self::run`] until `stop` resolves. The loop reads `stop` while it
     /// waits for work and between steps, then closes the lane session.
     pub async fn run_until(mut self, stop: impl std::future::Future<Output = ()>) {
-        use futures::FutureExt;
-
         let mut stop = std::pin::pin!(stop);
-        let Some(mut notify_rx) = self.scheduler.take_notify_rx() else {
-            tracing::error!(
-                "the lane scheduler's wakeup receiver was already taken; only one LaneEngine may \
-                 drive one LaneScheduler"
-            );
+        let Some(mut notify_rx) = take_wakeups(&self.scheduler) else {
             return;
         };
 
@@ -121,34 +118,24 @@ impl LaneEngine {
             self.admit_waiting().await;
 
             if self.live == 0 {
-                // `select` polls `stop` first.
-                let wakeup = std::pin::pin!(notify_rx.recv());
-                let next = match futures::future::select(stop.as_mut(), wakeup).await {
-                    futures::future::Either::Left(((), _)) => {
+                match wait_for_work(stop.as_mut(), &mut notify_rx).await {
+                    Wake::Work => continue,
+                    Wake::Stop => {
                         tracing::info!("lane decode loop stop requested, shutting down");
                         break;
                     }
-                    futures::future::Either::Right((next, _)) => next,
-                };
-                match next {
-                    Some(()) => continue,
-                    None => {
-                        tracing::info!("lane scheduler closed its wakeup channel, shutting down");
-                        break;
-                    }
+                    Wake::Closed => break,
                 }
             }
 
-            // Wakeups that arrived while stepping need no action: the next
-            // iteration admits from the queue before it steps again.
-            while notify_rx.try_recv().is_ok() {}
+            drain_wakeups(&mut notify_rx);
 
             match self.executor.qwen35_lane_step().await {
                 Ok(tokens) => self.forward_step(tokens).await,
                 Err(e) => self.fail_live_lanes(&e).await,
             }
 
-            if stop.as_mut().now_or_never().is_some() {
+            if stop_requested(stop.as_mut()) {
                 tracing::info!("lane decode loop stop requested, shutting down");
                 break;
             }
@@ -318,23 +305,14 @@ impl LaneEngine {
         token_id: u32,
         finish_reason: Option<FinishReason>,
     ) -> bool {
+        let sampled = SampledToken {
+            id: token_id,
+            logprob: None,
+            top_logprobs: None,
+            finish: finish_reason,
+        };
         let registry = self.scheduler.registry();
-        let cut = registry.token_text(seq_id, self.executor.tokenizer(), token_id, finish_reason);
-        let (text, finish_reason) = (cut.text, cut.finish);
-        registry.push_history(seq_id, token_id);
-        let delivered = registry
-            .send_token(
-                seq_id,
-                GeneratedToken {
-                    token_id,
-                    text,
-                    logprob: None,
-                    top_logprobs: None,
-                    finish_reason,
-                },
-            )
-            .await;
-        delivered && finish_reason.is_none()
+        deliver_token(registry, self.executor.tokenizer(), seq_id, sampled).await
     }
 
     /// Finish the request in `lane` and give the lane back.

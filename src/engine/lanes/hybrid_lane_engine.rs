@@ -40,10 +40,11 @@ use boostr::{
     SamplingOps, ScalarOps, TypeConversionOps, UnaryOps,
 };
 
+use super::lane_deliver::deliver_token;
 use super::lane_scheduler::LaneScheduler;
+use super::lane_wakeup::{drain_wakeups, stop_requested, take_wakeups, wait_for_work, Wake};
 use crate::engine::executor::Executor;
 use crate::engine::seq_sampler::{BatchSeqs, SampledToken};
-use crate::engine::types::GeneratedToken;
 
 /// One admitted request's decode state.
 pub(in crate::engine) struct HybridLane<R: Runtime<DType = DType>> {
@@ -147,14 +148,8 @@ where
     /// [`Self::run`] until `stop` resolves. The loop reads `stop` while it
     /// waits for work and between steps.
     pub async fn run_until(mut self, stop: impl std::future::Future<Output = ()>) {
-        use futures::FutureExt;
-
         let mut stop = std::pin::pin!(stop);
-        let Some(mut notify_rx) = self.scheduler.take_notify_rx() else {
-            tracing::error!(
-                "the lane scheduler's wakeup receiver was already taken; only one engine can \
-                 drive one LaneScheduler"
-            );
+        let Some(mut notify_rx) = take_wakeups(&self.scheduler) else {
             return;
         };
         tracing::info!(lanes = self.lanes.len(), "hybrid lane decode loop started");
@@ -162,21 +157,14 @@ where
         loop {
             self.admit_waiting().await;
             if self.live() == 0 {
-                // `select` polls `stop` first.
-                let wakeup = std::pin::pin!(notify_rx.recv());
-                match futures::future::select(stop.as_mut(), wakeup).await {
-                    futures::future::Either::Left(((), _)) => break,
-                    futures::future::Either::Right((Some(()), _)) => continue,
-                    futures::future::Either::Right((None, _)) => {
-                        tracing::info!("lane scheduler closed its wakeup channel, shutting down");
-                        break;
-                    }
+                match wait_for_work(stop.as_mut(), &mut notify_rx).await {
+                    Wake::Work => continue,
+                    Wake::Stop | Wake::Closed => break,
                 }
             }
-            // The next iteration admits from the queue, so these need no action.
-            while notify_rx.try_recv().is_ok() {}
+            drain_wakeups(&mut notify_rx);
             self.step().await;
-            if stop.as_mut().now_or_never().is_some() {
+            if stop_requested(stop.as_mut()) {
                 break;
             }
         }
@@ -197,26 +185,11 @@ where
 
     /// Send one sampled token to its caller and record it.
     ///
-    /// The request's stop sequences cut the text as on every other path.
     /// Returns `false` when the request is over: the token finished it, or
     /// the caller's receiver is gone.
     pub(super) async fn deliver(&self, seq_id: SequenceId, sampled: SampledToken) -> bool {
         let registry = self.scheduler.registry();
-        let cut = registry.token_text(
-            seq_id,
-            self.executor.tokenizer(),
-            sampled.id,
-            sampled.finish,
-        );
-        registry.push_history(seq_id, sampled.id);
-        let token = GeneratedToken {
-            token_id: sampled.id,
-            text: cut.text,
-            logprob: sampled.logprob,
-            top_logprobs: sampled.top_logprobs,
-            finish_reason: cut.finish,
-        };
-        registry.send_token(seq_id, token).await && cut.finish.is_none()
+        deliver_token(registry, self.executor.tokenizer(), seq_id, sampled).await
     }
 
     /// End the request in `lane` and free the lane with its caches.
@@ -268,6 +241,7 @@ mod tests {
     use crate::engine::request_registry::{GenerationScheduler, RequestHandle};
     use crate::engine::requests::batch_test_rig::greedy;
     use crate::engine::test_support::WAIT_LIMIT;
+    use crate::engine::types::GeneratedToken;
     use crate::engine::{EngineThread, FailRequests, ThreadedScheduler, WorkHold};
 
     /// A request decodes in one lane while a nine-token prompt prefills in

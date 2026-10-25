@@ -221,7 +221,14 @@ pub(crate) fn seeded_executor_pair(
 /// Its logits depend on the prompt, and its hidden states are nonzero.
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 pub(crate) fn seeded_full_vocab_executor(seed: u64) -> Result<Executor<CpuRuntime>> {
-    seeded_full_vocab_on(seed, None)
+    seeded_full_vocab_on(seed, None, 1)
+}
+
+/// A [`seeded_full_vocab_executor`] of `layers` layers, so a pipeline test
+/// can split it across stages.
+#[cfg(all(feature = "distributed", not(any(feature = "cuda", feature = "wgpu"))))]
+pub(crate) fn seeded_full_vocab_layers(seed: u64, layers: usize) -> Result<Executor<CpuRuntime>> {
+    seeded_full_vocab_on(seed, None, layers)
 }
 
 /// A [`seeded_full_vocab_executor`] over the paged KV pool `pool`, with the
@@ -231,32 +238,38 @@ pub(crate) fn seeded_full_vocab_executor(seed: u64) -> Result<Executor<CpuRuntim
 /// generation decodes. The generation then ends with an error.
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 pub(crate) fn seeded_full_vocab_paged(seed: u64, pool: PagedPool) -> Result<Executor<CpuRuntime>> {
-    seeded_full_vocab_on(seed, Some(pool))
+    seeded_full_vocab_on(seed, Some(pool), 1)
 }
 
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-fn seeded_full_vocab_on(seed: u64, paged: Option<PagedPool>) -> Result<Executor<CpuRuntime>> {
+fn seeded_full_vocab_on(
+    seed: u64,
+    paged: Option<PagedPool>,
+    layers: usize,
+) -> Result<Executor<CpuRuntime>> {
     let (tokenizer, vocab) = full_vocab_tokenizer()?;
     let device = CpuDevice::new();
-    let yaml = full_vocab_yaml(vocab);
+    let yaml = full_vocab_yaml(vocab).replace("num_layers: 1", &format!("num_layers: {layers}"));
     let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
-    let model = seeded_model(seed, vocab, &config, &device)?;
+    let model = seeded_model(seed, vocab, layers, &config, &device)?;
     let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
     enable_paged(&mut blazr_config, paged);
     blazr_config.inference.prefix_cache = false;
     Executor::new(model, blazr_config, tokenizer, device, FULL_VOCAB_CTX)
 }
 
-/// The model of `config` with weights drawn from `seed`.
+/// The model of `config`, `layers` layers deep, with weights drawn from `seed`.
 fn seeded_model(
     seed: u64,
     vocab: usize,
+    layers: usize,
     config: &boostr::model::UniversalConfig,
     device: &CpuDevice,
 ) -> Result<LoadedModel<CpuRuntime>> {
     let mut weights = SeededWeights {
         state: seed,
         vocab,
+        layers,
         map: VarMap::new(),
     };
     weights.fill(device)?;
@@ -274,7 +287,7 @@ fn seeded_on(
     let device = CpuDevice::new();
     let yaml = TINY_LLAMA_YAML.replace("max_seq_len: 16", &format!("max_seq_len: {ctx}"));
     let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
-    let model = seeded_model(seed, VOCAB, &config, &device)?;
+    let model = seeded_model(seed, VOCAB, 1, &config, &device)?;
 
     let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
     enable_paged(&mut blazr_config, paged);
@@ -289,6 +302,8 @@ struct SeededWeights {
     state: u64,
     /// Rows of the embedding and the LM head.
     vocab: usize,
+    /// Decoder layers, drawn in order between the embedding and the final norm.
+    layers: usize,
     map: VarMap<CpuRuntime>,
 }
 
@@ -322,15 +337,8 @@ impl SeededWeights {
         self.put(device, name, &[out, inp], -scale, scale)
     }
 
-    fn fill(&mut self, device: &CpuDevice) -> Result<()> {
-        self.put(
-            device,
-            "model.embed_tokens.weight",
-            &[self.vocab, HIDDEN],
-            -1.0,
-            1.0,
-        )?;
-        let p = "model.layers.0";
+    /// The norms, attention and MLP weights of the layer named `p`.
+    fn layer(&mut self, device: &CpuDevice, p: &str) -> Result<()> {
         self.put(
             device,
             &format!("{p}.input_layernorm.weight"),
@@ -356,6 +364,20 @@ impl SeededWeights {
         self.linear(device, &format!("{p}.mlp.gate_proj.weight"), INTER, HIDDEN)?;
         self.linear(device, &format!("{p}.mlp.up_proj.weight"), INTER, HIDDEN)?;
         self.linear(device, &format!("{p}.mlp.down_proj.weight"), HIDDEN, INTER)?;
+        Ok(())
+    }
+
+    fn fill(&mut self, device: &CpuDevice) -> Result<()> {
+        self.put(
+            device,
+            "model.embed_tokens.weight",
+            &[self.vocab, HIDDEN],
+            -1.0,
+            1.0,
+        )?;
+        for layer in 0..self.layers {
+            self.layer(device, &format!("model.layers.{layer}"))?;
+        }
         self.put(device, "model.norm.weight", &[HIDDEN], 0.5, 1.5)?;
         let vocab = self.vocab;
         self.linear(device, "lm_head.weight", vocab, HIDDEN)

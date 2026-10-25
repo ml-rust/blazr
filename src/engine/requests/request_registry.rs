@@ -107,6 +107,12 @@ pub trait GenerationScheduler: Send + Sync {
     fn refusal(&self, _gen_config: &GenerationConfig) -> Option<String> {
         None
     }
+
+    /// Why this scheduler can no longer serve any request, or `None` while
+    /// it can. `GET /health` answers 503 with the reason while one is set.
+    fn fault(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Per-request state stored beside whichever scheduler queued it.

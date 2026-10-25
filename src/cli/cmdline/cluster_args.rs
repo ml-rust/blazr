@@ -40,6 +40,11 @@ pub struct SwarmArgs {
     #[arg(long, default_value_t = 1)]
     pub workers: u32,
 
+    /// Requests the swarm runs at once. Each stage holds one KV cache per
+    /// request. Every node passes the same value
+    #[arg(long, default_value_t = 16)]
+    pub max_requests: usize,
+
     /// Model to serve (leader only) [default: default_model]
     #[arg(long, short)]
     pub model: Option<String>,

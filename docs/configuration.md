@@ -518,6 +518,7 @@ The model loads on the build's runtime and the `device` key's GPU. A label file 
 | `swarm`  | `--port <PORT>`           | `server.port`, else `8080` | HTTP API port. Leader only.                   |
 | `swarm`  | `--host <HOST>`           | `server.host`, else `0.0.0.0` | HTTP API host. Leader only.                |
 | `swarm`  | `--api-key <KEY>`         | `BLAZR_API_KEY`     | API key for the leader's HTTP API                    |
+| `swarm`  | `--max-requests <N>`      | `16`                | Requests the swarm runs at once. The same on every node. |
 | `disagg` | `--role <ROLE>`           | `router`            | `router`, `prefill`, or `decode`                     |
 | `disagg` | `-m`, `--model <NAME>`    | `default_model` (workers) | Required. Workers load it. The router reads its tokenizer and chat template from `--model` only. |
 | `disagg` | `--router-addr <ADDR>`    | unset               | The router's seed address. Required for every role: the router binds it, and the workers dial it. |
@@ -531,7 +532,7 @@ The model loads on the build's runtime and the `device` key's GPU. A label file 
 | `disagg` | `--port <PORT>`           | `server.port`, else `8080` | HTTP API port. Router only.                   |
 | `disagg` | `--host <HOST>`           | `server.host`, else `0.0.0.0` | HTTP API host. Router only.                |
 
-The swarm leader and the disaggregated router take the `server` section. Every role finds its model in `model_dir`, on the `device` index. The disaggregated router loads no weights. It refuses a request that sets a grammar or constraint, mirostat, DRY, typical-p, dynamic temperature, `logit_bias` or `logprobs` with `400`. Every node of a cluster runs as its own process. [Deployment](deployment.md#multi-host-setup) covers the seed address, the token, the firewall ports and the shutdown.
+The swarm leader and the disaggregated router take the `server` section. Every role finds its model in `model_dir`, on the `device` index. The swarm leader runs every generation through the pipeline stages and samples on its own device. `inference.prefill_chunk_size` sets the prompt tokens per pipeline frame. The disaggregated router loads no weights. It refuses a request that sets a grammar or constraint, mirostat, DRY, typical-p, dynamic temperature, `logit_bias` or `logprobs` with `400`. Every node of a cluster runs as its own process. [Deployment](deployment.md#multi-host-setup) covers the seed address, the token, the firewall ports and the shutdown.
 
 The narration commands `speak`, `transcribe`, and `sound-review` need the `audio` feature. Their flags live in `src/cli/narration/` and this page does not list them.
 

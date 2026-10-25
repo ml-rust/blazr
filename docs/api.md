@@ -1547,6 +1547,18 @@ curl http://localhost:8080/health
 
 `gpu_memory` appears only in a CUDA build when the device reports memory. Its fields are `used_bytes`, `free_bytes`, `total_bytes`, `used_gb`, and `total_gb`.
 
+A server that can no longer serve answers `503` with `"status": "unavailable"` and the reason in `error`. A swarm leader does this once it loses a worker stage. Restart every swarm node to recover.
+
+```json
+{
+  "status": "unavailable",
+  "error": "nexar reports swarm rank 2 dead",
+  "version": "0.1.0",
+  "loaded_models": ["llama-3.2-1b"],
+  "data_parallel_replicas": 1
+}
+```
+
 ## Metrics
 
 `GET /metrics` returns Prometheus text format with `Content-Type: text/plain; version=0.0.4; charset=utf-8`. It needs no auth.

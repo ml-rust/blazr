@@ -23,7 +23,7 @@ impl FinishReason {
 }
 
 /// A single token's log probability entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TokenLogprob {
     /// Token ID
     pub token_id: u32,

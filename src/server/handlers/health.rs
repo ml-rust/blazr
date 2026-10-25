@@ -1,4 +1,8 @@
 //! `GET /health` — status, loaded text models, and GPU memory info.
+//!
+//! The status is `ok` with 200. A scheduler that can no longer serve, such
+//! as a swarm that lost a stage, turns it into `unavailable` with 503 and
+//! the reason in `error`.
 
 use std::sync::Arc;
 
@@ -18,15 +22,25 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .collect::<Vec<_>>();
 
     let gpu_memory = get_gpu_memory_info();
+    let error = state
+        .serving
+        .schedulers()
+        .iter()
+        .find_map(|scheduler| scheduler.fault());
+    let (code, status) = match error {
+        Some(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+        None => (StatusCode::OK, "ok"),
+    };
 
     let response = HealthResponse {
-        status: "ok".to_string(),
+        status: status.to_string(),
+        error,
         version: env!("CARGO_PKG_VERSION").to_string(),
         loaded_models: loaded,
         data_parallel_replicas: state.serving.replica_count(),
         gpu_memory,
     };
-    (StatusCode::OK, Json(response)).into_response()
+    (code, Json(response)).into_response()
 }
 
 /// Query GPU memory info (CUDA only)
@@ -60,7 +74,11 @@ pub struct GpuMemoryInfo {
 
 #[derive(Serialize)]
 pub struct HealthResponse {
+    /// `ok`, or `unavailable` while a scheduler reports a fault.
     pub status: String,
+    /// Why the server can no longer serve. Absent while the status is `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub version: String,
     pub loaded_models: Vec<String>,
     /// Copies of the start model that serve requests. 1 without data

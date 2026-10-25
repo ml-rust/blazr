@@ -183,7 +183,12 @@ pub(super) fn app(
         .build_recorder()
         .handle();
     let state = crate::server::handlers::AppState::new(scheduler, metrics).with_serving(serving);
-    crate::server::api_routes().with_state(Arc::new(state))
+    crate::server::api_routes()
+        .route(
+            "/health",
+            axum::routing::get(crate::server::handlers::health),
+        )
+        .with_state(Arc::new(state))
 }
 
 /// The status and body of a JSON `POST` of `body` to `path`.

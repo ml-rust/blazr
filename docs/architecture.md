@@ -99,8 +99,20 @@ When a load needs room, the scheduler removes the least recently used model. The
 | ------------------------------------ | --------------- | ------------------------------------------------- |
 | `inference.max_batch_size` is 0 or 1 | Single sequence | None. Handlers call the executor.                 |
 | Model needs GDN state                | Lanes           | `LaneScheduler` and `LaneEngine` (`cuda` feature). `paged_attention = true` is an error at load. |
+| `hybrid` model, MLA models included  | Hybrid lanes    | `LaneScheduler` and `HybridLaneEngine`, every build. `paged_attention = true` is an error at load. |
 | Other model with paged attention on  | Paged batch     | `RequestScheduler` and `BatchEngine`              |
 | Other model with paged attention off | Single sequence | None                                              |
+
+### Hybrid lanes
+
+`HybridLaneEngine` (`src/engine/lanes/hybrid_lane_engine.rs`, `hybrid_lane_admit.rs`) serves `hybrid` and MLA models with `inference.max_batch_size` above `1`. It runs on every build.
+
+- Each lane holds one request: a contiguous KV cache, SSM state when the model has SSM layers, and its own sampler state.
+- A request prefills alone into fresh caches, then takes a free lane. With `inference.prefill_chunk_size` above `0`, one decode step runs for the occupied lanes between prefill chunks.
+- One decode step is one boostr `forward_hybrid_rows` over every lane. The embedding, norms, feed-forward halves and LM head run once over all lanes. Each attention, MLA or Mamba2 mixer runs per lane over that lane's cache or state, at that lane's position.
+- A request that ends frees its lane and drops its caches, so the next request in that lane starts from fresh state.
+- A cancel read before each prefill chunk stops the prefill. A lane whose request left is freed before the next step.
+- Logprobs, grammars, stop sequences and seeded sampling apply as on the single-sequence path.
 
 ## Threads
 
@@ -111,6 +123,7 @@ A forward pass blocks its thread. No forward pass runs on a Tokio worker, so `/h
 | Single-sequence generation | One `blazr-decode` thread per request, streamed or not         | `src/engine/executors/blocking_stream.rs`, `decode_thread.rs`, `decode_output.rs`       |
 | Paged continuous batch     | One `blazr-batch` thread for the server's life                 | `src/engine/requests/engine_thread.rs`, `batch_run.rs`                                  |
 | `qwen35` lanes             | One `blazr-lanes` thread for the server's life (`cuda` feature) | `src/engine/requests/engine_thread.rs`, `src/engine/lanes/lane_engine.rs`               |
+| Hybrid lanes               | One `blazr-hybrid-lanes` thread for the server's life           | `src/engine/requests/engine_thread.rs`, `src/engine/lanes/hybrid_lane_engine.rs`        |
 | Text and image embeddings  | The Tokio blocking pool                                        | `src/server/text_api/embeddings/handler.rs`                                             |
 | Tensor-parallel followers  | One thread per rank above 0                                    | `src/engine/parallel/tp_group.rs`                                                       |
 
@@ -135,6 +148,7 @@ The executor picks the state type by model capability. GDN state is checked firs
 | Attention layers (Llama family, Mistral) | `LayeredKvCache` on the single-sequence path. `LayeredPagedKvCache` with `CpuBlockAllocator` on the paged batch path. | `src/engine/executors/executor_generate.rs`, `src/cli/serving/serve_batching.rs` |
 | Mamba2                                   | `LayeredSsmState`, created for each generation call                                                                   | `src/engine/executors/executor_generate.rs`                                        |
 | qwen35 (GDN layers)                      | `LayeredGdnState` for GDN layers, and a KV cache sized for the attention layers only                                  | `src/engine/executors/executor_generate_qwen35.rs`                                 |
+| `hybrid` (Mamba2 + attention or MLA), MLA | `LayeredSsmState` for the SSM layers when the model has any, and a KV cache sized for the attention layers only. In hybrid lanes each lane holds its own pair, built at admission and dropped when its request ends | `src/engine/executors/executor_generate_hybrid.rs`, `src/engine/lanes/hybrid_lane_admit.rs` |
 
 ## Distributed modes
 

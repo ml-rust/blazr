@@ -1,9 +1,11 @@
-//! Queue in front of a fixed set of `qwen35` decode lanes.
+//! Queue in front of a fixed set of decode lanes.
 //!
 //! A submitted request joins [`LaneScheduler`]'s waiting queue and gets a
-//! token channel from the shared [`RequestRegistry`]. [`LaneEngine`] takes
-//! requests off the queue, puts each into a free lane, steps every occupied
-//! lane together, and gives a lane back as soon as its request ends.
+//! token channel from the shared [`RequestRegistry`]. The engine that
+//! drives it, [`LaneEngine`] for `qwen35` or [`HybridLaneEngine`] for
+//! `hybrid` models, takes requests off the queue, puts each into a free
+//! lane, steps every occupied lane together, and gives a lane back as soon
+//! as its request ends.
 //!
 //! The scheduler itself never touches a model or a device: it holds the queue,
 //! the lane count and the per-request state, so the HTTP handlers reach it
@@ -13,6 +15,7 @@
 //! policy, a P95 latency breach stops the engine from filling more lanes.
 //!
 //! [`LaneEngine`]: super::lane_engine::LaneEngine
+//! [`HybridLaneEngine`]: super::hybrid_lane_engine::HybridLaneEngine
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -33,7 +36,7 @@ use crate::engine::FailRequests;
 /// Wakeups the driver can miss without blocking a submitting handler.
 const NOTIFY_CHANNEL_CAPACITY: usize = 64;
 
-/// Requests waiting for a `qwen35` decode lane, and the state of the requests
+/// Requests waiting for a decode lane, and the state of the requests
 /// already in one.
 pub struct LaneScheduler {
     /// Generation config, token history and channels of every live request.

@@ -15,7 +15,7 @@ pub(super) mod queue_depth;
 mod request_cancel;
 pub mod request_registry;
 pub mod request_scheduler;
-mod seq_sampler;
+pub(in crate::engine) mod seq_sampler;
 pub mod slo_policy;
 pub mod slots;
 mod work_hold;

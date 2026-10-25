@@ -142,3 +142,31 @@ where
         self.seqs.end_gone(|seq_id| scheduler.is_live(seq_id));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+
+    use super::super::batch_test_rig::{rig, Rig, POOL, SEED};
+    use super::*;
+    use crate::engine::test_support::seeded_executor;
+
+    /// With paged attention off no request can decode, so the build fails
+    /// instead of every request.
+    #[test]
+    fn an_executor_without_the_paged_pool_is_refused() -> Result<()> {
+        let Rig { scheduler, .. } = rig(POOL)?;
+        let executor = Arc::new(seeded_executor(SEED, None)?);
+        let err = BatchEngine::new(executor, scheduler)
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            err.as_deref()
+                .is_some_and(|m| m.contains("inference.paged_attention is off")),
+            "{err:?}"
+        );
+        Ok(())
+    }
+}

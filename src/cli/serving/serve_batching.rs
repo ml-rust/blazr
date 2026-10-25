@@ -1,22 +1,26 @@
 //! Picks the scheduler `blazr serve` runs behind the HTTP handlers.
 //!
-//! Two kinds exist, and a model takes at most one:
+//! Three kinds exist, and a model takes at most one:
 //!
 //! - Models that need GDN state decode in `qwen35` lanes: [`LaneScheduler`]
 //!   plus the [`LaneEngine`] loop. Paged attention plays no part here.
+//! - `hybrid` models, MLA models included, decode in hybrid lanes:
+//!   [`LaneScheduler`] plus the [`HybridLaneEngine`] loop. Each lane holds
+//!   its request's own contiguous KV cache and SSM state. These models
+//!   refuse paged attention at load.
 //! - Every other model with paged attention on decodes in the paged
 //!   continuous batch: [`RequestScheduler`] plus the [`BatchEngine`] loop.
 //!
-//! Each loop runs on its own thread for the server's life: `blazr-lanes`
-//! or `blazr-batch`. The returned scheduler owns the thread. It stops and
-//! joins the thread when the server state drops it. A loop that panics
-//! fails its scheduler: every request in it ends with an error, later
-//! requests are refused, and `GET /health` answers 503.
+//! Each loop runs on its own thread for the server's life: `blazr-lanes`,
+//! `blazr-hybrid-lanes` or `blazr-batch`. The returned scheduler owns the
+//! thread. It stops and joins the thread when the server state drops it. A
+//! loop that panics fails its scheduler: every request in it ends with an
+//! error, later requests are refused, and `GET /health` answers 503.
 //!
-//! With `inference.max_batch_size` at 1 neither is built, and the handlers
+//! With `inference.max_batch_size` at 1 none is built, and the handlers
 //! take the single-sequence path.
 //!
-//! With `server.slo` P95 targets, both schedulers stop growing the batch
+//! With `server.slo` P95 targets, every scheduler stops growing the batch
 //! while a target is breached.
 
 use std::sync::Arc;
@@ -25,8 +29,8 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::engine::{
-    BatchEngine, EngineThread, Executor, FailRequests, GenerationScheduler, RequestScheduler,
-    SloBatchPolicy, ThreadedScheduler,
+    BatchEngine, EngineThread, Executor, FailRequests, GenerationScheduler, HybridLaneEngine,
+    LaneScheduler, RequestScheduler, SloBatchPolicy, ThreadedScheduler,
 };
 use crate::runtime::ServerRuntime;
 
@@ -37,15 +41,19 @@ pub enum BatchingChoice {
     Single,
     /// `LaneScheduler` plus the `LaneEngine` thread (GDN-state models).
     Lanes,
+    /// `LaneScheduler` plus the `HybridLaneEngine` thread (`hybrid` and MLA
+    /// models).
+    HybridLanes,
     /// `RequestScheduler` plus the `BatchEngine` thread (paged continuous batch).
     Paged,
 }
 
 /// Decides the batching path from the facts `configure_batching` reads off
-/// the executor: does the model need GDN state, what is
-/// `inference.max_batch_size`, and is paged attention on.
+/// the executor: does the model need GDN state, does it decode in hybrid
+/// lanes, what is `inference.max_batch_size`, and is paged attention on.
 pub fn batching_choice(
     needs_gdn_state: bool,
+    hybrid_rows: bool,
     max_batch_size: usize,
     paged: bool,
 ) -> BatchingChoice {
@@ -54,6 +62,9 @@ pub fn batching_choice(
     }
     if needs_gdn_state {
         return BatchingChoice::Lanes;
+    }
+    if hybrid_rows {
+        return BatchingChoice::HybridLanes;
     }
     if !paged {
         return BatchingChoice::Single;
@@ -76,8 +87,10 @@ pub async fn configure_batching(
     device: &str,
 ) -> Result<Option<Arc<dyn GenerationScheduler>>> {
     let max_batch = executor.config().inference.max_batch_size;
+    let model = executor.model()?;
     let choice = batching_choice(
-        executor.model()?.needs_gdn_state(),
+        model.needs_gdn_state(),
+        model.supports_hybrid_rows(),
         max_batch,
         executor.config().inference.paged_attention,
     );
@@ -85,6 +98,9 @@ pub async fn configure_batching(
     match choice {
         BatchingChoice::Single => Ok(None),
         BatchingChoice::Lanes => lane_batching(executor, max_batch, slo_policy, device).await,
+        BatchingChoice::HybridLanes => {
+            hybrid_lane_batching(executor, max_batch, slo_policy, device).map(Some)
+        }
         BatchingChoice::Paged => paged_batching(executor, max_batch, slo_policy, device).map(Some),
     }
 }
@@ -97,7 +113,7 @@ async fn lane_batching(
     slo_policy: Option<Arc<SloBatchPolicy>>,
     device: &str,
 ) -> Result<Option<Arc<dyn GenerationScheduler>>> {
-    use crate::engine::{LaneEngine, LaneScheduler};
+    use crate::engine::LaneEngine;
 
     let lane_scheduler = LaneScheduler::with_slo_policy(max_batch, slo_policy)?;
     let engine = LaneEngine::open(executor, Arc::clone(&lane_scheduler)).await?;
@@ -134,6 +150,32 @@ async fn lane_batching(
         max_batch,
     );
     Ok(None)
+}
+
+/// `max_batch` hybrid decode lanes, driven by a [`HybridLaneEngine`] thread.
+fn hybrid_lane_batching(
+    executor: Arc<Executor<ServerRuntime>>,
+    max_batch: usize,
+    slo_policy: Option<Arc<SloBatchPolicy>>,
+    device: &str,
+) -> Result<Arc<dyn GenerationScheduler>> {
+    let lane_scheduler = LaneScheduler::with_slo_policy(max_batch, slo_policy)?;
+    let engine = HybridLaneEngine::new(executor, Arc::clone(&lane_scheduler))?;
+    let owner: Arc<dyn FailRequests> = lane_scheduler.clone();
+    let thread = EngineThread::spawn("blazr-hybrid-lanes", owner, move |stop| {
+        engine.run_until(stop)
+    })?;
+
+    eprintln!(
+        "  Batching: {} (lanes={}, device={})",
+        "hybrid lanes".green(),
+        max_batch,
+        device,
+    );
+
+    let configured: Arc<dyn GenerationScheduler> =
+        Arc::new(ThreadedScheduler::new(lane_scheduler, thread));
+    Ok(configured)
 }
 
 /// A paged continuous batch, driven by a [`BatchEngine`] thread.
@@ -201,34 +243,74 @@ mod tests {
 
     #[test]
     fn max_batch_zero_gives_single_regardless_of_gdn_or_paged() {
-        assert_eq!(batching_choice(false, 0, false), BatchingChoice::Single);
-        assert_eq!(batching_choice(true, 0, true), BatchingChoice::Single);
+        assert_eq!(
+            batching_choice(false, false, 0, false),
+            BatchingChoice::Single
+        );
+        assert_eq!(
+            batching_choice(true, false, 0, true),
+            BatchingChoice::Single
+        );
     }
 
     #[test]
     fn max_batch_one_gives_single_regardless_of_gdn_or_paged() {
-        assert_eq!(batching_choice(false, 1, false), BatchingChoice::Single);
-        assert_eq!(batching_choice(true, 1, true), BatchingChoice::Single);
+        assert_eq!(
+            batching_choice(false, false, 1, false),
+            BatchingChoice::Single
+        );
+        assert_eq!(
+            batching_choice(true, false, 1, true),
+            BatchingChoice::Single
+        );
     }
 
     #[test]
     fn gdn_model_gives_lanes_whether_paged_is_true_or_false() {
-        assert_eq!(batching_choice(true, 4, true), BatchingChoice::Lanes);
-        assert_eq!(batching_choice(true, 4, false), BatchingChoice::Lanes);
+        assert_eq!(batching_choice(true, false, 4, true), BatchingChoice::Lanes);
+        assert_eq!(
+            batching_choice(true, false, 4, false),
+            BatchingChoice::Lanes
+        );
     }
 
     #[test]
     fn qwen35_with_batch_above_one_and_paged_off_gives_lanes() {
-        assert_eq!(batching_choice(true, 8, false), BatchingChoice::Lanes);
+        assert_eq!(
+            batching_choice(true, false, 8, false),
+            BatchingChoice::Lanes
+        );
     }
 
     #[test]
     fn non_gdn_model_with_paged_off_gives_single() {
-        assert_eq!(batching_choice(false, 4, false), BatchingChoice::Single);
+        assert_eq!(
+            batching_choice(false, false, 4, false),
+            BatchingChoice::Single
+        );
+    }
+
+    #[test]
+    fn a_hybrid_model_with_batch_above_one_gives_hybrid_lanes_never_paged() {
+        assert_eq!(
+            batching_choice(false, true, 4, false),
+            BatchingChoice::HybridLanes
+        );
+        assert_eq!(
+            batching_choice(false, true, 4, true),
+            BatchingChoice::HybridLanes
+        );
+        assert_eq!(
+            batching_choice(false, true, 1, false),
+            BatchingChoice::Single
+        );
     }
 
     #[test]
     fn non_gdn_model_with_paged_on_gives_paged() {
-        assert_eq!(batching_choice(false, 4, true), BatchingChoice::Paged);
+        assert_eq!(
+            batching_choice(false, false, 4, true),
+            BatchingChoice::Paged
+        );
     }
 }

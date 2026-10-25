@@ -59,6 +59,16 @@ impl Executor<CudaRuntime> {
                 }
                 return;
             }
+            // The captured step is the Llama layer stack: a hybrid, MLA or
+            // Mamba model has no graph-mode forward.
+            if model.supports_hybrid_rows() || model.needs_ssm_state() {
+                yield Err(anyhow!(
+                    "CUDA graph decode runs Llama-family and qwen35 models; model type '{}' \
+                     has no graph-mode forward. Run without --graphs",
+                    model.model_type()
+                ));
+                return;
+            }
 
             let max_seq_len = self.config().max_seq_len();
             // Graph mode pre-allocates the KV cache at fixed capacity:

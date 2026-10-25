@@ -73,27 +73,29 @@ where
                 Some("set max_batch_size = 1, or use CUDA lanes with paged_attention off"),
             ));
         }
+        if model.supports_hybrid_rows() {
+            return Err(anyhow!(
+                "model type '{}' keeps a contiguous KV cache per sequence and decodes in hybrid \
+                 lanes, not in the paged batch; serve it through HybridLaneEngine",
+                model.model_type()
+            ));
+        }
         let config = executor.config();
-        let paged_cache = if config.inference.paged_attention {
-            let num_layers = model.num_layers();
-            let num_kv_heads = model.num_kv_heads().unwrap_or(8);
-            let head_dim = model.head_dim().unwrap_or(64);
-            let block_size = config.inference.block_size;
-            let kv_dtype = config.kv_cache_dtype()?;
-            let total_blocks = Self::kv_pool_blocks(&executor)?;
-
-            Some(LayeredPagedKvCache::new(
-                num_layers,
-                total_blocks,
-                block_size,
-                num_kv_heads,
-                head_dim,
-                kv_dtype,
-                executor.device(),
-            )?)
-        } else {
-            None
-        };
+        if !config.inference.paged_attention {
+            return Err(anyhow!(
+                "the continuous batch runs over the paged KV pool, and \
+                 inference.paged_attention is off; turn it on, or set max_batch_size = 1"
+            ));
+        }
+        let paged_cache = Some(LayeredPagedKvCache::new(
+            model.num_layers(),
+            Self::kv_pool_blocks(&executor)?,
+            config.inference.block_size,
+            model.num_kv_heads().unwrap_or(8),
+            model.head_dim().unwrap_or(64),
+            config.kv_cache_dtype()?,
+            executor.device(),
+        )?);
 
         let seqs = BatchSeqs::new(executor.vocab_size(), executor.device())?;
         Ok(Self {

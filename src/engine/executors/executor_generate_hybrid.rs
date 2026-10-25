@@ -130,7 +130,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::engine) mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -143,13 +143,13 @@ mod tests {
     use crate::engine::requests::batch_test_rig::greedy;
     use crate::engine::Executor;
 
-    const VOCAB: usize = 24;
+    pub(in crate::engine) const VOCAB: usize = 24;
     const PROMPT: [u32; 5] = [3, 10, 17, 1, 8];
     const NEW_TOKENS: usize = 6;
 
     /// The `config.json` oxidizr writes: boostr's `UniversalConfig`.
     /// `ssm[i]` makes layer `i` Mamba2, every other layer MLA.
-    fn config(ssm: &[bool], moe: bool) -> UniversalConfig {
+    pub(in crate::engine) fn config(ssm: &[bool], moe: bool) -> UniversalConfig {
         let ssm_layers: Vec<usize> = (0..ssm.len()).filter(|&i| ssm[i]).collect();
         let attention_layers: Vec<usize> = (0..ssm.len()).filter(|&i| !ssm[i]).collect();
         let mut yaml = format!(
@@ -181,7 +181,11 @@ mod tests {
 
     /// A seeded checkpoint of `config` under the names oxidizr writes, as
     /// `model.safetensors` in `dir`, with `config.json` when `with_config`.
-    fn write_checkpoint(dir: &Path, config: &UniversalConfig, with_config: bool) {
+    pub(in crate::engine) fn write_checkpoint(
+        dir: &Path,
+        config: &UniversalConfig,
+        with_config: bool,
+    ) {
         let device = CpuDevice::new();
         let mut shapes: Vec<(String, Vec<usize>, bool)> = vec![
             ("model.embed_tokens.weight".into(), vec![VOCAB, 16], false),
@@ -262,7 +266,7 @@ mod tests {
         }
     }
 
-    fn load(dir: &Path) -> (LoadedModel<CpuRuntime>, BlazrConfig) {
+    pub(in crate::engine) fn load(dir: &Path) -> (LoadedModel<CpuRuntime>, BlazrConfig) {
         crate::loader::load_model::<CpuRuntime, _>(dir, &CpuDevice::new()).unwrap()
     }
 

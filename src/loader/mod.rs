@@ -20,7 +20,8 @@ mod speech_load;
 mod vision_load;
 
 pub use api::{
-    load_model, load_model_as, load_model_tp, load_model_with_config, load_model_with_offloading,
+    load_model, load_model_as, load_model_layers, load_model_tp, load_model_with_config,
+    load_model_with_offloading,
 };
 pub use detect::{detect_model_source, ModelFormat, ModelSource};
 pub use formats::*;

@@ -7,7 +7,8 @@
 //!
 //! The leader runs stage 0 and serves the HTTP API. Every generation of the
 //! start model runs through the stages, and the leader samples each token.
-//! Each node loads the whole checkpoint and runs only its layer range.
+//! Each node reads only its own layers' tensors and runs only them. The
+//! leader's HTTP front end holds the config and tokenizer and no weights.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,12 +18,15 @@ use anyhow::{anyhow, bail, Result};
 use colored::Colorize;
 use nexar::NexarClient;
 
+use super::disaggregated_router::router_executor;
 use super::mesh::{
     after_shutdown, formation_error, parse_addr, until_signal, MeshSettings, RELEASE_WITHIN,
 };
 use super::swarm_scheduler::{swarm_context, SwarmScheduler};
 use super::swarm_serving::swarm_serving;
-use super::swarm_stage::{build_stage, leader_assignment, stage_config, LocalStage};
+use super::swarm_stage::{
+    build_stage, leader_assignment, load_stage_model, stage_config, LocalStage,
+};
 use crate::cli::{SwarmArgs, SwarmRoleArg};
 use crate::config::{ClusterSettings, ServerConfig};
 use crate::distributed::leader::SwarmLeader;
@@ -103,9 +107,9 @@ pub async fn swarm(args: SwarmArgs, settings: ClusterSettings) -> Result<()> {
     }
 }
 
-/// Leader: load the model and its stage, form the cluster, assign layers,
-/// send the model path, serve HTTP through the pipeline, then stop every
-/// worker and shut down.
+/// Leader: load the model's config and its own stage's layers, form the
+/// cluster, assign layers, send the model path, serve HTTP through the
+/// pipeline, then stop every worker and shut down.
 async fn run_leader(
     model_name: &str,
     seed: SocketAddr,
@@ -124,33 +128,40 @@ async fn run_leader(
     let api_keys: Vec<String> = api_key.into_iter().collect();
     let device = crate::runtime::open_device(gpu_index)?;
     let models = Scheduler::<ServerRuntime>::new(model_dir.clone(), device.clone());
-    let executor = models.get_executor(model_name).await?;
     let model_path = models.model_path(model_name).ok_or_else(|| {
         anyhow!(
             "model '{model_name}' has no path under {}: the workers load it from there",
             model_dir.display()
         )
     })?;
-    let model = Arc::clone(executor.model_arc()?);
-    let total_layers = model.num_layers();
-    let vocab_size = executor.vocab_size();
-    tracing::info!(
-        model = model_name,
-        layers = total_layers,
-        "Model loaded on leader"
-    );
     if world_size == 1 {
         tracing::info!("No workers: the leader serves alone");
+        models.get_executor(model_name).await?;
         return crate::server::start(Arc::new(models), server_config, api_keys).await;
     }
+    // The front end: config, tokenizer and chat template. The stages hold the weights.
+    let executor = router_executor(&model_path, device.clone())?;
+    let total_layers = executor.config().num_layers();
+    let vocab_size = executor.vocab_size();
     // Refuse a model or a swarm the pipeline cannot run before any worker joins.
     let assignment = leader_assignment(world_size, total_layers)?;
     let stage_cfg = stage_config(
         max_requests,
-        swarm_context(&executor)?,
+        swarm_context(&executor),
         executor.config().kv_cache_dtype()?,
     );
+    let (model, _) = load_stage_model(&model_path, &device, &assignment)?;
+    let (start, end) = (assignment.start_layer, assignment.end_layer);
+    tracing::info!(
+        model = model_name,
+        layers = format!("{start}..{end} of {total_layers}"),
+        "Stage loaded on leader"
+    );
     let stage = build_stage(model, device, assignment, stage_cfg)?;
+    let models = models.pinned();
+    let executor = models
+        .register_base(model_name, model_path.clone(), executor)
+        .await;
     mesh.check_seed_reachable(seed, "the seed", world_size)?;
 
     let cfg = mesh.cluster_config(world_size, Some(LEADER_RANK));
@@ -178,7 +189,7 @@ async fn run_leader(
         max_requests,
         model_path,
     };
-    let run = swarm.run(models.pinned(), server_config, api_keys).await;
+    let run = swarm.run(models, server_config, api_keys).await;
     let shutdown = match Arc::try_unwrap(leader) {
         Ok(leader) => leader.shutdown(RELEASE_WITHIN).await,
         Err(shared) => {
@@ -204,7 +215,8 @@ struct SwarmServe {
 
 impl SwarmServe {
     /// Set up the workers, serve HTTP until the server stops, then end
-    /// every request. On return no task holds the leader.
+    /// every request. On return no task holds the leader. `models` is
+    /// pinned to the executor the swarm serves.
     async fn run(
         self,
         models: Scheduler<ServerRuntime>,
@@ -276,7 +288,7 @@ async fn run_worker(
 
 /// Receive this worker's stage and model, load it, and run the compute loop.
 ///
-/// The worker loads the whole checkpoint and runs only its layer range.
+/// The worker reads only its layer range's tensors and runs only them.
 async fn run_stage(client: Arc<NexarClient>, max_requests: usize, gpu_index: usize) -> Result<()> {
     let rank = client.rank();
     let assignment = SwarmWorker::receive_assignment(&client, LEADER_RANK).await?;
@@ -291,14 +303,18 @@ async fn run_stage(client: Arc<NexarClient>, max_requests: usize, gpu_index: usi
     tracing::info!(rank, path = %model_path, "Received model path from leader");
 
     let device = crate::runtime::open_device(gpu_index)?;
-    let (loaded_model, blazr_config) =
-        crate::loader::load_model::<ServerRuntime, _>(std::path::Path::new(&model_path), &device)?;
-    let model = Arc::new(loaded_model);
+    let (model, blazr_config) =
+        load_stage_model(std::path::Path::new(&model_path), &device, &assignment)?;
+    let (start, end, total) = (
+        assignment.start_layer,
+        assignment.end_layer,
+        model.num_layers(),
+    );
     tracing::info!(
         rank,
-        layers = model.num_layers(),
+        layers = format!("{start}..{end} of {total}"),
         vocab_size = model.vocab_size(),
-        "Model loaded on worker"
+        "Stage loaded on worker"
     );
     // The model's own maximum: the leader's context never passes it.
     let config = stage_config(

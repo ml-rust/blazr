@@ -84,7 +84,8 @@ where
         dtype,
     )?;
 
-    let (mut var_map, _) = load_checkpoint_map::<R>(&mut loader, &config.model, device, dtype)?;
+    let (mut var_map, _) =
+        load_checkpoint_map::<R>(&mut loader, &config.model, device, dtype, None)?;
     let mut vb = VarBuilder::new(&mut var_map, device);
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {e}"))?;

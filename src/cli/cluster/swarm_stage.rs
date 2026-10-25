@@ -2,14 +2,16 @@
 //! own stage on a thread of its own.
 //!
 //! - `stage_config`: the limits and KV dtype every stage of a node takes
+//! - `load_stage_model`: the weights of one layer range, and no others
 //! - `build_stage`: a [`StageRunner`] over a loaded model, for one layer range
 //! - `leader_assignment`: the leader's stage, known before any worker joins
 //! - `LocalStage`: the leader's stage, which serves one frame at a time
 //!
-//! Each node loads the whole checkpoint and runs only its layer range, so
-//! a stage's memory tracks the full model.
+//! Each node reads only its own layers' tensors from the checkpoint, so a
+//! stage's memory tracks its layer range.
 
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -18,6 +20,7 @@ use boostr::model::LoadedModel;
 use boostr::DType;
 use tokio::sync::oneshot;
 
+use crate::config::BlazrConfig;
 use crate::distributed::pipeline::PipelineSchedule;
 use crate::distributed::stage::{Stage, StageConfig, StageOutput, StageRunner};
 use crate::distributed::transport::{GenRequestHeader, LayerAssignment, StagePayload};
@@ -40,6 +43,27 @@ pub(crate) fn stage_config(
         max_seq_len,
         kv_dtype,
     }
+}
+
+/// The layers of `assignment` of the model at `path` on `device`, and the
+/// whole model's config. Only those layers' tensors are read, with the
+/// embedding on stage 0 and the final norm and LM head on the last stage.
+///
+/// # Errors
+///
+/// A model a layer range cannot hold (Mamba, hybrid, qwen35), a range
+/// outside the model, or a file that does not load.
+pub(crate) fn load_stage_model(
+    path: &Path,
+    device: &<ServerRuntime as boostr::Runtime>::Device,
+    assignment: &LayerAssignment,
+) -> Result<(Arc<LoadedModel<ServerRuntime>>, BlazrConfig)> {
+    let (start, end) = (assignment.start_layer, assignment.end_layer);
+    let layers = start as usize..end as usize;
+    let (model, config) =
+        crate::loader::load_model_layers::<ServerRuntime, _>(path, device, layers)
+            .map_err(|e| e.context(format!("stage layers {start}..{end}")))?;
+    Ok((Arc::new(model), config))
 }
 
 /// The stage that runs `assignment` of `model` on `device`.

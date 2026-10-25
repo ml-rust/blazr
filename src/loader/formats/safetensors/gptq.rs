@@ -10,6 +10,7 @@
 //! This loader reads the raw SafeTensors, keeps qzeros packed (the kernel
 //! reads them directly), and stores them as `DecomposedQuantTensor` in the VarMap.
 
+use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
@@ -25,10 +26,12 @@ use boostr::{DType, Runtime};
 
 use crate::config::{fixed_format_dtype, BlazrConfig, DtypeRequest};
 
+use super::super::layer_scope::{build_model, retain_read, span_of};
 use super::config::load_or_create_config;
 use super::detect_arch::{detect_architecture_from_loader, read_gptq_group_size};
 
 /// Load a GPTQ quantized model from SafeTensors
+#[cfg(feature = "cuda")]
 pub fn load_safetensors_gptq<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
@@ -40,8 +43,24 @@ where
         + boostr::quant::DequantOps<R>
         + boostr::quant::QuantMatmulOps<R>,
 {
-    let path = path.as_ref();
+    load_gptq_scoped(path.as_ref(), device, request, None)
+}
 
+/// [`load_safetensors_gptq`] of the whole model, or of layers `layers` as
+/// a pipeline stage holds them. A range load reads only the tensors of its
+/// span: see `LayerSpan::reads`.
+pub(super) fn load_gptq_scoped<R: Runtime<DType = DType>>(
+    path: &Path,
+    device: &R::Device,
+    request: Option<&DtypeRequest>,
+    layers: Option<Range<usize>>,
+) -> Result<(LoadedModel<R>, BlazrConfig)>
+where
+    R::Client: TensorOps<R>
+        + boostr::TypeConversionOps<R>
+        + boostr::quant::DequantOps<R>
+        + boostr::quant::QuantMatmulOps<R>,
+{
     let config_dir = if path.is_file() {
         path.parent()
     } else {
@@ -74,6 +93,9 @@ where
     // Separate tensor names into quantized groups and regular tensors
     let tensor_names = loader.tensor_names();
     let (quant_bases, regular_names) = classify_gptq_tensors(&tensor_names);
+    let span = span_of(&config.model, layers)?;
+    let (quant_bases, regular_names) =
+        retain_read(span.as_ref(), &config.model, quant_bases, regular_names);
 
     let mut var_map = VarMap::<R>::new();
 
@@ -136,8 +158,7 @@ where
     // Build model
     let mut vb = VarBuilder::new(&mut var_map, device);
 
-    let model = LoadedModel::load(&config.model, &mut vb)
-        .map_err(|e| anyhow!("Failed to load model: {}", e))?;
+    let model = build_model(&config.model, &mut vb, span)?;
 
     Ok((model, config))
 }

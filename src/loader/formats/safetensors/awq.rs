@@ -8,6 +8,7 @@
 //! This loader reads the raw SafeTensors, unpacks qzeros at load time,
 //! and stores them as `DecomposedQuantTensor` in the VarMap.
 
+use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
@@ -23,6 +24,7 @@ use boostr::{DType, Runtime};
 
 use crate::config::{fixed_format_dtype, BlazrConfig, DtypeRequest};
 
+use super::super::layer_scope::{build_model, retain_read, span_of};
 use super::config::load_or_create_config;
 use super::detect_arch::{detect_architecture_from_loader, read_awq_group_size};
 
@@ -32,6 +34,7 @@ use super::detect_arch::{detect_architecture_from_loader, read_awq_group_size};
 const AWQ_SHIFTS: [u32; 8] = [0, 16, 4, 20, 8, 24, 12, 28];
 
 /// Load an AWQ quantized model from SafeTensors
+#[cfg(feature = "cuda")]
 pub fn load_safetensors_awq<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
@@ -43,8 +46,24 @@ where
         + boostr::quant::DequantOps<R>
         + boostr::quant::QuantMatmulOps<R>,
 {
-    let path = path.as_ref();
+    load_awq_scoped(path.as_ref(), device, request, None)
+}
 
+/// [`load_safetensors_awq`] of the whole model, or of layers `layers` as
+/// a pipeline stage holds them. A range load reads only the tensors of its
+/// span: see `LayerSpan::reads`.
+pub(super) fn load_awq_scoped<R: Runtime<DType = DType>>(
+    path: &Path,
+    device: &R::Device,
+    request: Option<&DtypeRequest>,
+    layers: Option<Range<usize>>,
+) -> Result<(LoadedModel<R>, BlazrConfig)>
+where
+    R::Client: TensorOps<R>
+        + boostr::TypeConversionOps<R>
+        + boostr::quant::DequantOps<R>
+        + boostr::quant::QuantMatmulOps<R>,
+{
     let config_dir = if path.is_file() {
         path.parent()
     } else {
@@ -77,6 +96,9 @@ where
     // Separate tensor names into quantized triplets and regular tensors
     let tensor_names = loader.tensor_names();
     let (quant_bases, regular_names) = classify_awq_tensors(&tensor_names);
+    let span = span_of(&config.model, layers)?;
+    let (quant_bases, regular_names) =
+        retain_read(span.as_ref(), &config.model, quant_bases, regular_names);
 
     let mut var_map = VarMap::<R>::new();
 
@@ -136,8 +158,7 @@ where
     // Build model
     let mut vb = VarBuilder::new(&mut var_map, device);
 
-    let model = LoadedModel::load(&config.model, &mut vb)
-        .map_err(|e| anyhow!("Failed to load model: {}", e))?;
+    let model = build_model(&config.model, &mut vb, span)?;
 
     Ok((model, config))
 }

@@ -1,5 +1,6 @@
 //! An in-process swarm for the swarm serving tests: the leader on rank 0
-//! and two workers, each stage a [`StageRunner`] over one seeded model.
+//! and two workers. Each stage is a [`StageRunner`] over the layers of one
+//! seeded model it holds, loaded as `blazr swarm` loads them.
 //!
 //! Each stage sits behind a [`Probe`], which records the requests the stage
 //! holds and can slow or fail its frames.
@@ -20,6 +21,7 @@ use crate::distributed::leader::SwarmLeader;
 use crate::distributed::stage::{Stage, StageOutput};
 use crate::distributed::transport::{self, GenRequestHeader, LayerAssignment, StagePayload};
 use crate::distributed::worker::SwarmWorker;
+use crate::engine::test_support::seeded_full_vocab_stage;
 use crate::engine::Executor;
 use crate::runtime::ServerRuntime;
 
@@ -131,6 +133,9 @@ fn assignment(leader: &SwarmLeader, rank: usize) -> Result<LayerAssignment> {
 
 impl Swarm {
     /// A swarm that serves `executor`'s model, with `probes[r]` on rank `r`.
+    ///
+    /// `executor` samples, as the leader's does, and can hold no weights.
+    /// Each stage holds its own layers of the seeded model of [`SEED`] only.
     pub(super) async fn start(
         executor: Arc<Executor<ServerRuntime>>,
         probes: Vec<Probe>,
@@ -145,17 +150,21 @@ impl Swarm {
         clients.sort_by_key(|c| c.rank());
         let mut clients = clients.into_iter().map(Arc::new);
         let leader_client = clients.next().ok_or_else(|| anyhow!("no rank 0"))?;
-        let model = Arc::clone(executor.model_arc()?);
         let leader = Arc::new(SwarmLeader::by_rank(
             leader_client,
             LAYERS,
             executor.vocab_size(),
         )?);
-        let cfg = stage_config(MAX_REQUESTS, swarm_context(&executor)?, DType::F32);
+        let cfg = stage_config(MAX_REQUESTS, swarm_context(&executor), DType::F32);
+        let stage_of = |a: LayerAssignment| -> Result<Box<dyn Stage>> {
+            let layers = a.start_layer as usize..a.end_layer as usize;
+            let model = Arc::new(seeded_full_vocab_stage(SEED, LAYERS, layers)?);
+            build_stage(model, CpuDevice::new(), a, cfg)
+        };
         let mut workers = Vec::new();
         for (rank, client) in (1..WORLD).zip(clients) {
             let a = assignment(&leader, rank as usize)?;
-            let stage = build_stage(Arc::clone(&model), CpuDevice::new(), a, cfg)?;
+            let stage = stage_of(a)?;
             let next = (rank + 1 < WORLD).then_some(rank + 1);
             let stage = probes[rank as usize].wrap(stage);
             let mut worker = SwarmWorker::new(client, rank, a, Some(rank - 1), next, 0, stage);
@@ -168,7 +177,7 @@ impl Swarm {
         let own = leader
             .local_assignment()
             .ok_or_else(|| anyhow!("the leader runs no stage"))?;
-        let stage = probes[0].wrap(build_stage(model, CpuDevice::new(), own, cfg)?);
+        let stage = probes[0].wrap(stage_of(own)?);
         let local = LocalStage::spawn(stage)?;
         let scheduler =
             SwarmScheduler::new(Arc::clone(&leader), Some(local), executor, MAX_REQUESTS)?;

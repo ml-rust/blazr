@@ -22,4 +22,4 @@ pub use loaders::{
 };
 pub use meta::read_safetensors_config;
 pub use offloading::{OffloadingInfo, OffloadingOptions};
-pub use regular::load_safetensors_with_report;
+pub use regular::{load_safetensors_layers, load_safetensors_with_report};

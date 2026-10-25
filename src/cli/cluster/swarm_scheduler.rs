@@ -54,26 +54,24 @@ pub struct SwarmScheduler {
 }
 
 /// The context a swarm serves with `executor` on the leader: the smaller of
-/// the configured context and the model's own.
-///
-/// # Errors
-///
-/// An executor with no weights.
-pub(crate) fn swarm_context(executor: &Executor<ServerRuntime>) -> Result<usize> {
-    let model = executor.model()?.max_seq_len();
-    Ok(executor.config().max_seq_len().min(model))
+/// the configured context and the model's own. The leader's executor holds
+/// no weights, so both come from its config.
+pub(crate) fn swarm_context(executor: &Executor<ServerRuntime>) -> usize {
+    let config = executor.config();
+    config.max_seq_len().min(config.model.max_seq_len)
 }
 
 impl SwarmScheduler {
     /// A scheduler that runs every request through `leader`, with the
     /// leader's own stage on `local`, and at most `max_requests` at once.
     ///
-    /// `executor` holds the model the leader serves. Its sampler samples,
-    /// and its `inference.prefill_chunk_size` splits each prompt.
+    /// `executor` holds the config and tokenizer of the model the leader
+    /// serves, and needs no weights: the stages hold them. Its sampler
+    /// samples, and its `inference.prefill_chunk_size` splits each prompt.
     ///
     /// # Errors
     ///
-    /// `max_requests` of 0, an executor with no weights, or no tokio runtime.
+    /// `max_requests` of 0, or no tokio runtime.
     pub(crate) fn new(
         leader: Arc<SwarmLeader>,
         local: Option<LocalStage>,
@@ -85,7 +83,7 @@ impl SwarmScheduler {
         }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| anyhow!("the swarm scheduler must start inside a tokio runtime"))?;
-        let context_len = swarm_context(&executor)?;
+        let context_len = swarm_context(&executor);
         let deaths = leader.client().failure_watch();
         let pipeline = Arc::new(SwarmPipeline {
             prefill_chunk: executor.config().inference.prefill_chunk_size,
@@ -261,15 +259,13 @@ impl CancelRequest for SwarmScheduler {
 mod tests {
     use std::sync::atomic::Ordering::SeqCst;
 
-    use super::super::swarm_test_rig::{
-        eventually, Probe, Swarm, LAYERS, MAX_REQUESTS, SEED, WAIT,
-    };
+    use super::super::swarm_test_rig::{eventually, Probe, Swarm, LAYERS, MAX_REQUESTS, WAIT};
     use super::*;
-    use crate::engine::test_support::seeded_full_vocab_layers;
+    use crate::engine::test_support::full_vocab_front;
     use crate::engine::{FinishReason, GeneratedToken};
 
     async fn swarm(last: Probe) -> Result<Swarm> {
-        let executor = Arc::new(seeded_full_vocab_layers(SEED, LAYERS)?);
+        let executor = Arc::new(full_vocab_front(LAYERS)?);
         Swarm::start(executor, vec![Probe::default(), Probe::default(), last]).await
     }
 
@@ -346,7 +342,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_request_with_no_room_is_refused_before_it_runs() -> Result<()> {
         let s = swarm(Probe::default()).await?;
-        let full = vec![1; swarm_context(&seeded_full_vocab_layers(SEED, LAYERS)?)?];
+        let full = vec![1; swarm_context(&full_vocab_front(LAYERS)?)];
         let err = s
             .scheduler
             .submit(full, greedy(4))

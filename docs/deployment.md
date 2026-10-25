@@ -465,14 +465,14 @@ export BLAZR_SWARM_TOKEN=<shared-secret>
 blazr swarm --role worker --workers 2 --leader <leader-ip>:9090
 ```
 
-The leader sends each worker its layer range and the model path, and starts the HTTP server once every worker loaded its model. The path is where the leader finds the model name: under its `model_dir`, or the name itself as a path. Every node must hold the model at that path. Each node loads the whole checkpoint and runs only its layer range, so each node needs memory for the full model.
+The leader sends each worker its layer range and the model path, and starts the HTTP server once every worker loaded its model. The path is where the leader finds the model name: under its `model_dir`, or the name itself as a path. Every node must hold the model at that path. Each node reads only the tensors of its own layer range: stage 0 adds the token embedding, and the last stage adds the final norm and LM head. A node needs memory for its own layers, not the full model. SafeTensors, GPTQ, AWQ and GGUF checkpoints all load this way.
 
-The leader serves the HTTP API of `blazr serve` for its model, and every generation runs through the pipeline. The leader runs stage 0, and the last worker returns the logits of each step. The leader samples every token, so grammars, `logprobs`, `logit_bias`, DRY, mirostat and the seed work as on one process. Embeddings run on the leader's own copy of the model. A request for another model is a `404`.
+The leader serves the HTTP API of `blazr serve` for its model, and every generation runs through the pipeline. The leader runs stage 0, and the last worker returns the logits of each step. The leader samples every token, so grammars, `logprobs`, `logit_bias`, DRY, mirostat and the seed work as on one process. The leader's HTTP front end holds the model's config, tokenizer and chat template, and no weights beyond stage 0. Embeddings, images and LoRA variants need the whole model, so the leader answers them with `501`. A request for another model is a `404`.
 
 - **Concurrency:** at most `--max-requests` requests run at once. Each stage holds one KV cache per request. A request past the cap waits for a slot.
 - **Long prompts:** with `inference.prefill_chunk_size` above `0`, a prompt goes through the pipeline in chunks of that many tokens. `0` sends the whole prompt as one frame.
 - **Errors:** a stage error ends only its request. A lost worker ends every request in flight and refuses every new one. `GET /health` then answers `503` with the reason. Restart every node to recover.
-- **Models:** Mamba, hybrid and qwen35 models, and tensor-parallel shards, cannot run as stages. The leader fails at start with the reason, before any worker joins.
+- **Models:** Mamba, hybrid and qwen35 models, and tensor-parallel shards, cannot run as stages. The leader fails at start with the reason, before it reads a weight and before any worker joins. A multimodal checkpoint runs its text model, and its vision and audio towers stay unread.
 
 | Flag               | Default             | Required     | Purpose                                                                  |
 | ------------------ | ------------------- | ------------ | ------------------------------------------------------------------------ |

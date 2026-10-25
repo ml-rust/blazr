@@ -2,11 +2,13 @@
 //!
 //! Wraps boostr's GGUF loading functionality.
 
+use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
 use boostr::format::Gguf;
+use boostr::model::llama::LayerSpan;
 use boostr::model::{LoadedModel, UniversalConfig};
 use boostr::ops::TensorOps;
 use boostr::{DType, Runtime, VarBuilder, VarMap};
@@ -16,6 +18,7 @@ use crate::config::{fixed_format_dtype, BlazrConfig, DtypeRequest};
 use crate::model::chat_template::ModelTemplate;
 
 use super::gguf_config::config_from_gguf_metadata;
+use super::layer_scope::build_model;
 
 /// Load a model from GGUF format
 ///
@@ -44,6 +47,39 @@ where
     let model = LoadedModel::load(&config.model, &mut vb)
         .map_err(|e| anyhow!("Failed to load model: {}", e))?;
 
+    Ok((model, config))
+}
+
+/// Layers `layers` of the GGUF file at `path`, as a pipeline stage holds
+/// them. The model is a `LlamaStage`.
+///
+/// The file is memory-mapped, and only the tensors of the span are read:
+/// see `LayerSpan::reads`. The pages of every other tensor are never
+/// touched.
+///
+/// # Errors
+///
+/// A model a layer range cannot hold, such as one with SSM or Gated
+/// DeltaNet state, or a range outside the model. Both fail before any
+/// tensor is read. Otherwise a file or tensor that does not load.
+pub fn load_gguf_layers<R: Runtime<DType = DType>, P: AsRef<Path>>(
+    path: P,
+    device: &R::Device,
+    layers: Range<usize>,
+) -> Result<(LoadedModel<R>, BlazrConfig)>
+where
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
+{
+    let mut gguf = Gguf::open_with_mmap(path.as_ref(), true)
+        .map_err(|e| anyhow!("Failed to open GGUF file: {}", e))?;
+    let config = config_from_gguf_metadata(&mut gguf)?;
+    let span = LayerSpan::for_model(&config.model, layers).map_err(|e| anyhow!("{e}"))?;
+    let reads = |name: &str| span.reads(&config.model, name);
+    let mut var_map = VarMap::<R>::from_gguf_reader_where(&mut gguf, device, reads)
+        .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;
+    tracing::info!("Loaded {} tensors of {span} from GGUF", var_map.len());
+    let mut vb = VarBuilder::new(&mut var_map, device);
+    let model = build_model(&config.model, &mut vb, Some(span))?;
     Ok((model, config))
 }
 

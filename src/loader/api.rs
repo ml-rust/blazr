@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::Path;
 
 use anyhow::Result;
@@ -48,6 +49,38 @@ where
             fixed_format_dtype("GGUF", DType::F32, request);
             gguf::load_gguf(path, device)
         }
+    }
+}
+
+/// Layers `layers` of the model at `path`, as a pipeline stage holds them.
+///
+/// The model is a `LlamaStage` with the weights of those layers only, the
+/// embedding when the range starts at layer 0, and the final norm and LM
+/// head when it ends at the last layer. Every format reads only those
+/// tensors: SafeTensors, GPTQ and AWQ by file name, GGUF over a memory map.
+/// The config describes the whole model.
+///
+/// # Errors
+///
+/// A model a layer range cannot hold (Mamba, hybrid, qwen35), or a range
+/// outside the model. Both fail before any weight is read. Otherwise a
+/// file or tensor that does not load.
+pub fn load_model_layers<R: Runtime<DType = DType>, P: AsRef<Path>>(
+    path: P,
+    device: &R::Device,
+    layers: Range<usize>,
+) -> Result<(LoadedModel<R>, BlazrConfig)>
+where
+    R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
+{
+    let path = path.as_ref();
+    match detect_model_source(path)?.format {
+        ModelFormat::SafeTensors => {
+            let (model, config, _) =
+                safetensors::load_safetensors_layers(path, device, None, layers)?;
+            Ok((model, config))
+        }
+        ModelFormat::Gguf => gguf::load_gguf_layers(path, device, layers),
     }
 }
 

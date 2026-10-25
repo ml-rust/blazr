@@ -231,6 +231,52 @@ pub(crate) fn seeded_full_vocab_layers(seed: u64, layers: usize) -> Result<Execu
     seeded_full_vocab_on(seed, None, layers)
 }
 
+/// Layers `layers` of the [`seeded_full_vocab_layers`] model of `total`
+/// layers, loaded as a swarm stage holds them: a `LlamaStage` built from the
+/// tensors of its own span only.
+#[cfg(all(feature = "distributed", not(any(feature = "cuda", feature = "wgpu"))))]
+pub(crate) fn seeded_full_vocab_stage(
+    seed: u64,
+    total: usize,
+    layers: std::ops::Range<usize>,
+) -> Result<LoadedModel<CpuRuntime>> {
+    use boostr::model::llama::LayerSpan;
+    let (_, vocab) = full_vocab_tokenizer()?;
+    let device = CpuDevice::new();
+    let config = full_vocab_config(vocab, total)?;
+    let span = LayerSpan::for_model(&config, layers)?;
+    let full = seeded_map(seed, vocab, total, &device)?;
+    let mut map = VarMap::new();
+    for (name, t) in full.all_tensors() {
+        if span.reads(&config, name) {
+            map.insert(name.to_string(), t.clone());
+        }
+    }
+    let mut vb = VarBuilder::new(&mut map, &device);
+    Ok(LoadedModel::<CpuRuntime>::load_layers(
+        &config, &mut vb, span,
+    )?)
+}
+
+/// The weight-free executor a swarm leader serves a
+/// [`seeded_full_vocab_layers`] model of `layers` layers with: its config and
+/// tokenizer, as `blazr swarm` builds it.
+#[cfg(all(feature = "distributed", not(any(feature = "cuda", feature = "wgpu"))))]
+pub(crate) fn full_vocab_front(layers: usize) -> Result<Executor<CpuRuntime>> {
+    let (tokenizer, vocab) = full_vocab_tokenizer()?;
+    let config = full_vocab_config(vocab, layers)?;
+    let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
+    blazr_config.inference.prefix_cache = false;
+    Executor::tokenizer_only(blazr_config, tokenizer, CpuDevice::new(), FULL_VOCAB_CTX)
+}
+
+/// The config of a full-vocab tiny llama of `layers` layers.
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+fn full_vocab_config(vocab: usize, layers: usize) -> Result<boostr::model::UniversalConfig> {
+    let yaml = full_vocab_yaml(vocab).replace("num_layers: 1", &format!("num_layers: {layers}"));
+    Ok(serde_saphyr::from_str(&yaml)?)
+}
+
 /// A [`seeded_full_vocab_executor`] over the paged KV pool `pool`, with the
 /// prefix cache off.
 ///
@@ -249,8 +295,7 @@ fn seeded_full_vocab_on(
 ) -> Result<Executor<CpuRuntime>> {
     let (tokenizer, vocab) = full_vocab_tokenizer()?;
     let device = CpuDevice::new();
-    let yaml = full_vocab_yaml(vocab).replace("num_layers: 1", &format!("num_layers: {layers}"));
-    let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
+    let config = full_vocab_config(vocab, layers)?;
     let model = seeded_model(seed, vocab, layers, &config, &device)?;
     let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
     enable_paged(&mut blazr_config, paged);
@@ -266,6 +311,18 @@ fn seeded_model(
     config: &boostr::model::UniversalConfig,
     device: &CpuDevice,
 ) -> Result<LoadedModel<CpuRuntime>> {
+    let mut map = seeded_map(seed, vocab, layers, device)?;
+    let mut vb = VarBuilder::new(&mut map, device);
+    Ok(LoadedModel::<CpuRuntime>::load(config, &mut vb)?)
+}
+
+/// The checkpoint tensors of a [`seeded_model`].
+fn seeded_map(
+    seed: u64,
+    vocab: usize,
+    layers: usize,
+    device: &CpuDevice,
+) -> Result<VarMap<CpuRuntime>> {
     let mut weights = SeededWeights {
         state: seed,
         vocab,
@@ -273,9 +330,7 @@ fn seeded_model(
         map: VarMap::new(),
     };
     weights.fill(device)?;
-    let mut map = weights.map;
-    let mut vb = VarBuilder::new(&mut map, device);
-    Ok(LoadedModel::<CpuRuntime>::load(config, &mut vb)?)
+    Ok(weights.map)
 }
 
 fn seeded_on(

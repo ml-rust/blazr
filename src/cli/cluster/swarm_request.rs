@@ -252,10 +252,10 @@ mod tests {
 
     use super::super::disaggregated_test_rig::app;
     use super::super::swarm_serving::swarm_serving;
-    use super::super::swarm_test_rig::{eventually, get, Probe, Swarm, LAYERS, SEED, WAIT};
+    use super::super::swarm_test_rig::{eventually, get, Probe, Swarm, LAYERS, WAIT};
     use super::*;
     use crate::config::GenerationConfig;
-    use crate::engine::test_support::seeded_full_vocab_layers;
+    use crate::engine::test_support::full_vocab_front;
     use crate::engine::{GenerationScheduler, RequestHandle, Scheduler};
 
     fn greedy(max_tokens: usize) -> GenerationConfig {
@@ -280,7 +280,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stage_error_fails_only_its_request() -> Result<()> {
-        let executor = Arc::new(seeded_full_vocab_layers(SEED, LAYERS)?);
+        let executor = Arc::new(full_vocab_front(LAYERS)?);
         let failing = Probe {
             fail_at: Some(6),
             ..Probe::default()
@@ -314,7 +314,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_lost_stage_fails_the_request_and_marks_the_swarm_down() -> Result<()> {
-        let executor = Arc::new(seeded_full_vocab_layers(SEED, LAYERS)?);
+        let executor = Arc::new(full_vocab_front(LAYERS)?);
         let slow = Probe {
             delay: Some(std::time::Duration::from_millis(20)),
             ..Probe::default()

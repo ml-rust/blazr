@@ -4,10 +4,12 @@
 use anyhow::{anyhow, Result};
 
 use boostr::format::SafeTensorsLoader;
+use boostr::model::llama::LayerSpan;
 use boostr::model::UniversalConfig;
 use boostr::ops::TensorOps;
 use boostr::{DType, Runtime, VarMap};
 
+use super::super::layer_scope::reads_file_name;
 use super::tensors::TensorPolicy;
 
 /// What a checkpoint load read from the file.
@@ -17,7 +19,8 @@ pub struct TensorLoadReport {
     /// its file name.
     pub uploaded: Vec<String>,
     /// Every tensor left unread because the model never uses it, such as
-    /// the MTP head and vision tower of a Qwen3.5 checkpoint.
+    /// the MTP head and vision tower of a Qwen3.5 checkpoint, or because it
+    /// belongs to layers outside the span of a layer-range load.
     pub skipped: Vec<String>,
     /// The dtype every float weight holds when the model loads.
     pub compute_dtype: DType,
@@ -27,6 +30,9 @@ pub struct TensorLoadReport {
 /// layout and at the `compute` dtype it loads with. A sharded checkpoint
 /// reads shard by shard. See `TensorPolicy` for the dtype order.
 ///
+/// With a `span`, only the tensors of its layers, plus the embedding and
+/// head it holds, are read. See `LayerSpan::reads`.
+///
 /// # Errors
 ///
 /// A tensor does not read or cast, or the layout edits fail.
@@ -35,6 +41,7 @@ pub(super) fn load_checkpoint_map<R: Runtime<DType = DType>>(
     config: &UniversalConfig,
     device: &R::Device,
     compute: DType,
+    span: Option<&LayerSpan>,
 ) -> Result<(VarMap<R>, TensorLoadReport)>
 where
     R::Client: TensorOps<R>,
@@ -51,7 +58,7 @@ where
     let total = names.len();
     tracing::info!("Loading {total} tensors to device...");
     for (idx, name) in names.into_iter().enumerate() {
-        if !policy.reads(&name) {
+        if !policy.reads(&name) || !reads_file_name(span, config, &name) {
             report.skipped.push(name);
             continue;
         }
@@ -218,7 +225,8 @@ mod tests {
 
         let mut loader = SafeTensorsLoader::open(dir.path()).unwrap();
         let (map, report) =
-            load_checkpoint_map::<CpuRuntime>(&mut loader, &config, &device, compute).unwrap();
+            load_checkpoint_map::<CpuRuntime>(&mut loader, &config, &device, compute, None)
+                .unwrap();
         assert_eq!(report.compute_dtype, compute);
 
         let mut wide = VarMap::<CpuRuntime>::new();
@@ -289,9 +297,14 @@ mod tests {
         }
 
         let mut loader = SafeTensorsLoader::open(dir.path()).unwrap();
-        let (map, _) =
-            load_checkpoint_map::<CpuRuntime>(&mut loader, &tiny_config(), &device, DType::F32)
-                .unwrap();
+        let (map, _) = load_checkpoint_map::<CpuRuntime>(
+            &mut loader,
+            &tiny_config(),
+            &device,
+            DType::F32,
+            None,
+        )
+        .unwrap();
         for (name, t) in map.all_tensors() {
             if t.shape().len() >= 2 {
                 assert!(
@@ -308,9 +321,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_checkpoint(dir.path(), &device);
         let mut loader = SafeTensorsLoader::open(dir.path()).unwrap();
-        let (map, report) =
-            load_checkpoint_map::<CpuRuntime>(&mut loader, &tiny_config(), &device, DType::F32)
-                .unwrap();
+        let (map, report) = load_checkpoint_map::<CpuRuntime>(
+            &mut loader,
+            &tiny_config(),
+            &device,
+            DType::F32,
+            None,
+        )
+        .unwrap();
         let mut skipped = report.skipped.clone();
         skipped.sort_unstable();
         let mut expected = DROPPED.map(String::from).to_vec();

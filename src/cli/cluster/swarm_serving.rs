@@ -37,14 +37,20 @@ mod tests {
     use super::*;
     use crate::config::GenerationConfig;
     use crate::engine::batch_test_rig::alone_tokens;
-    use crate::engine::test_support::seeded_full_vocab_layers;
+    use crate::engine::test_support::{full_vocab_front, seeded_full_vocab_layers};
     use crate::engine::{GeneratedToken, Scheduler};
     use crate::server::handlers::test_state;
 
     const MODEL: &str = "m";
 
+    /// The single process the swarm's output is checked against.
     fn executor() -> Result<Executor<ServerRuntime>> {
         seeded_full_vocab_layers(SEED, LAYERS)
+    }
+
+    /// The leader's executor: config and tokenizer, no weights.
+    fn front() -> Result<Executor<ServerRuntime>> {
+        full_vocab_front(LAYERS)
     }
 
     async fn swarm_of(executor: Executor<ServerRuntime>) -> Result<Swarm> {
@@ -101,7 +107,7 @@ mod tests {
     /// logprobs and a logit bias the leader's sampler applies.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn swarm_output_equals_the_single_process_output() -> Result<()> {
-        let swarm = swarm_of(executor()?).await?;
+        let swarm = swarm_of(front()?).await?;
         let single = executor()?;
         let prompt = single.tokenizer().encode("The quick brown fox");
         let shaped = GenerationConfig {
@@ -136,7 +142,7 @@ mod tests {
     /// decode frames, and decodes the ids one prefill gives.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_chunked_prefill_decodes_the_one_process_ids() -> Result<()> {
-        let mut chunked = executor()?;
+        let mut chunked = front()?;
         chunked.config.inference.prefill_chunk_size = 2;
         let swarm = swarm_of(chunked).await?;
         let single = executor()?;
@@ -152,7 +158,7 @@ mod tests {
     /// Requests in the pipeline at once keep their own caches and tokens.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_requests_do_not_cross() -> Result<()> {
-        let swarm = swarm_of(executor()?).await?;
+        let swarm = swarm_of(front()?).await?;
         let single = executor()?;
         let prompts: Vec<Vec<u32>> = ["Hello there", "A long time ago", "Rust is"]
             .iter()
@@ -199,7 +205,7 @@ mod tests {
         let models = Scheduler::<ServerRuntime>::new(dir.path().to_path_buf(), CpuDevice::new());
         let models = models.pinned();
         let served = models
-            .register_base(MODEL, dir.path().join(MODEL), executor()?)
+            .register_base(MODEL, dir.path().join(MODEL), front()?)
             .await;
         let swarm = Swarm::start(Arc::clone(&served), vec![Probe::default(); 3]).await?;
         let serving = swarm_serving(served, Arc::clone(&swarm.scheduler));

@@ -24,7 +24,7 @@ use crate::server::generation::{
     record_generation_metrics, validate_generation_params, HasSamplingFields, SamplingParams,
     Usage,
 };
-use crate::server::handlers::{lookup_error_response, AppState, DecodeSlot};
+use crate::server::handlers::{lookup_error_response, request_tokens, AppState, DecodeSlot};
 use crate::server::routed_stream::stream_routed;
 use crate::server::scheduled::generate_text_routed;
 use crate::server::streaming::StreamToken;
@@ -80,7 +80,7 @@ pub async fn infill(
         Ok(tokens) => tokens,
         Err(e) => return policy_error_response(&e),
     };
-    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
+    let estimated_tokens = request_tokens(prompt_tokens.len(), gen_config.max_tokens);
     let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
     };

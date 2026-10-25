@@ -34,10 +34,7 @@ pub struct AnthropicRequest {
     /// Top-k
     #[serde(default)]
     pub top_k: Option<usize>,
-    /// Metadata
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub metadata: Option<serde_json::Value>,
+    // Anthropic's `metadata` field has no use here. Serde skips it as an unknown field.
 }
 
 /// Anthropic system can be a string or array of content blocks
@@ -177,6 +174,14 @@ pub struct TokenCountResponse {
 mod tests {
     use super::*;
     use crate::server::chat_vision::marked_text;
+
+    #[test]
+    fn a_metadata_field_is_accepted_and_ignored() {
+        let json = r#"{"model": "m", "max_tokens": 8, "metadata": {"user_id": "u-1"},
+            "messages": [{"role": "user", "content": "hi"}]}"#;
+        let req: Result<AnthropicRequest, _> = serde_json::from_str(json);
+        assert!(req.is_ok(), "{:?}", req.err());
+    }
 
     #[test]
     fn test_anthropic_content_text() {

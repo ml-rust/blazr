@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct SpeechRequest {
-    #[allow(dead_code)]
+    /// The TTS model the request runs on.
     pub model: String,
     pub input: String,
     /// `None` when the field is omitted — distinct from an explicit id.

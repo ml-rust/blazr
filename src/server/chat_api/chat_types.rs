@@ -10,8 +10,9 @@ use super::tools::{ChatRequestMessage, ChatResponseMessage, Tool};
 use crate::config::{Constraint, ReasoningFormat};
 use crate::model::chat_template::RenderOptions;
 use crate::server::generation::{
-    check_stop, resolve_constraint, string_or_array, validate_generation_params, HasSamplingFields,
-    LogprobResult, ResponseFormat, SamplingParams, StreamOptions, Usage,
+    check_choice_count, check_stop, choice_count, resolve_constraint, string_or_array,
+    validate_generation_params, HasSamplingFields, LogprobResult, ResponseFormat, SamplingParams,
+    StreamOptions, Usage,
 };
 
 // ── Request/Response types ──
@@ -137,15 +138,16 @@ impl ChatRequest {
         StreamOptions::include_usage(self.stream_options.as_ref())
     }
 
-    /// The number of choices: `n`, at least 1.
+    /// The number of choices: `n`, 1 when absent. See [`choice_count`].
     pub fn choice_count(&self) -> usize {
-        self.n.unwrap_or(1).max(1)
+        choice_count(self.n)
     }
 
-    /// Check the sampling fields and `stop`. The handler answers 400 on an error.
+    /// Check the sampling fields, `stop` and `n`. The handler answers 400 on an error.
     pub fn check_fields(&self) -> Result<(), String> {
         validate_generation_params(self.temperature, self.top_p, self.effective_max_tokens())?;
-        check_stop(self.stop.as_deref())
+        check_stop(self.stop.as_deref())?;
+        check_choice_count(self.n)
     }
 
     /// Template variables for this request.
@@ -342,8 +344,20 @@ mod tests {
             .check_fields()
             .is_ok());
         assert_eq!(request(json!({"stream": true, "n": 3})).choice_count(), 3);
-        assert_eq!(request(json!({"n": 0})).choice_count(), 1);
         assert_eq!(request(json!({})).choice_count(), 1);
+    }
+
+    #[test]
+    fn n_outside_one_to_the_limit_is_an_error() {
+        assert!(request(json!({"n": 0})).check_fields().is_err());
+        let huge = request(json!({"n": 1_000_000_000_000_u64}));
+        assert!(huge.check_fields().unwrap_err().contains("n must be"));
+        assert_eq!(
+            huge.choice_count(),
+            crate::server::gen_core::request_fields::MAX_CHOICES
+        );
+        assert!(request(json!({"n": 128})).check_fields().is_ok());
+        assert!(request(json!({"n": 129})).check_fields().is_err());
     }
 
     #[test]

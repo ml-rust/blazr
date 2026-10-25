@@ -10,7 +10,8 @@ use super::chat_chunks::ChatChunker;
 use super::chat_stream::{ChatStreamChoice, ChatStreamChunk, ChatStreamDelta, CHAT_CHUNK_OBJECT};
 use super::reasoning::ReasoningParser;
 use super::stream_usage::{usage_event, ChoicesUsage, ChunkUsage};
-use super::streaming::{error_event, TokenStream};
+use super::streaming::{error_event, StreamToken, TokenStream};
+use crate::engine::FinishReason;
 use crate::server::tool_parser::ToolCallParser;
 
 /// One choice of a chat stream: its items and the parsers its text goes through.
@@ -27,7 +28,8 @@ pub(in crate::server) struct ChoiceStream {
 ///
 /// The choices stream in order. Each one opens with its own `role` chunk
 /// and ends with its own `finish_reason` chunk. A choice ends when its items
-/// end or its final item arrives.
+/// end or its final item arrives. Items that end with no final item end
+/// the choice with `length`, as a complete response reports them.
 ///
 /// With `reasoning` set, each token is split into `delta.reasoning_content`
 /// and `delta.content`; without it, every token is `delta.content`.
@@ -112,6 +114,15 @@ pub(in crate::server) fn create_choices_stream(
                 }
             }
             if !finished {
+                // Items that end with no final one still close the choice:
+                // an empty final token releases held text and sends `length`.
+                let last = StreamToken::text(String::new(), Some(FinishReason::Length));
+                for mut out in chunker.token(last) {
+                    out.index = index;
+                    if let Ok(data) = serde_json::to_string(&chunk(out)) {
+                        yield Ok(Event::default().data(data));
+                    }
+                }
                 counts.unfinished();
             }
         }
@@ -131,9 +142,7 @@ pub(in crate::server) fn create_choices_stream(
 #[cfg(test)]
 mod tests {
     use super::super::stream_usage::StreamUsage;
-    use super::super::streaming::StreamToken;
     use super::*;
-    use crate::engine::FinishReason;
     use crate::server::streaming::sse_test::{assert_usage_tail, events, feed};
     use serde_json::json;
 
@@ -211,6 +220,50 @@ mod tests {
         assert_eq!(got.len(), 5, "{got:?}");
         assert!(got.iter().all(|e| e.get("choices") != Some(&json!([]))));
         assert_eq!(got[4], json!("[DONE]"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_choice_without_a_final_item_still_sends_a_finish_reason() -> anyhow::Result<()> {
+        let cut = ChoiceStream {
+            tokens: feed(vec![StreamToken::text("x".into(), None)]),
+            reasoning: None,
+            tools: None,
+        };
+        let choices = vec![cut, choice(&["a"], 1)];
+        let sse = create_choices_stream("c".into(), "m".into(), choices, true);
+        let got = events(sse).await?;
+
+        // role, "x", the closing chunk, role, "a", [DONE]. No usage chunk.
+        assert_eq!(got.len(), 6, "{got:?}");
+        assert_eq!(got[1]["choices"][0]["delta"], json!({"content": "x"}));
+        assert!(got[1]["choices"][0]["finish_reason"].is_null());
+        assert_eq!(got[2]["choices"][0]["index"], 0);
+        assert_eq!(got[2]["choices"][0]["finish_reason"], "length");
+        assert_eq!(got[4]["choices"][0]["index"], 1);
+        assert_eq!(got[4]["choices"][0]["finish_reason"], "stop");
+        assert!(got.iter().all(|e| e.get("choices") != Some(&json!([]))));
+        assert_eq!(got[5], json!("[DONE]"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_choice_of_a_cut_stream_ends_with_one_finish_reason() -> anyhow::Result<()> {
+        let cut = || ChoiceStream {
+            tokens: feed(vec![StreamToken::text("x".into(), None)]),
+            reasoning: None,
+            tools: None,
+        };
+        let sse = create_choices_stream("c".into(), "m".into(), vec![cut(), cut(), cut()], false);
+        let got = events(sse).await?;
+        for index in 0..3 {
+            let finishes: Vec<_> = got
+                .iter()
+                .filter(|e| e["choices"][0]["index"] == index)
+                .filter_map(|e| e["choices"][0]["finish_reason"].as_str())
+                .collect();
+            assert_eq!(finishes, ["length"], "choice {index}: {got:?}");
+        }
         Ok(())
     }
 }

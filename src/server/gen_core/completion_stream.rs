@@ -10,6 +10,7 @@ use serde::Serialize;
 use super::gen_types::LogprobResult;
 use super::stream_usage::{usage_event, ChoicesUsage, ChunkUsage};
 use super::streaming::{error_event, TokenStream};
+use crate::engine::FinishReason;
 
 /// SSE delta for streaming completions
 #[derive(Serialize)]
@@ -54,7 +55,8 @@ pub fn create_completion_stream(
 ///
 /// The choices stream in order, with no interleaving. Each item becomes one
 /// chunk of its choice. A choice ends when its items end or its final item
-/// arrives.
+/// arrives. Items that end with no final item end the choice with one more
+/// chunk: empty text and `length`, as a complete response reports them.
 ///
 /// An item with logprobs puts one entry in `choices[0].logprobs.content`.
 /// A stop-sequence prefix holds text back, so a chunk can carry a token's
@@ -118,6 +120,23 @@ pub fn create_completion_choices_stream(
                 }
             }
             if !finished {
+                // Items that end with no final one still close the choice.
+                let chunk = StreamCompletionChunk {
+                    id: id.clone(),
+                    object: COMPLETION_CHUNK_OBJECT.to_string(),
+                    created,
+                    model: model.clone(),
+                    choices: vec![StreamChoice {
+                        index,
+                        delta: StreamDelta { text: String::new() },
+                        finish_reason: Some(FinishReason::Length.as_str().to_string()),
+                        logprobs: None,
+                    }],
+                    usage,
+                };
+                if let Ok(data) = serde_json::to_string(&chunk) {
+                    yield Ok(Event::default().data(data));
+                }
                 counts.unfinished();
             }
         }
@@ -139,7 +158,7 @@ mod tests {
     use super::super::stream_usage::StreamUsage;
     use super::super::streaming::StreamToken;
     use super::*;
-    use crate::engine::{FinishReason, GeneratedToken, TokenLogprob};
+    use crate::engine::{GeneratedToken, TokenLogprob};
     use crate::server::streaming::sse_test::{
         assert_usage_tail, body, entry, events, expected_entry, feed, token,
     };
@@ -300,9 +319,14 @@ mod tests {
         let sse = create_completion_choices_stream("c".into(), "m".into(), choices, true);
         let got = events(sse).await?;
 
-        assert_eq!(got.len(), 3, "{got:?}");
+        // "a", "x", the closing chunk, [DONE]. No usage chunk.
+        assert_eq!(got.len(), 4, "{got:?}");
         assert!(got.iter().all(|e| e.get("choices") != Some(&json!([]))));
-        assert_eq!(got[2], json!("[DONE]"));
+        assert!(got[1]["choices"][0]["finish_reason"].is_null());
+        assert_eq!(got[2]["choices"][0]["index"], 1);
+        assert_eq!(got[2]["choices"][0]["delta"]["text"], "");
+        assert_eq!(got[2]["choices"][0]["finish_reason"], "length");
+        assert_eq!(got[3], json!("[DONE]"));
         Ok(())
     }
 }

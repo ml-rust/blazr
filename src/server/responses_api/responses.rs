@@ -22,7 +22,7 @@ use crate::server::generation::{
     admit_generation, chat_prompt_error_response, error_response, overloaded_response,
     record_generation_metrics, validate_generation_params,
 };
-use crate::server::handlers::{select_executor, AppState, DecodeSlot};
+use crate::server::handlers::{request_tokens, select_executor, AppState, DecodeSlot};
 use crate::server::route_stream::generate_for_media;
 
 /// POST /v1/responses — OpenAI Responses API
@@ -142,7 +142,7 @@ pub async fn responses(
     }
 
     // Token budget admission
-    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
+    let estimated_tokens = request_tokens(prompt_tokens.len(), gen_config.max_tokens);
     let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
     };

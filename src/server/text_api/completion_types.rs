@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::completion_prompt::CompletionPrompt;
 use crate::server::generation::{
-    check_stop, string_or_array, validate_generation_params, HasSamplingFields, LogprobResult,
-    LogprobsRequest, ResponseFormat, SamplingParams, StreamOptions, Usage,
+    check_choice_count, check_stop, choice_count, string_or_array, validate_generation_params,
+    HasSamplingFields, LogprobResult, LogprobsRequest, ResponseFormat, SamplingParams,
+    StreamOptions, Usage,
 };
 
 #[derive(Deserialize)]
@@ -105,9 +106,9 @@ pub struct CompletionRequest {
 }
 
 impl CompletionRequest {
-    /// Choices per prompt: `n`, at least 1.
+    /// Choices per prompt: `n`, 1 when absent. See [`choice_count`].
     pub fn choices_per_prompt(&self) -> usize {
-        self.n.unwrap_or(1).max(1)
+        choice_count(self.n)
     }
 
     /// Whether a stream ends with a usage chunk: `stream_options.include_usage`.
@@ -119,6 +120,7 @@ impl CompletionRequest {
     pub fn check_fields(&self) -> Result<(), String> {
         validate_generation_params(self.temperature, self.top_p, self.max_tokens)?;
         check_stop(self.stop.as_deref())?;
+        check_choice_count(self.n)?;
         if let Some(logprobs) = self.logprobs {
             logprobs.check()?;
         }
@@ -279,6 +281,19 @@ mod tests {
         assert!(request(json!({"n": 2, "prompt": ["a", "b"]}))
             .check_fields()
             .is_ok());
+    }
+
+    #[test]
+    fn n_outside_one_to_the_limit_is_an_error() {
+        assert!(request(json!({"n": 0})).check_fields().is_err());
+        let huge = request(json!({"n": 1_000_000_000_000_u64}));
+        assert!(huge.check_fields().unwrap_err().contains("n must be"));
+        assert_eq!(
+            huge.choices_per_prompt(),
+            crate::server::gen_core::request_fields::MAX_CHOICES
+        );
+        assert!(request(json!({"n": 128})).check_fields().is_ok());
+        assert!(request(json!({"n": 129})).check_fields().is_err());
     }
 
     #[test]

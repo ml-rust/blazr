@@ -19,7 +19,7 @@ use crate::server::generation::{
     admit_generation, chat_prompt_error_response, decode_context_prefix, error_response,
     overloaded_response, policy_error_response, HasSamplingFields,
 };
-use crate::server::handlers::{select_executor, AppState, BudgetPermit, Route};
+use crate::server::handlers::{request_tokens, select_executor, AppState, BudgetPermit, Route};
 
 /// A chat request that passed every check and holds its token budget.
 ///
@@ -222,7 +222,7 @@ pub(in crate::server) async fn prepare_chat<'r>(
         .unwrap_or_else(|| state.reasoning_format());
 
     // Token budget admission control
-    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
+    let estimated_tokens = request_tokens(prompt_tokens.len(), gen_config.max_tokens);
     let Some(permit) = state.try_admit(estimated_tokens) else {
         return Err(Box::new(overloaded_response()));
     };

@@ -19,7 +19,7 @@ use crate::server::generation::{
     admit_generation, apply_keep_alive, choice_config, decode_context_prefix, error_response,
     overloaded_response, record_generation_metrics, resolve_constraint, HasSamplingFields, Usage,
 };
-use crate::server::handlers::{select_executor, AppState, DecodeSlot};
+use crate::server::handlers::{request_tokens, select_executor, AppState, DecodeSlot};
 use crate::server::route_stream::spawn_media_streams;
 use crate::server::streaming::{StreamToken, TokenStream};
 
@@ -89,10 +89,9 @@ pub async fn completions(
     };
 
     // Token budget admission control: every prompt with its generation budget.
-    let estimated_tokens: usize = prompts
-        .iter()
-        .map(|p| p.tokens.len() + gen_config.max_tokens)
-        .sum();
+    let estimated_tokens = prompts.iter().fold(0usize, |total, p| {
+        total.saturating_add(request_tokens(p.tokens.len(), gen_config.max_tokens))
+    });
     let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
     };

@@ -1,5 +1,5 @@
-//! Request field forms that chat and completions share: `stop`, `logprobs`
-//! and `stream_options`.
+//! Request field forms that chat and completions share: `n`, `stop`,
+//! `logprobs` and `stream_options`.
 
 use serde::{Deserialize, Deserializer};
 
@@ -23,6 +23,9 @@ impl StreamOptions {
 
 /// The most stop sequences a request can carry.
 pub const MAX_STOP_SEQUENCES: usize = 4;
+
+/// The most choices `n` can ask for on chat and completions.
+pub const MAX_CHOICES: usize = 128;
 
 /// The most top logprobs a completions `logprobs` integer can ask for.
 pub const MAX_COMPLETION_LOGPROBS: i64 = 5;
@@ -59,6 +62,27 @@ pub fn check_stop(stop: Option<&[String]>) -> Result<(), String> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Check `n`, the choice count of a chat or completions request.
+///
+/// Absent reads as 1. The handler answers 400 on an error, before it
+/// allocates anything per choice.
+pub fn check_choice_count(n: Option<usize>) -> Result<(), String> {
+    match n {
+        Some(n) if n == 0 || n > MAX_CHOICES => Err(format!(
+            "n must be an integer from 1 to {MAX_CHOICES}, got {n}"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The choice count of `n`: absent reads as 1.
+///
+/// The result stays in `1..=MAX_CHOICES`. [`check_choice_count`] rejects a
+/// value outside that range first.
+pub fn choice_count(n: Option<usize>) -> usize {
+    n.unwrap_or(1).clamp(1, MAX_CHOICES)
 }
 
 /// The completions `logprobs` field: a boolean, or an integer 0 to 5.
@@ -128,6 +152,26 @@ mod tests {
         let five: Vec<String> = (0..5).map(|i| i.to_string()).collect();
         assert!(check_stop(Some(&five)).unwrap_err().contains("at most 4"));
         assert!(check_stop(None).is_ok());
+    }
+
+    #[test]
+    fn choice_count_takes_one_to_the_limit() {
+        assert!(check_choice_count(None).is_ok());
+        assert!(check_choice_count(Some(1)).is_ok());
+        assert!(check_choice_count(Some(MAX_CHOICES)).is_ok());
+        let zero = check_choice_count(Some(0)).unwrap_err();
+        assert!(zero.contains("from 1 to 128, got 0"), "{zero}");
+        assert!(check_choice_count(Some(MAX_CHOICES + 1)).is_err());
+        assert!(check_choice_count(Some(1_000_000_000_000)).is_err());
+        assert!(check_choice_count(Some(usize::MAX)).is_err());
+    }
+
+    #[test]
+    fn choice_count_stays_in_range() {
+        assert_eq!(choice_count(None), 1);
+        assert_eq!(choice_count(Some(0)), 1);
+        assert_eq!(choice_count(Some(3)), 3);
+        assert_eq!(choice_count(Some(usize::MAX)), MAX_CHOICES);
     }
 
     #[test]

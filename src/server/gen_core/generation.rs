@@ -16,7 +16,9 @@ pub use super::gen_types::{
     error_response, error_response_with_code, overloaded_response, policy_error_response,
     resolve_constraint, validate_generation_params, LogprobResult, ResponseFormat, Usage,
 };
-pub use super::request_fields::{check_stop, string_or_array, LogprobsRequest, StreamOptions};
+pub use super::request_fields::{
+    check_choice_count, check_stop, choice_count, string_or_array, LogprobsRequest, StreamOptions,
+};
 pub use super::stop_stream::{
     stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
     stream_with_stop_sequences,

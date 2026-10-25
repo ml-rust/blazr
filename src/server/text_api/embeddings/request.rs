@@ -23,10 +23,7 @@ pub struct EmbeddingRequest {
     /// Keep only the first `dimensions` values of each vector.
     #[serde(default)]
     pub dimensions: Option<usize>,
-    /// Optional user identifier.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub user: Option<String>,
+    // OpenAI's `user` field has no use here. Serde skips it as an unknown field.
 }
 
 fn default_pooling() -> String {
@@ -104,6 +101,13 @@ mod tests {
     fn parse(input: &str) -> EmbeddingRequest {
         let json = format!(r#"{{"model": "test", "input": {input}}}"#);
         serde_json::from_str(&json).expect("request parses")
+    }
+
+    #[test]
+    fn a_user_field_is_accepted_and_ignored() {
+        let json = r#"{"model": "test", "input": "hi", "user": "u-1"}"#;
+        let req: EmbeddingRequest = serde_json::from_str(json).expect("request parses");
+        assert_eq!(texts(&req.input), vec!["hi"]);
     }
 
     fn texts(input: &EmbeddingInput) -> Vec<&str> {

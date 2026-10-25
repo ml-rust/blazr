@@ -19,7 +19,7 @@ preview on crates.io that shares no code with it.
 - **`blazr disagg` cluster flags** — every role takes `--router-addr`, the router's seed address: the router binds it, and each worker dials it. `--prefill-count` and `--decode-count` (default `1` each, the same on every node) replace the router's `--prefill` and `--decode` address lists. `--listen-addr` is the node's mesh listener for UDP and TCP, and its default moves to `0.0.0.0:9191`. `--role` refuses an unknown value at parse time.
 - **`blazr swarm` cluster flags** — every node takes `--workers` (default `1`, the same on every node). `--token` is the nexar cluster token. `--listen-addr` (default `0.0.0.0:9091`) is the node's mesh listener, and the leader's seed binds its IP on `--swarm-port`. `--mdns` is removed: no discovery existed, and a worker with `--mdns` alone failed. A worker needs `--leader`.
 - **Swarm wire protocol** — the swarm stages speak boostr's version 2 request header, with a request id per frame, and boostr's activation format. Every rank of a swarm must run the same blazr release.
-- **`GET /health` can answer `503`** — a server whose scheduler can no longer serve answers `503` with `"status": "unavailable"` and the reason in the new `error` field. A swarm leader that lost a worker stage does this. A probe that checks only for `200` sees the outage.
+- **`GET /health` can answer `503`** — a server whose scheduler can no longer serve answers `503` with `"status": "unavailable"` and the reason in the new `error` field. A swarm leader that lost a worker stage does this. A `disagg` router that lost a prefill or decode worker does this too: nexar reports the rank dead, or the router ends a request because the worker's connection closed. A worker error on one request leaves it at `200`. A probe that checks only for `200` sees the outage.
 - **`EngineThread::spawn` takes the scheduler it fails** — the second argument is an `Arc<dyn FailRequests>`, the scheduler the loop drives. `RequestScheduler` and `LaneScheduler` implement `FailRequests`. A loop that panics or ends before its stop signal fails that scheduler.
 - **One process per rank** — `swarm` and `disagg` form the cluster with nexar's `bootstrap_seed` and `bootstrap_join`. Before, each process ran `bootstrap_local`, which formed a whole cluster inside itself, so no node ever reached another. The swarm leader also never formed a cluster: it counted only itself.
 
@@ -27,6 +27,28 @@ preview on crates.io that shares no code with it.
 - **`batching_choice` takes `hybrid_rows`** — the second argument says whether the model decodes in hybrid lanes, from boostr's `LoadedModel::supports_hybrid_rows`. `BatchingChoice` gains `HybridLanes`. An exhaustive `match` must handle it.
 
 - **`inference.prefill_chunk_size` defaults to `512`** — every prefill path now runs a longer prompt in chunks of 512 tokens. Before, the default `0` ran every prompt in one forward. A prompt of more than 512 tokens now prefills with arithmetic that differs in the last bits from a one-shot prefill. Set `0` for the old behavior: one forward that a cancel cannot interrupt.
+
+- **`/v1/embeddings` normalizes by default** — `normalize` now defaults to `true`, as OpenAI returns unit vectors. Before, it defaulted to `false`. Send `"normalize": false` for the raw pooled vectors.
+- **New request `400`s** — each of these requests ran before and is now a `400` that names the field:
+  - `/v1/embeddings`: an `encoding_format` other than `float` or `base64`. Before, any other value returned floats.
+  - `/v1/completions` and `/v1/chat/completions`: more than 4 `stop` entries. The Ollama routes check `options.stop` the same way.
+  - `/v1/completions`: `best_of` above `n`. Before, `best_of` was ignored.
+  - `/v1/completions` and `/v1/chat/completions`: `n` of `0`, or above `128`. Before, `0` read as `1` and a huge `n` aborted the server in its allocation. The check runs before any work per choice.
+  - `/v1/chat/completions`: a `tool_choice` that is not `none`, `auto`, `required` or a named function, a `tool_choice` with no declared `tools`, a named function that no declared tool has, and a forced call (`required` or a named function) beside a `grammar` or a `response_format` other than `text`.
+- **`inference.speculative` semantics** — `enabled` (default `false`) now turns speculation on:
+  - An old section that sets only `draft_model` now loads with speculation off.
+  - `enabled: true` alone drafts with `drafter: prompt_lookup`, the default drafter.
+  - `draft_model` drafts only under `drafter: model`. With `prompt_lookup`, a set `draft_model` logs a warning and no draft model loads.
+  - A relative `draft_model` resolves against the current directory only, never against `model_dir`.
+- **Rust library API** — these items changed or are gone:
+  - `blazr::engine::grammar` is removed, with `GrammarDfa`, `compile_grammar_to_dfa`, `json_schema_to_gbnf`, `parse_gbnf`, `GbnfRule`, `GbnfSequence`, `GbnfElement`, `CharRange` and `RepeatKind`. boostr compiles every constraint: the new `engine::compile_constraint` and `GrammarCache` compile a `config::Constraint` with it.
+  - `blazr::engine::speculative::BlazrSpeculativeModel` is removed.
+  - `SpeculativeDecodingConfig`, the type of `InferenceConfig::speculative`, is now exported as `blazr::config::SpeculativeDecodingConfig`. `draft_model` is `Option<String>`. `num_speculative_tokens` is `Option<usize>` and `adaptive_depth` is `Option<bool>`. It gains `enabled`, `drafter`, `num_draft_tokens` and `prompt_lookup`.
+  - `GenerationConfig.grammar: Option<String>` is replaced by `constraint: Option<Constraint>`, with the config key still `grammar`, and `compiled: Option<CompiledConstraint>`, set at admission and never read from a file.
+  - `DtypeSource::Target` is removed. An exhaustive `match` drops its arm.
+  - `Executor::model()` returns `Result<&LoadedModel<R>, NoWeights>`. A tokenizer-only executor holds no weights.
+  - `cli::run_disagg_router`, `run_disagg_prefill_worker` and `run_disagg_decode_worker` are replaced by `cli::run_disagg`, which runs the role its arguments name.
+  - `server::create_chat_stream` is removed.
 
 ### Added
 
@@ -50,6 +72,13 @@ preview on crates.io that shares no code with it.
 - **`repeat_last_n` request field** — completions and chat take `repeat_last_n`, the recent tokens the repetition penalty covers. Absent, it takes `generation.repeat_last_n`.
 - **Ollama generation and embedding API** — `POST /api/chat`, `/api/generate`, `/api/embed` and `/api/embeddings` follow the Ollama API over the chat pipeline. Streams are NDJSON and `stream` defaults to `true`. Durations are in nanoseconds. Tool calls go out whole with object arguments, and reasoning goes in `thinking`. An empty `messages` or `prompt` loads the model, or unloads it with `keep_alive` zero. `/api/generate` takes `suffix` for fill-in-the-middle and returns an approximate `context`. `options` map onto the sampling fields. `num_ctx` is a `400` above the model's context length and is ignored otherwise. `/api/embeddings` returns a normalized vector, where Ollama returns it raw. A Go template is a `400`.
 - **Ollama model names** — the Ollama routes cut a trailing `:latest` when only the cut name is a known model, and echo the requested name. `/api/show`, `/api/delete` and `/api/copy` resolve names the same way. `/api/show` and `/api/delete` also take `model` in place of `name`.
+- **`stream_options.include_usage`** — a streamed completions or chat request with `include_usage: true` ends with one chunk whose `choices` is empty and whose `usage` holds the token counts. Every other chunk then carries `"usage": null`. A non-streaming request accepts the field and ignores it.
+- **`max_completion_tokens`** — chat takes it as the alias of `max_tokens`. It wins when both are set.
+- **Completions prompt forms** — `prompt` takes a string, an array of strings, an array of token ids, or an array of token id arrays. Token ids skip tokenization and are checked against the vocabulary. With several prompts, `n` gives each prompt `n` choices: the choice `j` of prompt `p` has `index` `p * n + j`. A streamed request takes one prompt.
+- **Completions integer `logprobs`** — `logprobs` takes an integer from `0` to `5`, the top logprobs count per token, as well as a boolean.
+- **Embeddings token ids and `dimensions`** — `/v1/embeddings` `input` takes an array of token ids, or an array of them, and skips tokenization. `dimensions` keeps the first values of each vector, before `normalize`. `0`, a value above the model dimension, or `dimensions` with `pooling: none` is a `400`.
+- **`tool_choice`** — chat honors it. `none` hides the tools from the model. `required` constrains the output to a call of a declared tool, and a named function to a call of that tool. A call whose name no declared tool has is never returned as a call: it stays content.
+- **`blazr swarm --role` values** — `--role` takes `leader` or `worker` (default `worker`) and refuses another value at parse time, before the node starts.
 
 ### Fixed
 
@@ -81,7 +110,8 @@ preview on crates.io that shares no code with it.
 - **Concurrency limit on streams** — `server.max_concurrent_requests` now counts open streams. A streamed response holds its slot until the stream ends. Before, a stream gave its slot back when the response started, so open streams were unbounded.
 - **Streaming token metrics** — streamed requests now count their prompt and generated tokens and record tokens per second, as non-streamed requests do.
 - **Speculative decoding** — the old speculative path that produced wrong output is gone.
-- **Streaming finish** — a stream whose generation ends without a finish token now closes with `finish_reason` `length`, as the non-streaming response reports it.
+- **Streaming finish** — a stream whose generation ends without a finish token now closes with `finish_reason` `length`, as the non-streaming response reports it. With `n` above `1`, each choice of a chat or completions stream closes this way, so every choice ends with one `finish_reason` chunk.
+- **Token budget overflow** — a huge `max_tokens` no longer wraps the token count of admission. The prompt plus `max_tokens` saturates, so `server.max_inflight_tokens` refuses the request with a `503`. An unlimited budget admits it. Before, a debug build panicked and a release build admitted a wrapped, small count past the limit.
 
 - **Logprobs on GPU** — `logprobs` requests no longer crash the server on half-precision GPU logits. The last logits row casts to F32 on the device before its host copy. Dynamic temperature, DRY, typical sampling and the swarm and disaggregated stages read their logits and activations the same way. `logit_bias` now applies to BF16 and F16 logits.
 - **Constrained output** — `grammar`, `response_format` `json_schema` and `json_object`, and `/v1/responses` `text.format` now constrain the output. Before, most grammars and every schema decoded unconstrained. boostr compiles each one to a DFA that masks the logits on the device. Schema properties come out in declared order.
@@ -101,6 +131,7 @@ preview on crates.io that shares no code with it.
 
 ### Changed
 
+- **Completions `suffix`** — the model now fills the gap between `prompt` and `suffix` through the tokenizer's fill-in-the-middle markers. Before, `suffix` was appended to the generated text. A `suffix` with token-id prompts is a `400`.
 - **`Executor` text methods take an `Arc`** — `generate_text`, `generate_multimodal_text` and `generate_images_text` now take `self: &Arc<Self>`, so the decode thread can own the executor. Their arguments and results are unchanged. A caller that holds a plain `Executor` wraps it in an `Arc`.
 - **Engine loops on threads** — `BatchEngine::run_until` and `LaneEngine::run_until` take a stop signal. `EngineThread` runs either loop on its own thread. `ThreadedScheduler` owns that thread and stops and joins it on drop. `run` still runs a loop with no stop signal.
 - **Streaming uses continuous batching** — with batching on, streamed completions, chat, infill and Anthropic messages requests now run in the batch engine. Before, they decoded one sequence at a time beside the batch. Requests with images or audio still stream from the executor. A client that disconnects cancels its batched request and frees its KV blocks.
@@ -114,6 +145,7 @@ preview on crates.io that shares no code with it.
 ### Removed
 
 - **`generation.json_mode`** — the config key is gone and now warns as unknown. Set `generation.grammar: {json_object: true}` instead.
+- **`inference.num_blocks`** — the config key is gone and now warns as unknown. It sized the per-request block allocator of a paged single-sequence decode. Paged attention now always draws from the shared block pool, which `inference.kv_pool_blocks` sizes.
 
 ---
 

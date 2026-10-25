@@ -560,6 +560,8 @@ A worker loads its model, then joins the cluster. The router starts the HTTP ser
 
 An `--index` at or past its role's count fails at start and names both flags. Two workers with one index fail with `rank N is not free`. The `--prefill` and `--decode` address lists are removed: the counts replace them.
 
+Errors: a worker error ends only its request. A lost prefill or decode worker ends the requests it held and refuses every new one. `GET /health` on the router then answers `503` with the reason. Restart every node to recover.
+
 ### Multi-host setup
 
 Both commands form one nexar cluster: one process per rank, joined through the seed. Set these on every host:

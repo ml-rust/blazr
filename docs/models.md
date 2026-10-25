@@ -28,7 +28,7 @@ Tests that name a checkpoint through an environment variable skip when that vari
 | Mamba2                                      | `mamba2` (`mamba`, `mamba2`)                           | `Supported in code` | —                   | —                   | `Supported in code` | No attention layers, so no AWQ or GPTQ.                                                                                                                                                   |
 | Mamba3                                      | `mamba3` (`mamba3`)                                    | `Supported in code` | —                   | —                   | `Supported in code` | No attention layers, so no AWQ or GPTQ.                                                                                                                                                   |
 | DeepSeek-V2, DeepSeek-V3 (MLA + MoE)        | `deepseek_v2`, `deepseek_v3` (`deepseek2`)             | Refused             | Refused             | Refused             | Refused             | The load fails with `not supported yet: no DeepSeek model implementation`. GGUF `deepseek` is the Llama-layout DeepSeek and maps to model type `deepseek`.                            |
-| oxidizr MLA, MLA + MoE                      | `llama` with `attention.kv_latent_dim` (oxidizr layout) | `Tested`            | —                   | —                   | —                   | Absorbed MLA over a latent KV cache. Tiny seeded checkpoints generate through the loader: `engine/executors/executor_generate_hybrid.rs`. Paged attention is refused. `max_batch_size` above `1` batches in hybrid lanes: `engine/lanes/hybrid_lane_admit.rs`.                     |
+| oxidizr MLA, MLA + MoE                      | `llama` with `attention.kv_latent_dim` (oxidizr layout) | `Tested`            | —                   | —                   | —                   | Absorbed MLA over a latent KV cache. Tiny seeded checkpoints generate through the loader: `engine/executors/generation/executor_generate_hybrid.rs`. Paged attention is refused. `max_batch_size` above `1` batches in hybrid lanes: `engine/lanes/hybrid_lane_admit.rs`.                     |
 | Hybrid Mamba2 + attention or MLA + MoE      | `hybrid` (oxidizr layout)                              | `Tested`            | —                   | —                   | —                   | oxidizr's `nano-start` layout. Same tests as the row above. No GGUF architecture name maps to `hybrid`. No AWQ or GPTQ path. Paged attention is refused. `max_batch_size` above `1` batches in hybrid lanes, each with its own SSM state.                                 |
 | Qwen3.5 hybrid (Gated DeltaNet + attention) | `qwen35` (`qwen35`)                                    | `Supported in code` | —                   | —                   | `Tested`            | SafeTensors needs `model_type` `qwen35` in `config.json`. GGUF test: `tests/qwen35_generate.rs`, gated by `BOOSTR_BONSAI2_DIR`. No AWQ or GPTQ path found.                                |
 | Qwen2, Qwen2.5                              | `qwen2` (`qwen2`)                                      | `Tested`            | `Routes to llama`   | `Routes to llama`   | `Routes to llama`   | Qwen2.5-0.5B, 32 of 32 ids. `BLAZR_TEST_QWEN2_MODEL`.                                                                                                                                     |
@@ -247,8 +247,7 @@ Build with `--features wgpu`. Select the adapter with `device: wgpu` or `device:
 | Llama 3.2 1B | GGUF Q8_0   | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
 | Llama 3.2 1B | GGUF Q4_K_M | 32 greedy tokens, wgpu runtime against CPU runtime | Match exactly |
 
-- The host was an NVIDIA RTX 3060 through Vulkan.
-- Per-layer hidden states stayed within 1e-5 relative of the CPU F32 reference. The test tolerance is 1e-3 relative.
+- The test checks per-layer hidden states against the CPU F32 reference, within 1e-3 relative.
 - The test is `tests/wgpu_generate.rs`. It reads `BLAZR_TEST_LLAMA_MODEL` for SafeTensors, with `$BOOSTR_MODELS_DIR/llama-3.2-1b` as the fallback, and `BLAZR_TEST_WGPU_GGUF` for GGUF. Each test skips when its fixture is absent or no adapter opens.
 
 ### Not yet tested
@@ -259,7 +258,7 @@ Build with `--features wgpu`. Select the adapter with `device: wgpu` or `device:
 
 ## Sources
 
-- blazr: `src/loader/detect.rs`, `src/loader/formats/safetensors/`, `src/loader/formats/gguf_config.rs`, `src/loader/speech_load/tts/`, `src/loader/speech_load/whisper_loader.rs`, `src/model/chat_template/`, `src/tokenizer/`, `src/server/text_api/rerank.rs`, `src/server/text_api/embeddings.rs`.
-- boostr: `src/format/hf_restructure.rs`, `src/model/config/block.rs`, `src/model/detection/`, `src/model/registry/load.rs`, `src/model/config/huggingface/model_type.rs`, `src/quant/format.rs`, `src/quant/cpu/dequant.rs`, `src/quant/cuda/dequant.rs`, `src/quant/cuda/kernels/dequant_generic.cu`.
+- blazr: `src/loader/detect.rs`, `src/loader/formats/safetensors/`, `src/loader/formats/gguf_config.rs`, `src/loader/speech_load/tts/`, `src/loader/speech_load/whisper_loader.rs`, `src/model/chat_template/`, `src/tokenizer/`, `src/server/text_api/rerank.rs`, `src/server/text_api/embeddings/`.
+- boostr: `src/format/hf_restructure/`, `src/model/config/block.rs`, `src/model/detection/`, `src/model/registry/load.rs`, `src/model/config/huggingface/model_type.rs`, `src/quant/format/`, `src/quant/cpu/dequant.rs`, `src/quant/cuda/dequant.rs`, `src/quant/cuda/kernels/dequant_generic.cu`.
 - Tests: `tests/` in blazr. Gated tests name their checkpoints in the constants at the top of each file.
 - Production checklist: `blazr_production_checklist.md`, sections 1 and 2.

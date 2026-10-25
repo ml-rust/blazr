@@ -1,7 +1,6 @@
 //! The parser state machine: text scanning and the release of content and calls.
 
 use crate::server::json_scan::ObjectScan;
-use crate::server::tag_prefix::partial_prefix_len;
 use crate::server::tools::{Tool, ToolCall};
 
 pub(super) const TAG_OPEN: &str = "<tool_call>";
@@ -17,7 +16,7 @@ pub struct ToolEvents {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+pub(super) enum State {
     /// Before the first call: text is content.
     Text,
     /// After the first call: text between and after calls is dropped.
@@ -61,13 +60,13 @@ pub(super) struct Candidate {
 #[derive(Debug, Clone)]
 pub struct ToolCallParser {
     pub(super) declared: Vec<Tool>,
-    state: State,
+    pub(super) state: State,
     /// Text not yet released. In a candidate state it starts with the trigger.
     pub(super) held: String,
     /// Calls released so far.
     emitted: usize,
     /// The last released or dropped non-space text ends a line, or none came yet.
-    line_start: bool,
+    pub(super) line_start: bool,
     pub(super) candidate: Candidate,
 }
 
@@ -114,50 +113,6 @@ impl ToolCallParser {
         }
     }
 
-    /// Release text up to the next trigger and enter its candidate state.
-    /// Returns true when a candidate starts.
-    fn scan_text(&mut self, out: &mut ToolEvents, end: bool) -> bool {
-        let buf = std::mem::take(&mut self.held);
-        let mut line_start = self.line_start;
-        let mut space_from = None;
-        for (i, ch) in buf.char_indices() {
-            let trigger = if ch == '<' && buf[i..].starts_with(TAG_OPEN) {
-                Some(State::InTag)
-            } else if ch == '{' && line_start {
-                Some(State::InBare)
-            } else {
-                None
-            };
-            if let Some(state) = trigger {
-                let gap_from = space_from.unwrap_or(i);
-                self.release(&buf[..gap_from], out);
-                self.candidate = Candidate {
-                    gap: buf[gap_from..i].to_string(),
-                    ..Candidate::default()
-                };
-                self.held = buf[i..].to_string();
-                self.state = state;
-                return true;
-            }
-            if ch.is_whitespace() {
-                space_from.get_or_insert(i);
-                line_start |= ch == '\n';
-            } else {
-                space_from = None;
-                line_start = false;
-            }
-        }
-        if end {
-            self.release(&buf, out);
-            return false;
-        }
-        let prefix_from = buf.len() - partial_prefix_len(&buf, TAG_OPEN);
-        let keep_from = buf[..prefix_from].trim_end().len();
-        self.release(&buf[..keep_from], out);
-        self.held = buf[keep_from..].to_string();
-        false
-    }
-
     /// Release the gap and the first `len` bytes of the candidate as text,
     /// then scan the rest as text.
     pub(super) fn reject(&mut self, len: usize, out: &mut ToolEvents) {
@@ -188,7 +143,7 @@ impl ToolCallParser {
     }
 
     /// Release `text` as content before the first call, or drop it after.
-    fn release(&mut self, text: &str, out: &mut ToolEvents) {
+    pub(super) fn release(&mut self, text: &str, out: &mut ToolEvents) {
         if let Some(last) = text
             .chars()
             .rev()

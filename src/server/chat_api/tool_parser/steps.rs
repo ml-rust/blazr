@@ -1,10 +1,55 @@
-//! The candidate states of [`ToolCallParser`]: a `<tool_call>` block and a bare JSON object.
+//! The scan states of [`ToolCallParser`]: plain text, a `<tool_call>` block and a bare JSON object.
 
-use super::parser::{ToolCallParser, ToolEvents, TAG_CLOSE, TAG_OPEN};
+use super::parser::{Candidate, State, ToolCallParser, ToolEvents, TAG_CLOSE, TAG_OPEN};
 use crate::server::json_scan::{first_key, FirstKey};
+use crate::server::tag_prefix::partial_prefix_len;
 use crate::server::tool_calls::{is_declared, parse_tool_call_json, parse_tool_call_xml};
 
 impl ToolCallParser {
+    /// Release text up to the next trigger and enter its candidate state.
+    /// Returns true when a candidate starts.
+    pub(super) fn scan_text(&mut self, out: &mut ToolEvents, end: bool) -> bool {
+        let buf = std::mem::take(&mut self.held);
+        let mut line_start = self.line_start;
+        let mut space_from = None;
+        for (i, ch) in buf.char_indices() {
+            let trigger = if ch == '<' && buf[i..].starts_with(TAG_OPEN) {
+                Some(State::InTag)
+            } else if ch == '{' && line_start {
+                Some(State::InBare)
+            } else {
+                None
+            };
+            if let Some(state) = trigger {
+                let gap_from = space_from.unwrap_or(i);
+                self.release(&buf[..gap_from], out);
+                self.candidate = Candidate {
+                    gap: buf[gap_from..i].to_string(),
+                    ..Candidate::default()
+                };
+                self.held = buf[i..].to_string();
+                self.state = state;
+                return true;
+            }
+            if ch.is_whitespace() {
+                space_from.get_or_insert(i);
+                line_start |= ch == '\n';
+            } else {
+                space_from = None;
+                line_start = false;
+            }
+        }
+        if end {
+            self.release(&buf, out);
+            return false;
+        }
+        let prefix_from = buf.len() - partial_prefix_len(&buf, TAG_OPEN);
+        let keep_from = buf[..prefix_from].trim_end().len();
+        self.release(&buf[..keep_from], out);
+        self.held = buf[keep_from..].to_string();
+        false
+    }
+
     /// Step a `<tool_call>` block. Returns true when it resolves.
     pub(super) fn step_tag(&mut self, out: &mut ToolEvents, end: bool) -> bool {
         let open = TAG_OPEN.len();

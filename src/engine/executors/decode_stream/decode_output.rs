@@ -7,7 +7,7 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendTimeoutError;
 
-use super::types::GeneratedToken;
+use super::super::types::GeneratedToken;
 
 /// What the send loop does with one mapped engine item.
 pub(crate) enum Emit<T> {
@@ -122,7 +122,11 @@ pub(crate) async fn forward_tokens<S, O>(
 
 /// Send `item` on `tx`, waiting at most `idle` for room. Returns whether
 /// the reader got it.
-pub(super) async fn send_item<T>(tx: &mpsc::Sender<T>, item: T, idle: Option<Duration>) -> bool {
+pub(in crate::engine::executors) async fn send_item<T>(
+    tx: &mpsc::Sender<T>,
+    item: T,
+    idle: Option<Duration>,
+) -> bool {
     let Some(idle) = idle else {
         return tx.send(item).await.is_ok();
     };

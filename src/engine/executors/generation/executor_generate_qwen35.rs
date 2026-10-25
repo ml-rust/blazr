@@ -21,9 +21,9 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 
-use super::executor::Executor;
-use super::sampler_state::SamplerState;
-use super::types::{FinishReason, GeneratedToken, PrefillCancel};
+use super::super::executor::Executor;
+use super::super::sampler::sampler_state::SamplerState;
+use super::super::types::{FinishReason, GeneratedToken, PrefillCancel};
 
 /// Per-request state `generate` builds before it picks a decode arm.
 pub(in crate::engine) struct DecodeSetup<R: Runtime<DType = DType>> {

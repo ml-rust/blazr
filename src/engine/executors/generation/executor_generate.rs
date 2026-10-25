@@ -19,10 +19,10 @@ use boostr::{
 use crate::config::GenerationConfig;
 use crate::tokenizer::token_piece;
 
-use super::types::{FinishReason, GeneratedToken, PrefillCancel};
+use super::super::types::{FinishReason, GeneratedToken, PrefillCancel};
 
-use super::executor::Executor;
-use super::executor_cache::prefix_cache_allocate;
+use super::super::executor::Executor;
+use super::super::executor_cache::prefix_cache_allocate;
 use super::executor_generate_qwen35::DecodeSetup;
 use crate::engine::requests::kv_recompute::{block_ids, block_slots};
 
@@ -45,7 +45,7 @@ where
 {
     /// Generate from already-encoded prompt ids.
     ///
-    /// The ids are the caller's — the handler that validated them against its
+    /// The ids are the caller's — the handler that checked them against its
     /// special-token policy — so nothing here re-tokenizes text and no second
     /// encode can disagree with the one that was checked.
     ///
@@ -180,10 +180,10 @@ where
 
                 #[cfg(feature = "cuda")]
                 {
-                    super::executor_cache::gpu_prefix_cache_insert(
+                    super::super::executor_cache::gpu_prefix_cache_insert(
                         &self.gpu_prefix_cache, prompt_tokens, block_size, lease.blocks(),
                     );
-                    lease.hold_gpu_prefix(super::paged_pool::GpuPrefixRelease {
+                    lease.hold_gpu_prefix(super::super::paged_pool::GpuPrefixRelease {
                         cache: &self.gpu_prefix_cache,
                         prompt_tokens: prompt_tokens.to_vec(),
                     });
@@ -304,7 +304,7 @@ where
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(in crate::engine::executors) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use boostr::CpuRuntime;

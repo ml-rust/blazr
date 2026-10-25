@@ -21,14 +21,14 @@ use tokio::sync::mpsc;
 
 use boostr::{DType, Runtime};
 
-use super::decode_output::{DecodeOutput, RawTokens};
+use super::decode_stream::decode_output::{DecodeOutput, RawTokens};
 use super::executor::{EngineClient, Executor};
-use super::generate_text::collect_generation;
+use super::generation::generate_text::collect_generation;
 use super::types::GenerationResult;
 
-pub(crate) use super::decode_job::DecodeJob;
+pub(crate) use super::decode_stream::decode_job::DecodeJob;
 #[cfg(test)]
-pub(crate) use super::decode_job::StepHook;
+pub(crate) use super::decode_stream::decode_job::StepHook;
 
 /// Items a decode channel buffers: the capacity of the handlers' stream channels.
 pub(crate) const DECODE_CHANNEL_CAPACITY: usize = 32;
@@ -59,7 +59,7 @@ pub(crate) async fn stream_on_decode_thread<R, O>(
     #[cfg(not(target_family = "wasm"))]
     {
         let failure_tx = tx.clone();
-        match super::decode_thread::spawn_decode(job, out, tx) {
+        match super::decode_stream::decode_thread::spawn_decode(job, out, tx) {
             Ok(exited) => {
                 drop(failure_tx);
                 // The thread drops its exit sender last, after the stream.
@@ -110,7 +110,7 @@ mod tests {
     use boostr::CpuRuntime;
 
     use super::*;
-    use crate::engine::decode_output::{Emit, StreamEnd};
+    use crate::engine::decode_stream::decode_output::{Emit, StreamEnd};
     use crate::engine::requests::batch_test_rig::{greedy, POOL, SEED};
     use crate::engine::test_support::{
         free_pool_blocks as free_blocks, seeded_executor, ticker, wait_past, WAIT_LIMIT,

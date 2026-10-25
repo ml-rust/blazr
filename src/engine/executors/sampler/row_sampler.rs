@@ -19,9 +19,9 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 
-use super::executor::Executor;
+use super::super::executor::Executor;
+use super::super::types::{FinishReason, TokenLogprob};
 use super::sampler_state::SamplerState;
-use super::types::{FinishReason, TokenLogprob};
 
 /// One token sampled from a logits row.
 #[derive(Debug, Clone, PartialEq)]

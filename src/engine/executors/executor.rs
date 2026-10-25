@@ -390,7 +390,8 @@ mod tests {
         let mut exec = tiny_mamba2(false, false)?;
         exec.config.inference.prefill_chunk_size = 2;
         let prompt: Vec<u32> = (1..=9).collect();
-        let stopped = super::super::executor_generate::tests::stopped_at(&exec, &prompt, 3).await;
+        let stopped =
+            super::super::generation::executor_generate::tests::stopped_at(&exec, &prompt, 3).await;
         assert_eq!(stopped, (0, 3), "two of five chunks ran");
         Ok(())
     }

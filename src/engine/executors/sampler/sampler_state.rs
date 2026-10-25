@@ -13,7 +13,7 @@ use boostr::{
 use crate::config::GenerationConfig;
 use crate::tokenizer::TokenTextStream;
 
-use super::executor::Executor;
+use super::super::executor::Executor;
 use super::sampler_grammar::GrammarState;
 use crate::engine::decoding::sampling::dry_params;
 

@@ -14,9 +14,9 @@ use boostr::{DType, Runtime};
 
 use crate::config::GenerationConfig;
 
+use super::super::executor::{EngineClient, Executor};
+use super::super::types::PrefillCancel;
 use super::decode_output::{forward_tokens, DecodeOutput};
-use super::executor::{EngineClient, Executor};
-use super::types::PrefillCancel;
 
 /// A test hook that runs on the decode thread after each engine item.
 #[cfg(test)]
@@ -27,7 +27,7 @@ pub(crate) type StepHook = Arc<dyn Fn(usize) + Send + Sync>;
 pub(crate) type PrefillHook = Arc<dyn Fn() + Send + Sync>;
 
 /// The inputs a generation path takes beside the prompt ids.
-pub(super) enum DecodeMedia {
+pub(in crate::engine::executors) enum DecodeMedia {
     /// Text only: `Executor::generate`.
     Text,
     /// Images and audio: `Executor::generate_multimodal`.
@@ -41,16 +41,16 @@ pub(super) enum DecodeMedia {
 
 /// One generation, owned, ready to move to its decode thread.
 pub(crate) struct DecodeJob<R: Runtime<DType = DType>> {
-    pub(super) executor: Arc<Executor<R>>,
-    pub(super) prompt: Vec<u32>,
-    pub(super) config: GenerationConfig,
-    pub(super) media: DecodeMedia,
+    pub(in crate::engine::executors) executor: Arc<Executor<R>>,
+    pub(in crate::engine::executors) prompt: Vec<u32>,
+    pub(in crate::engine::executors) config: GenerationConfig,
+    pub(in crate::engine::executors) media: DecodeMedia,
     /// How long a send waits for room. `None` waits without limit.
-    pub(super) idle: Option<Duration>,
+    pub(in crate::engine::executors) idle: Option<Duration>,
     #[cfg(test)]
-    pub(super) on_step: Option<StepHook>,
+    pub(in crate::engine::executors) on_step: Option<StepHook>,
     #[cfg(test)]
-    pub(super) on_prefill: Option<PrefillHook>,
+    pub(in crate::engine::executors) on_prefill: Option<PrefillHook>,
 }
 
 impl<R> DecodeJob<R>
@@ -135,7 +135,11 @@ where
     /// that calls this.
     ///
     /// The prefill stops at its next chunk once `tx`'s receiver is gone.
-    pub(super) async fn pump<O: DecodeOutput>(self, out: &mut O, tx: &mpsc::Sender<O::Item>) {
+    pub(in crate::engine::executors) async fn pump<O: DecodeOutput>(
+        self,
+        out: &mut O,
+        tx: &mpsc::Sender<O::Item>,
+    ) {
         #[cfg(test)]
         let hook = self.on_step.clone();
         let on_step = move |step: usize| {
@@ -187,7 +191,7 @@ mod tests {
 
     use super::*;
     use crate::engine::blocking_stream::{stream_on_decode_thread, DECODE_CHANNEL_CAPACITY};
-    use crate::engine::decode_output::RawTokens;
+    use crate::engine::decode_stream::decode_output::RawTokens;
     use crate::engine::requests::batch_test_rig::{greedy, POOL, SEED};
     use crate::engine::test_support::{free_pool_blocks, seeded_executor, WAIT_LIMIT};
 

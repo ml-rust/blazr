@@ -21,7 +21,7 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 
-use super::executor::Executor;
+use super::super::executor::Executor;
 use super::sampler_grammar::GrammarState;
 use super::sampler_state::SamplerState;
 
@@ -159,8 +159,8 @@ mod tests {
 
     use boostr::CpuRuntime;
 
-    use super::super::types::FinishReason;
     use crate::config::Constraint;
+    use crate::engine::executors::types::FinishReason;
     use crate::engine::test_support::{full_vocab_executor, piece_id, tiny_executor};
 
     /// The logit the peak token gets. Every other token gets 0.

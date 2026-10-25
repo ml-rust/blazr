@@ -6,9 +6,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use boostr::{DType, Runtime};
 
+use super::super::executor::{EngineClient, Executor};
 use super::decode_job::DecodeJob;
 use super::decode_output::{send_item, DecodeOutput};
-use super::executor::{EngineClient, Executor};
 use crate::engine::load::blocking::panic_message;
 use crate::engine::WorkHold;
 
@@ -21,7 +21,7 @@ const DECODE_THREAD_NAME: &str = "blazr-decode";
 ///
 /// The thread takes the caller's hold, so a guard behind it outlives the
 /// decode even when the caller's future drops first.
-pub(super) fn spawn_decode<R, O>(
+pub(in crate::engine::executors) fn spawn_decode<R, O>(
     job: DecodeJob<R>,
     out: O,
     tx: mpsc::Sender<O::Item>,

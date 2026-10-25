@@ -2,7 +2,7 @@
 
 pub(super) use super::stop_forwarder_state::StopForwarder;
 use super::streaming::StreamToken;
-use crate::engine::decode_output::{DecodeOutput, Emit, StreamEnd};
+use crate::engine::decode_stream::decode_output::{DecodeOutput, Emit, StreamEnd};
 use crate::engine::{FinishReason, GeneratedToken};
 
 impl DecodeOutput for StopForwarder {
@@ -73,7 +73,14 @@ mod tests {
         S: futures::Stream<Item = anyhow::Result<GeneratedToken>>,
     {
         let mut out = StopForwarder::new(prompt_len, gen_config, label);
-        crate::engine::decode_output::forward_tokens(stream, &mut out, &tx, None, |_| {}).await;
+        crate::engine::decode_stream::decode_output::forward_tokens(
+            stream,
+            &mut out,
+            &tx,
+            None,
+            |_| {},
+        )
+        .await;
     }
 
     fn tok(

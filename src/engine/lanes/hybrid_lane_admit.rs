@@ -313,7 +313,7 @@ pub(super) mod tests {
     use boostr::{CpuDevice, CpuRuntime};
 
     use crate::engine::executor::Executor;
-    use crate::engine::executors::executor_generate_hybrid::tests::{
+    use crate::engine::executors::generation::executor_generate_hybrid::tests::{
         config, load, write_checkpoint,
     };
     use crate::engine::lanes::lane_scheduler::LaneScheduler;

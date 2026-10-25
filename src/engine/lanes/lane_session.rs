@@ -28,7 +28,7 @@ use crate::config::GenerationConfig;
 
 use super::lane_prefill::PendingPrefill;
 use crate::engine::executor::Executor;
-use crate::engine::sampler_state::SamplerState;
+use crate::engine::sampler::sampler_state::SamplerState;
 use crate::engine::types::FinishReason;
 
 /// One admitted sequence's decode state, held beside its lane.

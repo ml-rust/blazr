@@ -17,9 +17,9 @@ use boostr::{
 use crate::config::GenerationConfig;
 use crate::engine::StopMatcher;
 
-use super::blocking_stream::{collect_on_decode_thread, DecodeJob};
-use super::executor::Executor;
-use super::types::{FinishReason, GeneratedToken, GenerationResult};
+use super::super::blocking_stream::{collect_on_decode_thread, DecodeJob};
+use super::super::executor::Executor;
+use super::super::types::{FinishReason, GeneratedToken, GenerationResult};
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where
@@ -42,7 +42,7 @@ where
     /// Generate text from already-encoded prompt ids and return the complete
     /// result with metadata.
     ///
-    /// The ids come from the handler's validated encode; this path never
+    /// The ids come from the handler's checked encode. This path never
     /// re-tokenizes. The decode runs on its own thread, see
     /// `blocking_stream`.
     pub async fn generate_text(

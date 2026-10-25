@@ -24,7 +24,7 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
-use crate::engine::sampler_state::SamplerState;
+use crate::engine::sampler::sampler_state::SamplerState;
 use crate::engine::types::{FinishReason, TokenLogprob};
 
 /// One batched sequence's sampling policy and state.

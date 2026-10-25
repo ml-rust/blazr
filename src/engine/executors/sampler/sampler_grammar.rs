@@ -23,7 +23,7 @@ use crate::config::GenerationConfig;
 use crate::engine::compile_constraint;
 use crate::tokenizer::token_piece_bytes;
 
-use super::executor::Executor;
+use super::super::executor::Executor;
 
 /// The grammar a request decodes under, and where it stands.
 pub(in crate::engine) struct GrammarState<R: Runtime<DType = DType>> {

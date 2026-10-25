@@ -20,9 +20,9 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 
-use super::executor::Executor;
-use super::sampler_state::SamplerState;
-use super::types::{FinishReason, GeneratedToken, PrefillCancel};
+use super::super::executor::Executor;
+use super::super::sampler::sampler_state::SamplerState;
+use super::super::types::{FinishReason, GeneratedToken, PrefillCancel};
 
 impl<R: Runtime<DType = DType>> Executor<R>
 where

@@ -18,7 +18,7 @@ use boostr::{
 use crate::config::GenerationConfig;
 
 use super::executor::Executor;
-use super::executor_generate_qwen35::DecodeSetup;
+use super::generation::executor_generate_qwen35::DecodeSetup;
 use super::types::{GeneratedToken, PrefillCancel};
 use super::vision_tower::{grid_of, NO_TOWER_ERROR};
 

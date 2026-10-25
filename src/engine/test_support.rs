@@ -49,14 +49,8 @@ pub(crate) const FULL_VOCAB_CTX: usize = 64;
 /// id is inside its vocab, so a grammar can end generation. With `paged`,
 /// paged attention is on over that pool and two sequences batch.
 pub(crate) fn full_vocab_executor(paged: Option<PagedPool>) -> Result<Executor<CpuRuntime>> {
-    let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
-    let eos = tokenizer
-        .eos_token_id()
-        .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
-    let vocab = splintr::Tokenize::vocab_size(&tokenizer).max(eos as usize + 1);
-    let yaml = TINY_LLAMA_YAML
-        .replace("vocab_size: 32", &format!("vocab_size: {vocab}"))
-        .replace("max_seq_len: 16", &format!("max_seq_len: {FULL_VOCAB_CTX}"));
+    let (tokenizer, vocab) = full_vocab_tokenizer()?;
+    let yaml = full_vocab_yaml(vocab);
     let device = CpuDevice::new();
     let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
     let model = boostr::model::llama::Llama::<CpuRuntime>::from_config(&config, &device)?;
@@ -69,6 +63,23 @@ pub(crate) fn full_vocab_executor(paged: Option<PagedPool>) -> Result<Executor<C
         device,
         FULL_VOCAB_CTX,
     )
+}
+
+/// The llama3 tokenizer and a vocab size that holds every id, EOS included.
+fn full_vocab_tokenizer() -> Result<(crate::tokenizer::AnyTokenizer, usize)> {
+    let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
+    let eos = tokenizer
+        .eos_token_id()
+        .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
+    let vocab = splintr::Tokenize::vocab_size(&tokenizer).max(eos as usize + 1);
+    Ok((tokenizer, vocab))
+}
+
+/// [`TINY_LLAMA_YAML`] with `vocab` rows and a context of [`FULL_VOCAB_CTX`].
+fn full_vocab_yaml(vocab: usize) -> String {
+    TINY_LLAMA_YAML
+        .replace("vocab_size: 32", &format!("vocab_size: {vocab}"))
+        .replace("max_seq_len: 16", &format!("max_seq_len: {FULL_VOCAB_CTX}"))
 }
 
 /// Turn paged attention on over `paged`, when set.
@@ -210,18 +221,29 @@ pub(crate) fn seeded_executor_pair(
 /// Its logits depend on the prompt, and its hidden states are nonzero.
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 pub(crate) fn seeded_full_vocab_executor(seed: u64) -> Result<Executor<CpuRuntime>> {
-    let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
-    let eos = tokenizer
-        .eos_token_id()
-        .ok_or_else(|| anyhow!("llama3 states no end-of-sequence token"))?;
-    let vocab = splintr::Tokenize::vocab_size(&tokenizer).max(eos as usize + 1);
+    seeded_full_vocab_on(seed, None)
+}
+
+/// A [`seeded_full_vocab_executor`] over the paged KV pool `pool`, with the
+/// prefix cache off.
+///
+/// A pool smaller than [`FULL_VOCAB_CTX`] tokens runs dry while a long
+/// generation decodes. The generation then ends with an error.
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+pub(crate) fn seeded_full_vocab_paged(seed: u64, pool: PagedPool) -> Result<Executor<CpuRuntime>> {
+    seeded_full_vocab_on(seed, Some(pool))
+}
+
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+fn seeded_full_vocab_on(seed: u64, paged: Option<PagedPool>) -> Result<Executor<CpuRuntime>> {
+    let (tokenizer, vocab) = full_vocab_tokenizer()?;
     let device = CpuDevice::new();
-    let yaml = TINY_LLAMA_YAML
-        .replace("vocab_size: 32", &format!("vocab_size: {vocab}"))
-        .replace("max_seq_len: 16", &format!("max_seq_len: {FULL_VOCAB_CTX}"));
+    let yaml = full_vocab_yaml(vocab);
     let config: boostr::model::UniversalConfig = serde_saphyr::from_str(&yaml)?;
     let model = seeded_model(seed, vocab, &config, &device)?;
-    let blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
+    let mut blazr_config = BlazrConfig::from_universal_with_dtype(config, "f32");
+    enable_paged(&mut blazr_config, paged);
+    blazr_config.inference.prefix_cache = false;
     Executor::new(model, blazr_config, tokenizer, device, FULL_VOCAB_CTX)
 }
 
@@ -340,7 +362,7 @@ impl SeededWeights {
     }
 }
 
-/// How long a wait in a test hook may block before the test calls it
+/// How long a wait in a test hook can block before the test calls it
 /// stuck. It guards against a hang, never decides a pass.
 pub(crate) const WAIT_LIMIT: Duration = Duration::from_secs(5);
 

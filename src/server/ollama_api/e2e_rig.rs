@@ -7,7 +7,7 @@ use axum::{body::Body, http::Request, Router};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use crate::engine::test_support::seeded_full_vocab_executor;
+use crate::engine::test_support::{seeded_full_vocab_executor, seeded_full_vocab_paged, PagedPool};
 use crate::server::handlers::{test_state, AppState};
 use crate::server::routes::api_routes;
 
@@ -28,14 +28,28 @@ pub(in crate::server) struct Rig {
 impl Rig {
     /// A server whose model [`MODEL`] is loaded.
     pub(in crate::server) async fn new() -> Result<Self> {
+        Self::loaded(|| seeded_full_vocab_executor(SEED)).await
+    }
+
+    /// A server whose model [`MODEL`] serves from the paged KV pool `pool`.
+    ///
+    /// A pool smaller than the model's context runs dry in a long
+    /// generation, which then fails after its first tokens.
+    pub(in crate::server) async fn with_pool(pool: PagedPool) -> Result<Self> {
+        Self::loaded(move || seeded_full_vocab_paged(SEED, pool)).await
+    }
+
+    async fn loaded<F>(make: F) -> Result<Self>
+    where
+        F: FnOnce() -> Result<crate::engine::Executor<crate::runtime::ServerRuntime>>
+            + Send
+            + 'static,
+    {
         let dir = tempfile::tempdir()?;
         std::fs::create_dir(dir.path().join(MODEL))?;
         std::fs::write(dir.path().join(MODEL).join("config.json"), "{}")?;
         let state = Arc::new(test_state(dir.path()));
-        state
-            .scheduler
-            .load_base(MODEL, |_| seeded_full_vocab_executor(SEED))
-            .await?;
+        state.scheduler.load_base(MODEL, |_| make()).await?;
         Ok(Self { state, _dir: dir })
     }
 

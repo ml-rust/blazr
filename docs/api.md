@@ -217,7 +217,7 @@ Generates text from a prompt.
 | `prompt`          | string, array of strings, array of integers, or array of integer arrays | required | Prompt text, or token IDs that skip the tokenizer. An ID at or above the vocabulary size returns `400`. |
 | `stream`          | boolean           | `false`  | Stream the response as SSE.                                             |
 | `stream_options`  | object            | none     | `include_usage: true` adds a usage chunk before `[DONE]`. See [Streaming usage](#streaming-usage). |
-| `n`               | integer           | `1`      | Choices per prompt. Streaming with `n` above `1` returns `400`.         |
+| `n`               | integer           | `1`      | Choices per prompt. See [Streaming several completions](#streaming-several-completions). |
 | `best_of`         | integer           | none     | Must not exceed `n`. A larger value returns `400`.                      |
 | `echo`            | boolean           | `false`  | Prepend the prompt to each choice. Streaming sends it as the first chunk. Token prompts echo as decoded text. |
 | `suffix`          | string            | none     | Text after the completion. The server builds a fill-in-the-middle prompt. The response never repeats it. The tokenizer must define the FIM tokens, else `400` names the missing ones. Not supported with token prompts. |
@@ -226,6 +226,17 @@ Generates text from a prompt.
 | Sampling fields   |                   |          | See [Sampling fields](#sampling-fields).                                |
 
 With several prompts, a non-streaming response holds `n` choices per prompt. Choice `index` is `prompt_index * n + j`, and `usage` sums all prompts. Streaming accepts one prompt.
+
+### Streaming several completions
+
+A streamed request with `n` above `1` sends `n` choices in one stream.
+
+- Each chunk holds one choice. Its `index` names the choice, from `0` to `n - 1`.
+- The choices stream in order: choice `i + 1` starts after choice `i` finishes. The server decodes one choice at a time, as the non-streaming request does.
+- Each choice ends with its own `finish_reason` chunk. With `echo`, each choice opens with the prompt text.
+- With `seed` set, choice `i` samples with `seed + i`. A streamed choice equals the same choice of the non-streaming response.
+- With `stream_options.include_usage`, one usage chunk follows the last choice. `prompt_tokens` counts the prompt once. `completion_tokens` sums every choice.
+- A generation error in any choice sends one error event and `[DONE]`. No later choice starts.
 
 Special tokens in `prompt` encode as their literal text by default. Name a token in `allowed_special` to allow it. Any other control token returns `400`.
 
@@ -1559,7 +1570,7 @@ curl http://localhost:8080/health
 
 `gpu_memory` appears only in a CUDA build when the device reports memory. Its fields are `used_bytes`, `free_bytes`, `total_bytes`, `used_gb`, and `total_gb`.
 
-A server that can no longer serve answers `503` with `"status": "unavailable"` and the reason in `error`. A swarm leader does this once it loses a worker stage. Restart every swarm node to recover.
+A server that can no longer serve answers `503` with `"status": "unavailable"` and the reason in `error`. A swarm leader does this once it loses a worker stage. Restart every swarm node to recover. A `blazr serve` whose `blazr-batch` or `blazr-lanes` engine thread panics does this too. Every request in that engine ends with one error item, or one SSE error event and `[DONE]`, and frees its `max_concurrent_requests` slot. A later request to that model returns `500` with `the engine stopped` and the reason. Restart the server to recover.
 
 ```json
 {

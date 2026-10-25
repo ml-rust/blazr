@@ -8,18 +8,20 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use futures::StreamExt;
 
 use super::completion_choices::generate_choices;
 use super::completion_prompt::{resolve_prompt, PromptContext, ResolvedPrompt};
 use super::completion_types::{CompletionRequest, CompletionResponse};
-use crate::engine::WorkHold;
+use crate::server::chat_vision::{ImageRoute, RequestMedia};
+use crate::server::completion_stream::create_completion_choices_stream;
 use crate::server::generation::{
-    admit_generation, apply_keep_alive, decode_context_prefix, error_response, overloaded_response,
-    record_generation_metrics, resolve_constraint, HasSamplingFields, Usage,
+    admit_generation, apply_keep_alive, choice_config, decode_context_prefix, error_response,
+    overloaded_response, record_generation_metrics, resolve_constraint, HasSamplingFields, Usage,
 };
 use crate::server::handlers::{select_executor, AppState, DecodeSlot};
-use crate::server::scheduled_stream::stream_routed;
-use crate::server::streaming::{create_completion_stream, StreamToken};
+use crate::server::route_stream::spawn_media_streams;
+use crate::server::streaming::{StreamToken, TokenStream};
 
 /// Text completion endpoint
 pub async fn completions(
@@ -105,7 +107,6 @@ pub async fn completions(
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());
         let model_name = request.model.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamToken>(32);
         let Some(prompt) = prompts.into_iter().next() else {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -113,28 +114,43 @@ pub async fn completions(
                 "invalid_request_error",
             );
         };
-        // `echo` sends the prompt text as the first chunk.
-        if echo {
-            let _ = tx.try_send(StreamToken::text(prompt.echo, None));
-        }
 
         // The keep-alive applies once the last token is out, as on the
         // non-streaming path.
         let keep_alive_state = Arc::clone(&state);
         let keep_alive_model = model_name.clone();
         let keep_alive = request.keep_alive.clone();
-        let slot = DecodeSlot::enter();
-        // The task carries the request's slot, so a client that leaves
-        // frees it only once the decode stops.
-        tokio::spawn(WorkHold::carry(async move {
-            let _guards = (permit, slot);
-            stream_routed(&placement, prompt.tokens, gen_config, tx).await;
-            apply_keep_alive(&keep_alive_state, &keep_alive_model, &keep_alive).await;
-        }));
-
-        let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        // The `n` choices run one after another, each sampled as the
+        // non-streaming path samples it. The task holds the request's slot
+        // until the last one stops.
+        let configs = (0..request.choices_per_prompt())
+            .map(|i| choice_config(&gen_config, i))
+            .collect();
+        let streams = spawn_media_streams(
+            permit,
+            placement,
+            ImageRoute::Text,
+            prompt.tokens,
+            RequestMedia::default(),
+            configs,
+            async move {
+                apply_keep_alive(&keep_alive_state, &keep_alive_model, &keep_alive).await;
+            },
+        );
+        // `echo` sends the prompt text as the first chunk of each choice.
+        let echoed = prompt.echo;
+        let choices = streams
+            .into_iter()
+            .map(|tokens| -> TokenStream {
+                if !echo {
+                    return tokens;
+                }
+                let head = StreamToken::text(echoed.clone(), None);
+                Box::pin(futures::stream::once(std::future::ready(head)).chain(tokens))
+            })
+            .collect();
         let include_usage = request.include_usage();
-        create_completion_stream(id, model_name, Box::pin(rx_stream), include_usage).into_response()
+        create_completion_choices_stream(id, model_name, choices, include_usage).into_response()
     } else {
         let _slot = DecodeSlot::enter();
         let _permit = permit;
@@ -201,17 +217,84 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::{anyhow, Result};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use crate::server::ollama_api::e2e_rig::{Rig, MODEL};
+    use crate::server::streaming::sse_test::parse_events;
 
+    /// The joined `delta.text` of each choice index in `events`.
+    fn streamed_texts(events: &[Value], n: usize) -> Vec<String> {
+        let mut texts = vec![String::new(); n];
+        for event in events {
+            let Some(choice) = event["choices"].get(0) else {
+                continue;
+            };
+            let index = choice["index"].as_u64().unwrap_or(u64::MAX) as usize;
+            if let (Some(text), Some(slot)) =
+                (choice["delta"]["text"].as_str(), texts.get_mut(index))
+            {
+                slot.push_str(text);
+            }
+        }
+        texts
+    }
+
+    /// A streamed `n = 2` request sends both choices in order at their own
+    /// index, each as the non-streaming request samples it, and one usage
+    /// chunk that counts the prompt once. `echo` opens each choice.
     #[tokio::test]
-    async fn streaming_with_more_than_one_choice_is_a_400() -> Result<()> {
+    async fn streaming_two_choices_matches_the_non_streaming_choices() -> Result<()> {
         let rig = Rig::new().await?;
-        let body = json!({"model": MODEL, "prompt": "Hi", "stream": true, "n": 2});
-        let (status, raw) = rig.post("/v1/completions", &body).await?;
-        assert_eq!(status, 400, "{raw}");
-        assert!(raw.contains("streaming supports n = 1"), "{raw}");
+        for echo in [false, true] {
+            let mut body = json!({
+                "model": MODEL,
+                "prompt": "Hi",
+                "n": 2,
+                "max_tokens": 4,
+                "temperature": 0.9,
+                "seed": 7,
+                "echo": echo,
+            });
+            let whole = rig.ok("/v1/completions", &body).await?;
+            body["stream"] = json!(true);
+            body["stream_options"] = json!({"include_usage": true});
+            let (status, raw) = rig.post("/v1/completions", &body).await?;
+            assert_eq!(status, 200, "{raw}");
+            let events = parse_events(&raw)?;
+
+            let want: Vec<String> = (0..2)
+                .map(|i| {
+                    whole["choices"][i]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(streamed_texts(&events, 2), want, "echo {echo}: {raw}");
+            let indices: Vec<u64> = events
+                .iter()
+                .filter_map(|e| e["choices"].get(0)?["index"].as_u64())
+                .collect();
+            assert!(indices.windows(2).all(|w| w[0] <= w[1]), "{raw}");
+            for index in [0u64, 1] {
+                let finishes: Vec<&Value> = events
+                    .iter()
+                    .filter_map(|e| e["choices"].get(0))
+                    .filter(|c| c["index"].as_u64() == Some(index))
+                    .filter(|c| c["finish_reason"].is_string())
+                    .collect();
+                assert_eq!(finishes.len(), 1, "choice {index}: {raw}");
+                let want = &whole["choices"][index as usize]["finish_reason"];
+                assert_eq!(&finishes[0]["finish_reason"], want);
+            }
+            let usage: Vec<&Value> = events.iter().filter(|e| e["usage"].is_object()).collect();
+            assert_eq!(usage.len(), 1, "{raw}");
+            assert_eq!(usage[0]["choices"], json!([]));
+            for field in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+                assert_eq!(usage[0]["usage"][field], whole["usage"][field], "{field}");
+            }
+            assert_eq!(events.last(), Some(&json!("[DONE]")));
+        }
         Ok(())
     }
 

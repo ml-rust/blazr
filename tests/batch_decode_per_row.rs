@@ -31,7 +31,7 @@ use std::sync::{Arc, OnceLock};
 
 use futures::StreamExt;
 
-use blazr::engine::EngineThread;
+use blazr::engine::{EngineThread, FailRequests};
 use blazr::loader::load_model;
 use blazr::{BatchEngine, Executor, GenerationConfig, RequestScheduler};
 use boostr::inference::memory::CpuBlockAllocator;
@@ -197,8 +197,11 @@ async fn batched_decode_matches_single_sequence_at_mixed_lengths() {
         .unwrap_or_else(|e| panic!("BatchEngine::new: {e}"))
         .with_prefill_chunk_size(0);
     // Held to the end of the test: the drop stops and joins the loop's thread.
-    let _engine = EngineThread::spawn("blazr-batch", move |stop| batch_engine.run_until(stop))
-        .unwrap_or_else(|e| panic!("EngineThread::spawn: {e}"));
+    let owner: Arc<dyn FailRequests> = scheduler.clone();
+    let _engine = EngineThread::spawn("blazr-batch", owner, move |stop| {
+        batch_engine.run_until(stop)
+    })
+    .unwrap_or_else(|e| panic!("EngineThread::spawn: {e}"));
 
     let mut short_handle = scheduler
         .submit(short, short_config)
@@ -312,8 +315,11 @@ async fn chunk_size_one_prefill_matches_unchunked_prefill() {
         .unwrap_or_else(|e| panic!("BatchEngine::new: {e}"))
         .with_prefill_chunk_size(1);
     // Held to the end of the test: the drop stops and joins the loop's thread.
-    let _engine = EngineThread::spawn("blazr-batch", move |stop| batch_engine.run_until(stop))
-        .unwrap_or_else(|e| panic!("EngineThread::spawn: {e}"));
+    let owner: Arc<dyn FailRequests> = scheduler.clone();
+    let _engine = EngineThread::spawn("blazr-batch", owner, move |stop| {
+        batch_engine.run_until(stop)
+    })
+    .unwrap_or_else(|e| panic!("EngineThread::spawn: {e}"));
 
     let mut handle = scheduler
         .submit(prompt.clone(), gen_config)

@@ -126,13 +126,8 @@ impl CompletionRequest {
         if self.best_of.is_some_and(|b| b > n) {
             return Err("best_of is not supported. Omit it or set it to at most n".to_string());
         }
-        if self.stream.unwrap_or(false) {
-            if n > 1 {
-                return Err("streaming supports n = 1".to_string());
-            }
-            if self.prompt.items().len() > 1 {
-                return Err("streaming supports one prompt".to_string());
-            }
+        if self.stream.unwrap_or(false) && self.prompt.items().len() > 1 {
+            return Err("streaming supports one prompt".to_string());
         }
         Ok(())
     }
@@ -271,9 +266,10 @@ mod tests {
     }
 
     #[test]
-    fn streaming_refuses_n_above_one_and_several_prompts() {
-        let many_n = request(json!({"stream": true, "n": 2}));
-        assert!(many_n.check_fields().unwrap_err().contains("n = 1"));
+    fn streaming_takes_n_above_one_and_refuses_several_prompts() {
+        assert!(request(json!({"stream": true, "n": 2}))
+            .check_fields()
+            .is_ok());
         let many_prompts = request(json!({"stream": true, "prompt": ["a", "b"]}));
         assert!(many_prompts
             .check_fields()

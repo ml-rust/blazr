@@ -16,8 +16,9 @@ use boostr::{
 
 use super::batch_emit::emit_token;
 use super::batch_engine::BatchEngine;
+use super::cancel_marks::CancelPhase;
 use super::kv_recompute::{block_ids, block_slots};
-use super::request_cancel::{end_cancelled, CancelPhase};
+use super::request_cancel::end_cancelled;
 use crate::config::GenerationConfig;
 
 impl<R: Runtime<DType = DType>> BatchEngine<R>

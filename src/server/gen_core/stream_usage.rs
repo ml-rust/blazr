@@ -36,6 +36,46 @@ impl StreamUsage {
     }
 }
 
+/// The usage chunk's counts over the choices of one stream.
+///
+/// `prompt_tokens` counts the prompt once. `completion_tokens` sums every
+/// choice. A choice that ends without its counts, or without a final item,
+/// leaves no total, so the stream sends no usage chunk.
+pub(in crate::server) struct ChoicesUsage {
+    total: Option<StreamUsage>,
+    counted: bool,
+}
+
+impl Default for ChoicesUsage {
+    /// No choice counted yet.
+    fn default() -> Self {
+        Self {
+            total: None,
+            counted: true,
+        }
+    }
+}
+
+impl ChoicesUsage {
+    /// Add the counts the final item of a choice carries.
+    pub(in crate::server) fn finished(&mut self, usage: Option<StreamUsage>) {
+        match usage {
+            Some(u) => self.total = Some(self.total.map_or(u, |t| t.with_choice(u))),
+            None => self.counted = false,
+        }
+    }
+
+    /// A choice ended with no final item.
+    pub(in crate::server) fn unfinished(&mut self) {
+        self.counted = false;
+    }
+
+    /// The counts of every choice, or `None` when one lacks them.
+    pub(in crate::server) fn total(&self) -> Option<StreamUsage> {
+        self.total.filter(|_| self.counted)
+    }
+}
+
 /// The `usage` member of a content chunk.
 ///
 /// `Absent` omits the member. `Null` writes `"usage": null`, as an OpenAI
@@ -119,6 +159,20 @@ mod tests {
     fn a_second_choice_adds_its_completion_and_not_its_prompt() {
         let both = StreamUsage::new(7, 4).with_choice(StreamUsage::new(7, 3));
         assert_eq!(both, StreamUsage::new(7, 7));
+    }
+
+    #[test]
+    fn choices_sum_completions_and_a_missing_count_drops_the_total() {
+        let mut usage = ChoicesUsage::default();
+        assert_eq!(usage.total(), None);
+        usage.finished(Some(StreamUsage::new(5, 2)));
+        usage.finished(Some(StreamUsage::new(5, 3)));
+        assert_eq!(usage.total(), Some(StreamUsage::new(5, 5)));
+        usage.unfinished();
+        assert_eq!(usage.total(), None);
+        let mut uncounted = ChoicesUsage::default();
+        uncounted.finished(None);
+        assert_eq!(uncounted.total(), None);
     }
 
     #[derive(Serialize)]

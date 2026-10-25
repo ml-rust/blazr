@@ -6,7 +6,8 @@
 //! - A scheduling loop that produces batches for the executor
 //!
 //! The per-request metadata and channels live in [`RequestRegistry`], shared
-//! with the other schedulers. Cancellation lives in `request_cancel`.
+//! with the other schedulers. Cancellation lives in `request_cancel`, its
+//! marks in `cancel_marks`.
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -19,8 +20,8 @@ use boostr::inference::scheduler::{
     ScheduledBatch, SchedulerConfig, SequenceId, SequenceRequest, SequenceScheduler, SequenceState,
 };
 
+use super::cancel_marks::PendingCancels;
 use super::queue_depth::QueueDepth;
-use super::request_cancel::PendingCancels;
 use super::request_registry::{CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry};
 use super::slo_policy::SloBatchPolicy;
 use crate::config::GenerationConfig;
@@ -60,7 +61,7 @@ pub struct RequestScheduler {
     /// Receiver end (held by the scheduling loop)
     notify_rx: Mutex<Option<mpsc::Receiver<()>>>,
     /// Waiting plus preempted sequences, published as `blazr_queue_depth`.
-    queue_depth: QueueDepth,
+    pub(super) queue_depth: QueueDepth,
     /// Holds batch growth while a P95 latency target is breached.
     slo_policy: Option<Arc<SloBatchPolicy>>,
     /// `SchedulerConfig::max_batch_size`, the cap the policy sizes against.
@@ -358,6 +359,10 @@ impl GenerationScheduler for RequestScheduler {
 
     fn queue_depth(&self) -> usize {
         RequestScheduler::queue_depth(self)
+    }
+
+    fn fault(&self) -> Option<String> {
+        self.registry.fault()
     }
 }
 

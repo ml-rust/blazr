@@ -9,7 +9,9 @@
 //!
 //! Each loop runs on its own thread for the server's life: `blazr-lanes`
 //! or `blazr-batch`. The returned scheduler owns the thread. It stops and
-//! joins the thread when the server state drops it.
+//! joins the thread when the server state drops it. A loop that panics
+//! fails its scheduler: every request in it ends with an error, later
+//! requests are refused, and `GET /health` answers 503.
 //!
 //! With `inference.max_batch_size` at 1 neither is built, and the handlers
 //! take the single-sequence path.
@@ -23,8 +25,8 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::engine::{
-    BatchEngine, EngineThread, Executor, GenerationScheduler, RequestScheduler, SloBatchPolicy,
-    ThreadedScheduler,
+    BatchEngine, EngineThread, Executor, FailRequests, GenerationScheduler, RequestScheduler,
+    SloBatchPolicy, ThreadedScheduler,
 };
 use crate::runtime::ServerRuntime;
 
@@ -100,7 +102,8 @@ async fn lane_batching(
     let lane_scheduler = LaneScheduler::with_slo_policy(max_batch, slo_policy)?;
     let engine = LaneEngine::open(executor, Arc::clone(&lane_scheduler)).await?;
     let mode = engine.mode();
-    let thread = EngineThread::spawn("blazr-lanes", move |stop| engine.run_until(stop))?;
+    let owner: Arc<dyn FailRequests> = lane_scheduler.clone();
+    let thread = EngineThread::spawn("blazr-lanes", owner, move |stop| engine.run_until(stop))?;
 
     eprintln!(
         "  Batching: {} (lanes={}, decode={:?}, device={})",
@@ -174,7 +177,10 @@ fn paged_batching(
         RequestScheduler::build(allocator, sched_config, prefix_cache, slo_policy);
 
     let batch_engine = BatchEngine::new(executor, Arc::clone(&request_scheduler))?;
-    let thread = EngineThread::spawn("blazr-batch", move |stop| batch_engine.run_until(stop))?;
+    let owner: Arc<dyn FailRequests> = request_scheduler.clone();
+    let thread = EngineThread::spawn("blazr-batch", owner, move |stop| {
+        batch_engine.run_until(stop)
+    })?;
 
     eprintln!(
         "  Batching: {} (max_batch={}, blocks={}, device={})",

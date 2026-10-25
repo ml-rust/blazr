@@ -48,7 +48,16 @@ pub(crate) fn rig_on(
     pool: PagedPool,
     max_seq_len: usize,
 ) -> Result<Rig> {
-    let executor = Arc::new(executor);
+    rig_over(Arc::new(executor), pool, max_seq_len)
+}
+
+/// A batching engine over the shared `executor`, as [`rig_on`] builds it.
+/// A server test registers the same executor with its model scheduler.
+pub(crate) fn rig_over(
+    executor: Arc<Executor<CpuRuntime>>,
+    pool: PagedPool,
+    max_seq_len: usize,
+) -> Result<Rig> {
     let config = SchedulerConfig {
         max_batch_size: 2,
         max_batch_tokens: 4096,

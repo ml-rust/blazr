@@ -236,6 +236,117 @@ mod tests {
         ))
     }
 
+    /// The batch engine thread panics during a streamed request's prefill.
+    /// The stream ends with one error event and `[DONE]`, the slot frees,
+    /// `/health` answers 503, and the next request is refused.
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicked_engine_ends_its_streams_and_frees_their_slots() -> anyhow::Result<()> {
+        use crate::engine::batch_test_rig::{rig_over, Rig, POOL};
+        use crate::engine::test_support::{seeded_full_vocab_paged, FULL_VOCAB_CTX};
+        use crate::engine::{
+            EngineThread, FailRequests, GenerationScheduler, Scheduler, ThreadedScheduler,
+        };
+        use crate::server::handlers::{health, ServeReplica, Serving};
+        use crate::server::routes::api_routes;
+        use crate::server::streaming::sse_test::parse_events;
+        use serde_json::{json, Value};
+
+        const MODEL: &str = "m";
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join(MODEL))?;
+        std::fs::write(dir.path().join(MODEL).join("config.json"), "{}")?;
+        let models = Scheduler::<crate::runtime::ServerRuntime>::new(
+            dir.path().to_path_buf(),
+            boostr::CpuDevice::new(),
+        )
+        .pinned();
+        let executor = seeded_full_vocab_paged(0x5eed, POOL)?;
+        let served = models
+            .register_base(MODEL, dir.path().join(MODEL), executor)
+            .await;
+        let Rig {
+            scheduler, engine, ..
+        } = rig_over(Arc::clone(&served), POOL, FULL_VOCAB_CTX)?;
+        let mut engine = engine.with_prefill_chunk_size(1);
+        engine.after_chunk = Some(Box::new(|_: usize| panic!("injected engine panic")));
+        let owner: Arc<dyn FailRequests> = scheduler.clone();
+        let thread = EngineThread::spawn("blazr-batch", owner, move |stop| engine.run_until(stop))?;
+        let batching: Arc<dyn GenerationScheduler> =
+            Arc::new(ThreadedScheduler::new(scheduler, thread));
+        let serving = Serving::Single(ServeReplica {
+            executor: served,
+            scheduler: Some(batching),
+            device: "cpu".to_string(),
+        });
+        let metrics = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .build_recorder()
+            .handle();
+        let state = crate::server::AppState::new(Arc::new(models), metrics).with_serving(serving);
+        let limit = ConcurrencyLimit::new(2);
+        let app = api_routes()
+            .route("/health", get(health))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&limit),
+                limit_concurrency,
+            ))
+            .with_state(Arc::new(state));
+        let call = |method: &str, path: &str, body: Option<Value>| {
+            let app = app.clone();
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())));
+            async move {
+                let response = app.oneshot(request?).await?;
+                let status = response.status().as_u16();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+                anyhow::Ok((status, String::from_utf8(bytes.to_vec())?))
+            }
+        };
+
+        let body =
+            json!({"model": MODEL, "prompt": "Hello there", "max_tokens": 4, "stream": true});
+        let (status, raw) = call("POST", "/v1/completions", Some(body.clone())).await?;
+        assert_eq!(status, 200, "{raw}");
+        let events = parse_events(&raw)?;
+        let [.., error, done] = events.as_slice() else {
+            return Err(anyhow::anyhow!("the stream sent too few events: {raw}"));
+        };
+        let message = error["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("injected engine panic"), "{raw}");
+        assert_eq!(*done, json!("[DONE]"));
+        assert_eq!(
+            events.iter().filter(|e| e.get("error").is_some()).count(),
+            1
+        );
+        let mut freed = false;
+        for _ in 0..1000 {
+            if limit.slots.available_permits() == 2 {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(freed, "the failed request kept its slot");
+
+        let (status, raw) = call("GET", "/health", None).await?;
+        assert_eq!(status, 503, "{raw}");
+        assert!(
+            raw.contains("\"unavailable\"") && raw.contains("panicked"),
+            "{raw}"
+        );
+
+        let mut plain = body;
+        plain["stream"] = json!(false);
+        let (status, raw) = call("POST", "/v1/completions", Some(plain)).await?;
+        assert_eq!(status, 500, "{raw}");
+        assert!(raw.contains("the engine stopped"), "{raw}");
+        assert_eq!(limit.slots.available_permits(), 2);
+        Ok(())
+    }
+
     /// A finished reply and a finished stream each give their slot back:
     /// the decode thread and the spawned stream task drop their holds.
     #[cfg(not(any(feature = "cuda", feature = "wgpu")))]

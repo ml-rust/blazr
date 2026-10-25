@@ -104,6 +104,17 @@ impl SamplingParams {
     }
 }
 
+/// The sampling config of choice `i`: `seed + i` when the request sets a
+/// seed. The streamed and the
+/// non-streaming paths of every endpoint sample each choice alike.
+pub fn choice_config(base: &GenerationConfig, i: usize) -> GenerationConfig {
+    let mut config = base.clone();
+    if let Some(seed) = config.seed {
+        config.seed = Some(seed.wrapping_add(i as u64));
+    }
+    config
+}
+
 /// Trait for request types that carry sampling fields.
 /// Eliminates the duplicated SamplingParams { ... } construction.
 pub trait HasSamplingFields {
@@ -219,6 +230,17 @@ mod tests {
         assert_eq!(config.temperature, 0.0);
         assert!(config.stop_sequences.is_empty());
         assert_eq!(config.top_logprobs, 20);
+    }
+
+    #[test]
+    fn each_choice_offsets_the_seed_by_its_index() {
+        let seeded = GenerationConfig {
+            seed: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(choice_config(&seeded, 0).seed, Some(7));
+        assert_eq!(choice_config(&seeded, 3).seed, Some(10));
+        assert_eq!(choice_config(&GenerationConfig::default(), 3).seed, None);
     }
 
     #[test]

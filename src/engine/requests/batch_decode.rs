@@ -16,8 +16,9 @@ use boostr::{
 };
 
 use super::batch_emit::emit_token;
+use super::cancel_marks::CancelPhase;
 use super::kv_recompute::{block_ids, block_slot, recompute_kv};
-use super::request_cancel::{end_cancelled, CancelPhase};
+use super::request_cancel::end_cancelled;
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;

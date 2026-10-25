@@ -7,6 +7,7 @@ mod batch_prefill;
 mod batch_run;
 #[cfg(test)]
 pub(crate) mod batch_test_rig;
+mod cancel_marks;
 mod engine_thread;
 pub(in crate::engine) mod kv_recompute;
 pub mod latency_window;
@@ -20,7 +21,7 @@ pub mod slots;
 mod work_hold;
 
 pub use batch_engine::BatchEngine;
-pub use engine_thread::{EngineThread, ThreadedScheduler};
+pub use engine_thread::{EngineThread, FailRequests, ThreadedScheduler};
 pub use queue_depth::{QueueDepth, Waiting};
 pub use request_registry::{CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry};
 pub use request_scheduler::RequestScheduler;

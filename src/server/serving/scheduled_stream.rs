@@ -1,38 +1,14 @@
-//! Streaming text generation on a request's route.
+//! Streaming text generation through a batching scheduler.
 //!
-//! A route with a batching scheduler submits the prompt there and forwards
-//! each token as it arrives. A route without one streams from its executor.
-
-use std::sync::Arc;
+//! The scheduler takes the prompt, and each token goes on as it arrives.
+//! `routed_stream` picks this path or the executor's for a request.
 
 use tokio::sync::mpsc;
 
-use super::scheduled::batching_scheduler;
 use crate::config::GenerationConfig;
 use crate::engine::{FinishReason, GenerationScheduler};
-use crate::server::generation::stream_with_stop_sequences;
-use crate::server::handlers::Route;
 use crate::server::stream_metrics::StreamMetrics;
 use crate::server::streaming::StreamToken;
-
-/// Stream `prompt_tokens` on `route` to `tx`.
-///
-/// The route picks the path by `batching_scheduler`, as `generate_text_routed`
-/// does, so a streamed and a non-streamed request take the same one.
-pub async fn stream_routed(
-    route: &Route,
-    prompt_tokens: Vec<u32>,
-    gen_config: GenerationConfig,
-    tx: mpsc::Sender<StreamToken>,
-) {
-    match batching_scheduler(route) {
-        Some(scheduler) => stream_via_scheduler(scheduler, prompt_tokens, gen_config, tx).await,
-        None => {
-            let executor = Arc::clone(&route.executor);
-            stream_with_stop_sequences(executor, prompt_tokens, gen_config, tx).await
-        }
-    }
-}
 
 /// Submit a request to `scheduler` and forward each token to `tx`.
 ///
@@ -101,6 +77,7 @@ pub async fn stream_via_scheduler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use anyhow::{anyhow, Result};
@@ -109,8 +86,10 @@ mod tests {
         alone_tokens, drain, free_blocks, greedy, rig, tick, Rig, POOL,
     };
     use crate::engine::{GeneratedToken, RequestHandle, RequestRegistry};
+    use crate::server::completion_stream::create_completion_stream;
+    use crate::server::routed_stream::stream_routed;
     use crate::server::stream_usage::StreamUsage;
-    use crate::server::streaming::{create_completion_stream, sse_test};
+    use crate::server::streaming::sse_test;
 
     /// Logprobs of the two paths agree to this much.
     const LOGPROB_TOL: f32 = 1e-5;

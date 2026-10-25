@@ -3,7 +3,7 @@
 use super::completion_prompt::ResolvedPrompt;
 use super::completion_types::CompletionChoice;
 use crate::config::GenerationConfig;
-use crate::server::generation::convert_logprobs;
+use crate::server::generation::{choice_config, convert_logprobs};
 use crate::server::handlers::Route;
 use crate::server::scheduled::generate_text_routed;
 
@@ -46,10 +46,7 @@ pub(super) async fn generate_choices(
     for (p, prompt) in prompts.iter().enumerate() {
         for j in 0..n {
             let index = choice_index(p, n, j);
-            let mut iter_config = config.clone();
-            if let Some(s) = iter_config.seed {
-                iter_config.seed = Some(s.wrapping_add(index as u64));
-            }
+            let iter_config = choice_config(config, index);
             // The route's batching scheduler when it has one, else its executor.
             let result = generate_text_routed(route, &prompt.tokens, &iter_config).await?;
             if index == 0 {

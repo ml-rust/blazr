@@ -14,7 +14,8 @@ use boostr::{
     SamplingOps, ScalarOps, Tensor, TypeConversionOps, UnaryOps,
 };
 
-use super::request_cancel::{end_cancelled, CancelPhase};
+use super::cancel_marks::CancelPhase;
+use super::request_cancel::end_cancelled;
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;

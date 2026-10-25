@@ -2,6 +2,7 @@
 //! tool calls, and finish.
 
 use super::chat_stream::{ChatStreamChoice, ChatStreamDelta};
+use super::chat_token_text::{split_token_text, TokenText};
 use super::reasoning::ReasoningParser;
 use super::streaming::StreamToken;
 use super::tool_call_delta::call_deltas;
@@ -36,19 +37,16 @@ impl ChatChunker {
     pub(super) fn token(&mut self, token: StreamToken) -> Vec<ChatStreamChoice> {
         let is_final = token.finish_reason.is_some();
         let logprobs = token.logprobs();
-        let (reasoning, content) = self.split_reasoning(token.text, is_final);
-        let (content, calls) = match self.tools.as_mut() {
-            Some(parser) => {
-                let mut events = parser.feed(&content);
-                if is_final {
-                    let tail = parser.finish();
-                    events.content.push_str(&tail.content);
-                    events.calls.extend(tail.calls);
-                }
-                (events.content, events.calls)
-            }
-            None => (content, Vec::new()),
-        };
+        let TokenText {
+            reasoning,
+            content,
+            calls,
+        } = split_token_text(
+            self.reasoning.as_mut(),
+            self.tools.as_mut(),
+            token.text,
+            is_final,
+        );
         let any_call = self.calls + calls.len() > 0;
         let finish = token
             .finish_reason
@@ -90,21 +88,6 @@ impl ChatChunker {
             ));
         }
         choices
-    }
-
-    /// `(reasoning, content)` of `text`. A final token also releases what the
-    /// reasoning parser holds.
-    fn split_reasoning(&mut self, text: String, is_final: bool) -> (String, String) {
-        let Some(parser) = self.reasoning.as_mut() else {
-            return (String::new(), text);
-        };
-        let (mut reasoning, mut content) = parser.feed(&text);
-        if is_final {
-            let (tail_reasoning, tail_content) = parser.finish();
-            reasoning.push_str(&tail_reasoning);
-            content.push_str(&tail_content);
-        }
-        (reasoning, content)
     }
 }
 

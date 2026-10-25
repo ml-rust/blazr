@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, Weak};
+use std::sync::{Mutex, OnceLock, PoisonError, Weak};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
@@ -131,10 +131,15 @@ struct RequestMeta {
     _hold: Option<WorkHold>,
 }
 
+/// The channel a request's tokens stream out on.
+pub type TokenSender = mpsc::Sender<Result<GeneratedToken>>;
+
 /// The requests a scheduler is carrying, keyed by sequence id.
 pub struct RequestRegistry {
     meta: Mutex<HashMap<SequenceId, RequestMeta>>,
     next_seq_id: AtomicU64,
+    /// Why the scheduler stopped serving. Once set, `insert` refuses.
+    fault: OnceLock<String>,
 }
 
 impl Default for RequestRegistry {
@@ -149,6 +154,7 @@ impl RequestRegistry {
         Self {
             meta: Mutex::new(HashMap::new()),
             next_seq_id: AtomicU64::new(1),
+            fault: OnceLock::new(),
         }
     }
 
@@ -165,13 +171,14 @@ impl RequestRegistry {
     ///
     /// # Errors
     ///
-    /// An error when the registry lock is poisoned.
+    /// An error when the registry is faulted or its lock is poisoned.
     pub fn insert(
         &self,
         seq_id: SequenceId,
         prompt_tokens: Vec<u32>,
         gen_config: GenerationConfig,
     ) -> Result<RequestHandle> {
+        self.refuse_when_faulted()?;
         let (token_tx, token_rx) = mpsc::channel(TOKEN_CHANNEL_CAPACITY);
         let (done_tx, done_rx) = oneshot::channel();
         let meta = RequestMeta {
@@ -184,7 +191,13 @@ impl RequestRegistry {
             text: None,
             _hold: WorkHold::current(),
         };
-        self.lock_meta()?.insert(seq_id, meta);
+        {
+            let mut carried = self.lock_meta()?;
+            // `fail_all` sets the fault before it takes this lock, so a
+            // request stored here is either refused or drained.
+            self.refuse_when_faulted()?;
+            carried.insert(seq_id, meta);
+        }
         Ok(RequestHandle {
             seq_id,
             token_rx,
@@ -312,6 +325,40 @@ impl RequestRegistry {
     pub async fn send_error(&self, seq_id: SequenceId, error: anyhow::Error) {
         if let Some(tx) = self.token_sender(seq_id) {
             let _ = tx.send(Err(error)).await;
+        }
+    }
+
+    /// Why the scheduler stopped serving, or `None` while it serves.
+    pub fn fault(&self) -> Option<String> {
+        self.fault.get().cloned()
+    }
+
+    /// Stop serving: record `reason`, refuse every later [`Self::insert`],
+    /// and drop the state of every carried request.
+    ///
+    /// Each request's [`WorkHold`] drops here, so the slots behind them
+    /// free at once. Returns each request's token channel, for the caller
+    /// to send the request its error on. The first reason stands. A
+    /// poisoned lock still holds the requests, so they drain too.
+    pub fn fail_all(&self, reason: &str) -> Vec<TokenSender> {
+        let _ = self.fault.set(reason.to_string());
+        let drained: Vec<RequestMeta> = self
+            .meta
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+            .map(|(_, meta)| meta)
+            .collect();
+        drained.into_iter().map(|meta| meta.token_tx).collect()
+    }
+
+    /// An error naming the fault, once one is set.
+    fn refuse_when_faulted(&self) -> Result<()> {
+        match self.fault.get() {
+            Some(reason) => Err(anyhow!(
+                "this scheduler stopped serving: {reason}. Restart the server"
+            )),
+            None => Ok(()),
         }
     }
 

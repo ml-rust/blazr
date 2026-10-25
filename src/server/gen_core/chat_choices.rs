@@ -1,7 +1,6 @@
 //! The chat completions SSE stream of one or more choices.
 
 use std::convert::Infallible;
-use std::pin::Pin;
 
 use axum::response::sse::{Event, Sse};
 use futures::stream::Stream;
@@ -10,12 +9,9 @@ use futures::StreamExt;
 use super::chat_chunks::ChatChunker;
 use super::chat_stream::{ChatStreamChoice, ChatStreamChunk, ChatStreamDelta, CHAT_CHUNK_OBJECT};
 use super::reasoning::ReasoningParser;
-use super::stream_usage::{usage_event, ChunkUsage, StreamUsage};
-use super::streaming::{error_event, StreamToken};
+use super::stream_usage::{usage_event, ChoicesUsage, ChunkUsage};
+use super::streaming::{error_event, TokenStream};
 use crate::server::tool_parser::ToolCallParser;
-
-/// The items one generation streams.
-pub(in crate::server) type TokenStream = Pin<Box<dyn Stream<Item = StreamToken> + Send>>;
 
 /// One choice of a chat stream: its items and the parsers its text goes through.
 ///
@@ -74,8 +70,7 @@ pub(in crate::server) fn create_choices_stream(
             choices: vec![choice],
             usage,
         };
-        let mut total: Option<StreamUsage> = None;
-        let mut counted = true;
+        let mut counts = ChoicesUsage::default();
         let mut failed = false;
 
         'choices: for (index, choice) in choices.into_iter().enumerate() {
@@ -111,21 +106,18 @@ pub(in crate::server) fn create_choices_stream(
                 }
 
                 if is_final {
-                    match final_usage {
-                        Some(u) => total = Some(total.map_or(u, |t| t.with_choice(u))),
-                        None => counted = false,
-                    }
+                    counts.finished(final_usage);
                     finished = true;
                     break;
                 }
             }
             if !finished {
-                counted = false;
+                counts.unfinished();
             }
         }
 
         if include_usage && !failed {
-            let final_usage = total.filter(|_| counted);
+            let final_usage = counts.total();
             if let Some(evt) = usage_event(&id, CHAT_CHUNK_OBJECT, created, &model, final_usage) {
                 yield Ok(evt);
             }
@@ -138,6 +130,8 @@ pub(in crate::server) fn create_choices_stream(
 
 #[cfg(test)]
 mod tests {
+    use super::super::stream_usage::StreamUsage;
+    use super::super::streaming::StreamToken;
     use super::*;
     use crate::engine::FinishReason;
     use crate::server::streaming::sse_test::{assert_usage_tail, events, feed};

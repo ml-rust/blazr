@@ -61,8 +61,9 @@ pub(in crate::server) const CHAT_CHUNK_OBJECT: &str = "chat.completion.chunk";
 
 #[cfg(test)]
 mod tests {
-    use crate::server::gen_core::chat_choices::{create_choices_stream, ChoiceStream, TokenStream};
+    use crate::server::gen_core::chat_choices::{create_choices_stream, ChoiceStream};
     use crate::server::gen_core::reasoning::ReasoningParser;
+    use crate::server::gen_core::streaming::TokenStream;
     use crate::server::tool_parser::ToolCallParser;
     use axum::response::sse::{Event, Sse};
     use futures::stream::Stream;

@@ -4,8 +4,9 @@ use axum::response::{IntoResponse, Response};
 
 use super::tool_parser::ToolCallParser;
 use super::tools::Tool;
-use crate::server::chat_choices::{create_choices_stream, ChoiceStream, TokenStream};
+use crate::server::chat_choices::{create_choices_stream, ChoiceStream};
 use crate::server::reasoning::ReasoningParser;
+use crate::server::streaming::TokenStream;
 
 /// The chat stream of `choices`: entry `i` is the item stream of choice `i`.
 ///

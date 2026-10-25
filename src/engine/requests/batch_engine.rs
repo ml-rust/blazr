@@ -23,7 +23,8 @@ use boostr::{
 };
 
 use super::batch_decode::process_decode_batch;
-use super::request_cancel::{end_cancelled, CancelPhase};
+use super::cancel_marks::CancelPhase;
+use super::request_cancel::end_cancelled;
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;
@@ -43,7 +44,7 @@ pub struct BatchEngine<R: Runtime<DType = DType>> {
     /// Runs after each prefill chunk with the tokens prefilled so far, so a
     /// test can act between chunks.
     #[cfg(test)]
-    pub(super) after_chunk: Option<Box<dyn FnMut(usize) + Send>>,
+    pub(crate) after_chunk: Option<Box<dyn FnMut(usize) + Send>>,
 }
 
 impl<R: Runtime<DType = DType>> BatchEngine<R>

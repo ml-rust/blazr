@@ -8,14 +8,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::chat_vision::{ImageRoute, RequestMedia};
 use crate::config::GenerationConfig;
 use crate::engine::{GenerationResult, WorkHold};
-use crate::server::chat_choices::TokenStream;
 use crate::server::generation::{
     stream_images_with_stop_sequences, stream_multimodal_with_stop_sequences,
 };
 use crate::server::handlers::{BudgetPermit, DecodeSlot, Route};
+use crate::server::routed_stream::stream_routed;
 use crate::server::scheduled::generate_text_routed;
-use crate::server::scheduled_stream::stream_routed;
-use crate::server::streaming::StreamToken;
+use crate::server::streaming::{StreamToken, TokenStream};
 
 /// Items one choice's channel buffers.
 const CHOICE_CHANNEL_CAPACITY: usize = 32;

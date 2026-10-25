@@ -14,10 +14,10 @@ use super::chat_sse::chat_sse;
 use super::chat_types::{ChatChoice, ChatRequest, ChatResponse};
 use super::route_stream::spawn_media_streams;
 use super::tool_calls::extract_tool_calls;
-use crate::config::GenerationConfig;
 use crate::model::chat_template::ChatTemplate;
 use crate::server::generation::{
-    apply_keep_alive, convert_logprobs, error_response, record_generation_metrics, Usage,
+    apply_keep_alive, choice_config, convert_logprobs, error_response, record_generation_metrics,
+    Usage,
 };
 use crate::server::handlers::{AppState, DecodeSlot};
 use crate::server::reasoning::{split_reasoning_for_format, ReasoningParser};
@@ -47,16 +47,6 @@ pub async fn chat_completions(
     } else {
         complete_reply(&state, &request, prepared).await
     }
-}
-
-/// The sampling config of choice `i`: `seed + i` when the request sets a
-/// seed. The streamed and the non-streaming paths sample each choice alike.
-fn choice_config(base: &GenerationConfig, i: usize) -> GenerationConfig {
-    let mut config = base.clone();
-    if let Some(seed) = config.seed {
-        config.seed = Some(seed.wrapping_add(i as u64));
-    }
-    config
 }
 
 /// The SSE reply of a streamed chat request: `n` choices, one after another.

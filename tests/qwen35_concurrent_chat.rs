@@ -33,7 +33,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use blazr::engine::{
-    EngineThread, GenerationScheduler, LaneEngine, LaneScheduler, Scheduler, ThreadedScheduler,
+    EngineThread, FailRequests, GenerationScheduler, LaneEngine, LaneScheduler, Scheduler,
+    ThreadedScheduler,
 };
 use blazr::server::handlers::{ServeReplica, Serving};
 use blazr::server::{api_routes, metrics, AppState};
@@ -146,7 +147,8 @@ async fn concurrent_chat_requests_match_their_solo_answers() {
         .await
         .unwrap_or_else(|e| panic!("LaneEngine::open: {e}"));
     println!("lane decode mode: {:?}", engine.mode());
-    let engine = EngineThread::spawn("blazr-lanes", move |stop| engine.run_until(stop))
+    let owner: Arc<dyn FailRequests> = lane_scheduler.clone();
+    let engine = EngineThread::spawn("blazr-lanes", owner, move |stop| engine.run_until(stop))
         .unwrap_or_else(|e| panic!("EngineThread::spawn: {e}"));
 
     let handle = metrics::install_recorder().unwrap_or_else(|e| panic!("metrics recorder: {e}"));

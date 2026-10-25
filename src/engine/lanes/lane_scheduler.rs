@@ -15,7 +15,7 @@
 //! [`LaneEngine`]: super::lane_engine::LaneEngine
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::mpsc;
@@ -25,9 +25,10 @@ use boostr::inference::scheduler::SequenceId;
 use crate::config::GenerationConfig;
 use crate::engine::queue_depth::QueueDepth;
 use crate::engine::request_registry::{
-    CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry,
+    CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry, TokenSender,
 };
 use crate::engine::slo_policy::SloBatchPolicy;
+use crate::engine::FailRequests;
 
 /// Wakeups the driver can miss without blocking a submitting handler.
 const NOTIFY_CHANNEL_CAPACITY: usize = 64;
@@ -197,6 +198,20 @@ impl GenerationScheduler for LaneScheduler {
 
     fn queue_depth(&self) -> usize {
         self.waiting_len()
+    }
+
+    fn fault(&self) -> Option<String> {
+        self.registry.fault()
+    }
+}
+
+impl FailRequests for LaneScheduler {
+    fn fail_all(&self, reason: &str) -> Vec<TokenSender> {
+        let senders = self.registry.fail_all(reason);
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        waiting.clear();
+        self.queue_depth.set(0);
+        senders
     }
 }
 

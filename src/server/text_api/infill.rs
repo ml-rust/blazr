@@ -18,15 +18,16 @@ use serde::{Deserialize, Serialize};
 
 use super::fim_prompt::{build_fim_prompt, FIM_MARKERS};
 use crate::engine::WorkHold;
+use crate::server::completion_stream::create_completion_stream;
 use crate::server::generation::{
     admit_generation, apply_keep_alive, error_response, overloaded_response, policy_error_response,
     record_generation_metrics, validate_generation_params, HasSamplingFields, SamplingParams,
     Usage,
 };
 use crate::server::handlers::{lookup_error_response, AppState, DecodeSlot};
+use crate::server::routed_stream::stream_routed;
 use crate::server::scheduled::generate_text_routed;
-use crate::server::scheduled_stream::stream_routed;
-use crate::server::streaming::{create_completion_stream, StreamToken};
+use crate::server::streaming::StreamToken;
 
 /// FIM/Infill endpoint
 pub async fn infill(

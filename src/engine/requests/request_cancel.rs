@@ -1,4 +1,5 @@
-//! Cancellation of batched requests.
+//! Cancellation of batched requests: one at a time, or all of them at
+//! once when the engine dies.
 //!
 //! A cancel can come from any task, most often from a dropped
 //! [`RequestHandle`]. A request that waits for admission, or sits preempted,
@@ -11,97 +12,24 @@
 //! before it builds a decode forward, and before it samples a row. A token
 //! send to a closed channel ends the sequence at once too.
 //!
+//! An engine thread that dies fails the scheduler through
+//! [`FailRequests`]: every request leaves the registry at once.
+//!
 //! [`RequestHandle`]: super::request_registry::RequestHandle
 
-use std::collections::HashSet;
-use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::TryLockError;
 
 use anyhow::{anyhow, Result};
 
 use boostr::inference::memory::CpuBlockAllocator;
-use boostr::inference::scheduler::{SequenceId, SequenceScheduler, SequenceState};
+use boostr::inference::scheduler::{SequenceId, SequenceScheduler};
 use boostr::{DType, Runtime};
 
-use super::request_registry::CancelRequest;
+use super::cancel_marks::CancelPhase;
+use super::engine_thread::FailRequests;
+use super::request_registry::{CancelRequest, TokenSender};
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
-
-/// Running requests marked cancelled that the engine has not dropped yet.
-pub(super) struct PendingCancels {
-    ids: Mutex<HashSet<SequenceId>>,
-}
-
-impl PendingCancels {
-    /// An empty set.
-    pub(super) fn new() -> Self {
-        Self {
-            ids: Mutex::new(HashSet::new()),
-        }
-    }
-
-    /// The set. A poisoned lock still holds a plain id set, so it is used.
-    fn ids(&self) -> MutexGuard<'_, HashSet<SequenceId>> {
-        self.ids.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn mark(&self, seq_id: SequenceId) {
-        self.ids().insert(seq_id);
-    }
-
-    /// Whether `seq_id` is marked cancelled.
-    pub(super) fn contains(&self, seq_id: SequenceId) -> bool {
-        self.ids().contains(&seq_id)
-    }
-
-    fn snapshot(&self) -> Vec<SequenceId> {
-        self.ids().iter().copied().collect()
-    }
-
-    fn clear(&self, seq_id: SequenceId) {
-        self.ids().remove(&seq_id);
-    }
-}
-
-/// Where a cancelled sequence was when it left the scheduler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CancelPhase {
-    /// Waiting for admission. It holds no blocks.
-    Queued,
-    /// Admitted, before its first token.
-    Prefill,
-    /// Past its first token.
-    Decode,
-    /// Running, dropped before the engine scheduled it again.
-    Running,
-    /// Preempted. Its blocks are already free, so it skips the recompute.
-    Preempted,
-    /// The scheduler had already ended it.
-    Finished,
-}
-
-impl CancelPhase {
-    /// The phase of a sequence in `state`.
-    fn of(state: Option<SequenceState>) -> Self {
-        match state {
-            Some(SequenceState::Waiting) => Self::Queued,
-            Some(SequenceState::Running) => Self::Running,
-            Some(SequenceState::Preempted) => Self::Preempted,
-            Some(SequenceState::Finished) | None => Self::Finished,
-        }
-    }
-
-    /// The phase name the debug log carries.
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Prefill => "prefill",
-            Self::Decode => "decode",
-            Self::Running => "running",
-            Self::Preempted => "preempted",
-            Self::Finished => "finished",
-        }
-    }
-}
 
 impl RequestScheduler {
     /// Cancel a waiting or running request.
@@ -251,6 +179,17 @@ impl CancelRequest for RequestScheduler {
         if let Err(e) = self.cancel(seq_id) {
             tracing::error!(seq_id, "cancelling a dropped request failed: {e:#}");
         }
+    }
+}
+
+impl FailRequests for RequestScheduler {
+    /// The sequences stay in the boostr scheduler: their blocks belong to
+    /// the dead engine's pool, and no engine runs them again.
+    fn fail_all(&self, reason: &str) -> Vec<TokenSender> {
+        let senders = self.registry.fail_all(reason);
+        self.cancels.clear_all();
+        self.queue_depth.set(0);
+        senders
     }
 }
 

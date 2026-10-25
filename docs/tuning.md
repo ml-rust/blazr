@@ -164,8 +164,8 @@ The CUDA graph path needs a CUDA build. `inference.graphs` in `config.yaml` work
 | Tensor parallel size             | env `BLAZR_TP_SIZE` (`serve`), `inference.tensor_parallel_size`                                                                    | `1`             | Shards the model across GPUs with NCCL all-reduce. Values above `1` require a build with `--features cuda,nccl`. |
 | Tensor parallel rank             | env `BLAZR_TP_RANK`                                                                              | unset           | Refused. blazr runs every rank as a thread of one process. A set value is a load error.                          |
 | Data parallel | `inference.data_parallel` or `--data-parallel` (`serve`) | `1` | Loads one copy of the start model per device, each with its own batching engine. Cannot combine with tensor parallel above `1`. See [Data-parallel replicas](deployment.md#data-parallel-replicas). |
-| Swarm (pipeline)                 | `blazr swarm --role`, `--leader`, `--swarm-port`, `--port`, `--token` or env `BLAZR_SWARM_TOKEN` | `--role worker` | Assigns model layers to nodes with a pipeline schedule. Requires the `distributed` feature.                      |
-| Disaggregated prefill and decode | `blazr disagg --role` (`router`, `prefill`, `decode`)                                            | `router`        | Runs prefill and decode on separate nodes. The router takes `--prefill` and `--decode` worker addresses.         |
+| Swarm (pipeline)                 | `blazr swarm --role`, `--workers`, `--leader`, `--swarm-port`, `--port`, `--token` or env `BLAZR_SWARM_TOKEN` | `--role worker` | Assigns model layers to nodes with a pipeline schedule, stage `r` on rank `r`. Requires the `distributed` feature. |
+| Disaggregated prefill and decode | `blazr disagg --role` (`router`, `prefill`, `decode`), `--router-addr`, `--prefill-count`, `--decode-count`, `--index` | `router`        | Runs prefill and decode on separate nodes. Each worker's rank follows from its role and `--index`. |
 
 ## Layer offload to CPU
 

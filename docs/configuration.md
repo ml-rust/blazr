@@ -17,7 +17,7 @@ For `inference.*` keys, the order is: flag, environment variable (`BLAZR_TP_SIZE
 
 Exceptions to the order:
 
-- `--token` takes its value from `BLAZR_SWARM_TOKEN` through the clap `env` attribute. A flag on the command line wins over the variable.
+- `swarm --token` takes its value from `BLAZR_SWARM_TOKEN`, and `disagg --cluster-token` from `NEXAR_CLUSTER_TOKEN`, through the clap `env` attribute. A flag on the command line wins over the variable.
 - `--voice-dir` wins over `BLAZR_VOICE_DIR`.
 - `pull --output` wins over `BLAZR_MODEL_DIR`, then `model_dir`.
 - `--mmproj`, `--image-min-tokens`, and `--image-max-tokens` replace the matching `inference` values when set.
@@ -504,27 +504,34 @@ The model loads on the build's runtime and the `device` key's GPU. A label file 
 
 ### swarm and disagg (distributed feature)
 
-| Command  | Flag                   | Default             | Meaning                                              |
-| -------- | ---------------------- | ------------------- | ---------------------------------------------------- |
-| `swarm`  | `--role <ROLE>`        | `worker`            | `leader` or `worker`                                 |
-| `swarm`  | `--token <TOKEN>`      | `BLAZR_SWARM_TOKEN` | Shared secret for swarm membership. Required.        |
-| `swarm`  | `-m`, `--model <NAME>` | `default_model`     | Model to serve. Leader only.                         |
-| `swarm`  | `--leader <ADDR>`      | unset               | Leader address. Worker only.                         |
-| `swarm`  | `--swarm-port <PORT>`  | `9090`              | Port for the nexar transport                         |
-| `swarm`  | `--port <PORT>`        | `server.port`, else `8080` | HTTP API port. Leader only.                   |
-| `swarm`  | `--host <HOST>`        | `server.host`, else `0.0.0.0` | HTTP API host. Leader only.                |
-| `swarm`  | `--api-key <KEY>`      | `BLAZR_API_KEY`     | API key for the leader's HTTP API                    |
-| `swarm`  | `--mdns`               | off                 | Enables LAN discovery                                |
-| `disagg` | `--role <ROLE>`        | `router`            | `router`, `prefill`, or `decode`                     |
-| `disagg` | `-m`, `--model <NAME>` | `default_model` (workers) | Required. Workers load it. The router reads its tokenizer and chat template from `--model` only. |
-| `disagg` | `--listen-addr <ADDR>` | `0.0.0.0:9190`      | Address this node listens on                         |
-| `disagg` | `--router-addr <ADDR>` | unset               | Router address. Required for `prefill` and `decode`. |
-| `disagg` | `--prefill <ADDR>...`  | unset               | Prefill worker addresses. Router only.               |
-| `disagg` | `--decode <ADDR>...`   | unset               | Decode worker addresses. Router only.                |
-| `disagg` | `--port <PORT>`        | `server.port`, else `8080` | HTTP API port. Router only.                   |
-| `disagg` | `--host <HOST>`        | `server.host`, else `0.0.0.0` | HTTP API host. Router only.                |
+| Command  | Flag                      | Default             | Meaning                                              |
+| -------- | ------------------------- | ------------------- | ---------------------------------------------------- |
+| `swarm`  | `--role <ROLE>`           | `worker`            | `leader` or `worker`                                 |
+| `swarm`  | `--token <TOKEN>`         | `BLAZR_SWARM_TOKEN` | Shared secret: the nexar cluster token. Required.    |
+| `swarm`  | `--workers <N>`           | `1`                 | Worker nodes. The same on every node. `0` runs the leader alone. |
+| `swarm`  | `-m`, `--model <NAME>`    | `default_model`     | Model to serve. Leader only.                         |
+| `swarm`  | `--leader <ADDR>`         | unset               | The leader's seed address. Required for a worker.    |
+| `swarm`  | `--swarm-port <PORT>`     | `9090`              | UDP port of the leader's seed, on the `--listen-addr` IP. Leader only. |
+| `swarm`  | `--listen-addr <ADDR>`    | `0.0.0.0:9091`      | Mesh listener. The port carries UDP and TCP.         |
+| `swarm`  | `--advertise-addr <ADDR>` | `--listen-addr`     | The address peers dial, for NAT and containers       |
+| `swarm`  | `--join-timeout <SECS>`   | `600`               | Limit for the whole cluster formation                |
+| `swarm`  | `--port <PORT>`           | `server.port`, else `8080` | HTTP API port. Leader only.                   |
+| `swarm`  | `--host <HOST>`           | `server.host`, else `0.0.0.0` | HTTP API host. Leader only.                |
+| `swarm`  | `--api-key <KEY>`         | `BLAZR_API_KEY`     | API key for the leader's HTTP API                    |
+| `disagg` | `--role <ROLE>`           | `router`            | `router`, `prefill`, or `decode`                     |
+| `disagg` | `-m`, `--model <NAME>`    | `default_model` (workers) | Required. Workers load it. The router reads its tokenizer and chat template from `--model` only. |
+| `disagg` | `--router-addr <ADDR>`    | unset               | The router's seed address. Required for every role: the router binds it, and the workers dial it. |
+| `disagg` | `--prefill-count <N>`     | `1`                 | Prefill workers. The same on every node.             |
+| `disagg` | `--decode-count <N>`      | `1`                 | Decode workers. The same on every node.              |
+| `disagg` | `--index <N>`             | `0`                 | Worker index in its role. Prefill `i` is rank `1 + i`, decode `i` is rank `1 + prefill-count + i`. The router refuses it. |
+| `disagg` | `--cluster-token <TOKEN>` | `NEXAR_CLUSTER_TOKEN` | Shared secret. Required when an address is not loopback. |
+| `disagg` | `--listen-addr <ADDR>`    | `0.0.0.0:9191`      | Mesh listener. The port carries UDP and TCP.         |
+| `disagg` | `--advertise-addr <ADDR>` | `--listen-addr`     | The address peers dial, for NAT and containers       |
+| `disagg` | `--join-timeout <SECS>`   | `600`               | Limit for the whole cluster formation                |
+| `disagg` | `--port <PORT>`           | `server.port`, else `8080` | HTTP API port. Router only.                   |
+| `disagg` | `--host <HOST>`           | `server.host`, else `0.0.0.0` | HTTP API host. Router only.                |
 
-The swarm leader and the disaggregated router take the `server` section. Every role finds its model in `model_dir`, on the `device` index. The disaggregated router loads no weights. It refuses a request that sets a grammar or constraint, mirostat, DRY, typical-p, dynamic temperature, `logit_bias` or `logprobs` with `400`. See [Deployment](deployment.md).
+The swarm leader and the disaggregated router take the `server` section. Every role finds its model in `model_dir`, on the `device` index. The disaggregated router loads no weights. It refuses a request that sets a grammar or constraint, mirostat, DRY, typical-p, dynamic temperature, `logit_bias` or `logprobs` with `400`. Every node of a cluster runs as its own process. [Deployment](deployment.md#multi-host-setup) covers the seed address, the token, the firewall ports and the shutdown.
 
 The narration commands `speak`, `transcribe`, and `sound-review` need the `audio` feature. Their flags live in `src/cli/narration/` and this page does not list them.
 
@@ -537,6 +544,7 @@ Blazr reads no `.env` file. Export these variables before the command runs.
 | `BLAZR_MODEL_DIR`     | `./models`                    | `serve`, `list`, `info`, `pull`, `swarm`, the server pull handler, disaggregated forward | Model directory                                                                                                                                                       |
 | `BLAZR_API_KEY`       | unset                         | `serve --api-key`, `swarm --api-key`                                                                        | API key                                                                                                                                                               |
 | `BLAZR_SWARM_TOKEN`   | unset                         | `swarm --token`                                                                          | Swarm shared secret                                                                                                                                                   |
+| `NEXAR_CLUSTER_TOKEN` | unset                         | `disagg --cluster-token`, nexar                                                          | Cluster shared secret                                                                                                                                                 |
 | `BLAZR_VOICE_DIR`     | unset                         | `serve --voice-dir`                                                                      | Kokoro voice directory when the flag is unset                                                                                                                         |
 | `BLAZR_TP_SIZE`       | unset                         | `serve`                                                                                  | Tensor parallel degree. Overrides `inference.tensor_parallel_size`. A value that is not a whole number is an error. `serve` returns an error above `1` in a build without `cuda` and `nccl`. The scheduler also returns an error above `1` without both features. |
 | `BLAZR_TP_RANK`       | unset                         | Scheduler model load, `cuda` and `nccl` builds                                           | Refused. Every rank runs as a thread of one process, so a set value is a load error                                                                                   |

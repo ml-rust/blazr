@@ -273,73 +273,24 @@ async fn run() -> Result<()> {
             blazr::cli::convert(input, output, format, quantization, verbose)?;
         }
         #[cfg(feature = "distributed")]
-        Commands::Swarm {
-            role,
-            token,
-            model,
-            leader,
-            swarm_port,
-            port,
-            host,
-            api_key,
-            mdns,
-        } => {
+        Commands::Swarm(args) => {
             let settings = cluster_settings(ClusterFlags {
-                model,
-                port,
-                host,
-                api_key,
+                model: args.model.clone(),
+                port: args.port,
+                host: args.host.clone(),
+                api_key: args.api_key.clone(),
             })?;
-            blazr::cli::swarm(role, token, leader, swarm_port, mdns, settings).await?;
+            blazr::cli::swarm(args, settings).await?;
         }
         #[cfg(feature = "distributed")]
-        Commands::Disagg {
-            role,
-            model,
-            listen_addr,
-            router_addr,
-            prefill,
-            decode,
-            port,
-            host,
-        } => {
+        Commands::Disagg(args) => {
             let settings = cluster_settings(ClusterFlags {
-                model,
-                port,
-                host,
+                model: args.model.clone(),
+                port: args.port,
+                host: args.host.clone(),
                 api_key: None,
             })?;
-            match role.as_str() {
-                "router" => {
-                    let prefill_addrs = prefill.unwrap_or_default();
-                    let decode_addrs = decode.unwrap_or_default();
-                    blazr::cli::run_disagg_router(
-                        listen_addr,
-                        prefill_addrs,
-                        decode_addrs,
-                        &settings,
-                    )
-                    .await?;
-                }
-                "prefill" => {
-                    let raddr = router_addr.ok_or_else(|| {
-                        anyhow::anyhow!("--router-addr is required for disagg prefill role")
-                    })?;
-                    blazr::cli::run_disagg_prefill_worker(raddr, listen_addr, &settings).await?;
-                }
-                "decode" => {
-                    let raddr = router_addr.ok_or_else(|| {
-                        anyhow::anyhow!("--router-addr is required for disagg decode role")
-                    })?;
-                    blazr::cli::run_disagg_decode_worker(raddr, listen_addr, &settings).await?;
-                }
-                _ => {
-                    anyhow::bail!(
-                        "Invalid disagg role '{}'. Must be 'router', 'prefill', or 'decode'",
-                        role
-                    );
-                }
-            }
+            blazr::cli::run_disagg(args, &settings).await?;
         }
         Commands::Decision(command) => blazr::cli::decision(command).await?,
         Commands::Completions { shell } => {

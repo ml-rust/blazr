@@ -1,30 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use super::args::{DtypeArgs, LoraArgs, RuntimeArgs, SamplingArgs, VisionArgs};
-
-/// The optional features this binary is built with, as `--version` lists
-/// them after the version: `0.1.1 (audio, cuda)`.
-const FEATURES: [(&str, bool); 5] = [
-    ("audio", cfg!(feature = "audio")),
-    ("cuda", cfg!(feature = "cuda")),
-    ("wgpu", cfg!(feature = "wgpu")),
-    ("nccl", cfg!(feature = "nccl")),
-    ("distributed", cfg!(feature = "distributed")),
-];
-
-/// The `--version` text: the crate version, then the built features.
-static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    let built: Vec<&str> = FEATURES
-        .iter()
-        .filter(|(_, on)| *on)
-        .map(|(name, _)| *name)
-        .collect();
-    if built.is_empty() {
-        env!("CARGO_PKG_VERSION").to_string()
-    } else {
-        format!("{} ({})", env!("CARGO_PKG_VERSION"), built.join(", "))
-    }
-});
+use super::version::VERSION;
 
 /// Blazr - Blazing-fast inference server for LLMs
 #[derive(Parser)]
@@ -362,81 +339,11 @@ pub enum Commands {
 
     /// Join or start a distributed inference swarm
     #[cfg(all(feature = "distributed", feature = "server"))]
-    Swarm {
-        /// Role: "leader" or "worker"
-        #[arg(long, default_value = "worker")]
-        role: String,
-
-        /// Shared secret token for swarm membership
-        #[arg(long, env = "BLAZR_SWARM_TOKEN")]
-        token: String,
-
-        /// Model to serve (leader only) [default: default_model]
-        #[arg(long, short)]
-        model: Option<String>,
-
-        /// Leader address to connect to (worker only, e.g., "192.168.1.10:9090")
-        #[arg(long)]
-        leader: Option<String>,
-
-        /// Port for nexar transport
-        #[arg(long, default_value = "9090")]
-        swarm_port: u16,
-
-        /// Port for HTTP API (leader only) [default: server.port, else 8080]
-        #[arg(long)]
-        port: Option<u16>,
-
-        /// Host for HTTP API (leader only) [default: server.host, else 0.0.0.0]
-        #[arg(long)]
-        host: Option<String>,
-
-        /// API key for the leader's HTTP API [default: $BLAZR_API_KEY]
-        #[arg(long)]
-        api_key: Option<String>,
-
-        /// Enable mDNS auto-discovery on LAN
-        #[arg(long)]
-        mdns: bool,
-    },
+    Swarm(super::cluster_args::SwarmArgs),
 
     /// Run a disaggregated prefill/decode router or worker
     #[cfg(all(feature = "distributed", feature = "server"))]
-    Disagg {
-        /// Role: "router", "prefill", or "decode"
-        #[arg(long, default_value = "router")]
-        role: String,
-
-        /// Model. Router: required, the tokenizer and chat template source
-        /// (no weights load). Prefill and decode: the model to load
-        /// [default: default_model]
-        #[arg(long, short, required_if_eq("role", "router"))]
-        model: Option<String>,
-
-        /// Address for this node to listen on
-        #[arg(long, default_value = "0.0.0.0:9190")]
-        listen_addr: String,
-
-        /// Router address to connect to (required for prefill and decode roles)
-        #[arg(long)]
-        router_addr: Option<String>,
-
-        /// Prefill worker addresses (router role only, e.g., "192.168.1.2:9191")
-        #[arg(long, num_args = 1..)]
-        prefill: Option<Vec<String>>,
-
-        /// Decode worker addresses (router role only, e.g., "192.168.1.3:9192")
-        #[arg(long, num_args = 1..)]
-        decode: Option<Vec<String>>,
-
-        /// HTTP API port (router role only) [default: server.port, else 8080]
-        #[arg(long)]
-        port: Option<u16>,
-
-        /// HTTP API host (router role only) [default: server.host, else 0.0.0.0]
-        #[arg(long)]
-        host: Option<String>,
-    },
+    Disagg(super::cluster_args::DisaggArgs),
 
     /// Narration from a script: the voiceover WAV, its script, its phrase
     /// spans, and every phrase heard back with Whisper. Exits 1 when a
@@ -469,18 +376,4 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_names_each_built_feature() {
-        assert!(VERSION.starts_with(env!("CARGO_PKG_VERSION")));
-        assert_eq!(VERSION.contains("(audio"), cfg!(feature = "audio"));
-        assert_eq!(VERSION.contains("cuda"), cfg!(feature = "cuda"));
-        assert_eq!(VERSION.contains("wgpu"), cfg!(feature = "wgpu"));
-        assert_eq!(VERSION.contains('('), FEATURES.iter().any(|(_, on)| *on));
-    }
 }

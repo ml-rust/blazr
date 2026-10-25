@@ -449,48 +449,58 @@ cargo build --release --features cuda,distributed    # CUDA
 
 ### Swarm
 
-The `swarm` command runs one leader and any number of workers. Each node listens on `0.0.0.0:<swarm-port>`. Open `--swarm-port` between all nodes.
+The `swarm` command runs one leader and `--workers` workers, one process per node. The leader binds nexar's seed and holds rank 0. Workers take ranks 1 to `--workers` in the order they join. Rank `r` runs pipeline stage `r`, a contiguous range of layers, and the leader runs stage 0.
 
 Leader:
 
 ```bash
-BLAZR_SWARM_TOKEN=<shared-secret> blazr swarm --role leader --model <name> --swarm-port 9090 --port 8080
+export BLAZR_SWARM_TOKEN=<shared-secret>
+blazr swarm --role leader --model <name> --workers 2 --listen-addr <leader-ip>:9091 --swarm-port 9090 --port 8080
 ```
 
-Worker, with a known leader address:
+Worker, once per worker node:
 
 ```bash
-BLAZR_SWARM_TOKEN=<shared-secret> blazr swarm --role worker --leader <leader-host>:9090
+export BLAZR_SWARM_TOKEN=<shared-secret>
+blazr swarm --role worker --workers 2 --leader <leader-ip>:9090
 ```
 
-Worker, with LAN discovery:
+The leader sends each worker its layer range and the model path, and starts the HTTP server once every worker loaded its model. The path is the leader's `model_dir` joined with the model name, so every node must hold the model at that path. The leader serves every HTTP request with its own full copy of the model. The HTTP server does not route generation through the workers.
 
-```bash
-BLAZR_SWARM_TOKEN=<shared-secret> blazr swarm --role worker --mdns
-```
+| Flag               | Default             | Required     | Purpose                                                                  |
+| ------------------ | ------------------- | ------------ | ------------------------------------------------------------------------ |
+| `--token`          | `BLAZR_SWARM_TOKEN` | Yes          | Shared secret. It is the nexar cluster token.                            |
+| `--role`           | `worker`            | No           | `leader` or `worker`.                                                    |
+| `--workers`        | `1`                 | No           | Number of worker nodes. Every node passes the same value. `0` runs the leader alone. |
+| `--model`, `-m`    | `default_model`     | Leader only  | Model to serve.                                                          |
+| `--leader`         | none                | Worker       | The leader's seed address, for example `192.168.1.10:9090`.              |
+| `--swarm-port`     | `9090`              | No           | UDP port of the leader's seed, on the `--listen-addr` IP. Leader only.   |
+| `--listen-addr`    | `0.0.0.0:9091`      | No           | This node's mesh listener. The port carries UDP and TCP.                 |
+| `--advertise-addr` | `--listen-addr`     | See below    | The address peers dial to reach this node.                               |
+| `--join-timeout`   | `600`               | No           | Seconds every node waits for the whole cluster to form.                  |
+| `--port`           | `server.port`, else `8080` | No    | HTTP API port. Leader only.                                              |
+| `--host`           | `server.host`, else `0.0.0.0` | No | HTTP API address. Leader only.                                           |
+| `--api-key`        | `BLAZR_API_KEY`     | No           | API key for the leader's HTTP API.                                       |
 
-| Flag            | Default             | Required                         | Purpose                                          |
-| --------------- | ------------------- | -------------------------------- | ------------------------------------------------ |
-| `--token`       | `BLAZR_SWARM_TOKEN` | Yes, all roles                   | Shared secret for swarm membership.              |
-| `--role`        | `worker`            | No                               | `leader` or `worker`.                            |
-| `--model`, `-m` | `default_model`     | Leader only                      | Model to serve.                                  |
-| `--leader`      | none                | Worker, unless `--mdns` is set   | Leader address, for example `192.168.1.10:9090`. |
-| `--mdns`        | off                 | Worker, unless `--leader` is set | Enable mDNS discovery on the LAN.                |
-| `--swarm-port`  | `9090`              | No                               | Port for the swarm transport.                    |
-| `--port`        | `server.port`, else `8080` | No                        | HTTP API port. Leader only.                      |
-| `--host`        | `server.host`, else `0.0.0.0` | No                     | HTTP API address. Leader only.                   |
-| `--api-key`     | `BLAZR_API_KEY`     | No                               | API key for the leader's HTTP API.               |
-
-Pass the token through `BLAZR_SWARM_TOKEN`. A `--token` flag shows the token in the process list.
+The `--mdns` flag is removed. A worker needs `--leader`.
 
 ### Disaggregated prefill and decode
 
-The `disagg` command runs three roles: `router`, `prefill`, and `decode`.
+The `disagg` command runs three roles: `router`, `prefill`, and `decode`, one process per node. The router binds nexar's seed on `--router-addr` and holds rank 0. Each worker joins with the rank of its role and `--index`:
+
+| Role      | `--index` | Rank                          |
+| --------- | --------- | ----------------------------- |
+| `router`  | none      | `0`                           |
+| `prefill` | `i`       | `1 + i`                       |
+| `decode`  | `i`       | `1 + --prefill-count + i`     |
+
+Every node passes the same `--router-addr`, `--prefill-count` and `--decode-count`. The ranks do not depend on start order.
 
 Router:
 
 ```bash
-blazr disagg --role router --model <name> --listen-addr 0.0.0.0:9190 --prefill <prefill-host>:9191 --decode <decode-host>:9192 --port 8080
+export NEXAR_CLUSTER_TOKEN=<shared-secret>
+blazr disagg --role router --model <name> --router-addr <router-ip>:9190 --prefill-count 1 --decode-count 1 --port 8080
 ```
 
 The router loads the config, tokenizer and chat template of `--model`, and no weights. Name the model the workers load. The router serves the full HTTP API of `blazr serve`: OpenAI completions and chat, streaming, stop sequences, usage, the Anthropic and Ollama routes, auth through `BLAZR_API_KEY`, and `/metrics`. It serves `--model` only. A request for another model is a `404`.
@@ -510,27 +520,53 @@ Embeddings return `501`. Image inputs and LoRA variants are not served. GDN (`qw
 Prefill worker:
 
 ```bash
-blazr disagg --role prefill --model <name> --router-addr <router-host>:9190 --listen-addr 0.0.0.0:9191
+export NEXAR_CLUSTER_TOKEN=<shared-secret>
+blazr disagg --role prefill --model <name> --router-addr <router-ip>:9190 --prefill-count 1 --decode-count 1 --index 0
 ```
 
 Decode worker:
 
 ```bash
-blazr disagg --role decode --model <name> --router-addr <router-host>:9190 --listen-addr 0.0.0.0:9192
+export NEXAR_CLUSTER_TOKEN=<shared-secret>
+blazr disagg --role decode --model <name> --router-addr <router-ip>:9190 --prefill-count 1 --decode-count 1 --index 0
 ```
 
-| Flag            | Role     | Default        | Required for        | Purpose                                              |
-| --------------- | -------- | -------------- | ------------------- | ---------------------------------------------------- |
-| `--role`        | all      | `router`       | No                  | `router`, `prefill`, or `decode`. Other values fail. |
-| `--model`, `-m` | all      | `default_model` (workers) | All roles. The router takes `--model` only. | Workers: model to load. Router: tokenizer and chat template source. |
-| `--router-addr` | all      | none           | `prefill`, `decode` | Router address to connect to.                        |
-| `--listen-addr` | all      | `0.0.0.0:9190` | No                  | Address the node listens on.                         |
-| `--prefill`     | `router` | none           | No                  | One or more prefill worker addresses.                |
-| `--decode`      | `router` | none           | No                  | One or more decode worker addresses.                 |
-| `--port`        | `router` | `server.port`, else `8080` | No      | HTTP API port.                                       |
-| `--host`        | `router` | `server.host`, else `0.0.0.0` | No   | HTTP API address.                                    |
+A worker loads its model, then joins the cluster. The router starts the HTTP server once every worker joined.
 
-All roles default to `0.0.0.0:9190`. Set a distinct `--listen-addr` on each node that shares a host. The router refuses an empty `--prefill` or `--decode` list. Pass at least one address of each kind.
+| Flag               | Role     | Default               | Required for          | Purpose                                                       |
+| ------------------ | -------- | --------------------- | --------------------- | ------------------------------------------------------------- |
+| `--role`           | all      | `router`              | No                    | `router`, `prefill`, or `decode`. Other values fail.          |
+| `--model`, `-m`    | all      | `default_model` (workers) | All roles. The router takes `--model` only. | Workers: model to load. Router: tokenizer and chat template source. |
+| `--router-addr`    | all      | none                  | All roles             | The router's seed address. The router binds it, and each worker dials it. |
+| `--prefill-count`  | all      | `1`                   | No                    | Number of prefill workers. The same on every node.            |
+| `--decode-count`   | all      | `1`                   | No                    | Number of decode workers. The same on every node.             |
+| `--index`          | workers  | `0`                   | Each worker past the first of its role | This worker's index in its role. The router refuses it. |
+| `--cluster-token`  | all      | `NEXAR_CLUSTER_TOKEN` | Non-loopback addresses | Shared secret of the cluster.                                |
+| `--listen-addr`    | all      | `0.0.0.0:9191`        | No                    | This node's mesh listener. The port carries UDP and TCP.      |
+| `--advertise-addr` | all      | `--listen-addr`       | See below             | The address peers dial to reach this node.                    |
+| `--join-timeout`   | all      | `600`                 | No                    | Seconds every node waits for the whole cluster to form.       |
+| `--port`           | `router` | `server.port`, else `8080` | No               | HTTP API port.                                                |
+| `--host`           | `router` | `server.host`, else `0.0.0.0` | No            | HTTP API address.                                             |
+
+An `--index` at or past its role's count fails at start and names both flags. Two workers with one index fail with `rank N is not free`. The `--prefill` and `--decode` address lists are removed: the counts replace them.
+
+### Multi-host setup
+
+Both commands form one nexar cluster: one process per rank, joined through the seed. Set these on every host:
+
+- **Seed address:** `swarm` workers pass the leader's `--listen-addr` IP and `--swarm-port` as `--leader`. `disagg` nodes pass the same `--router-addr`. The seed port carries UDP.
+- **Token:** use one secret on every node. The bootstrap connection does not verify the seed's certificate, so the token is the only defense against a stranger who joins or poses as the seed. A seed, `--listen-addr` or `--advertise-addr` that is not loopback requires a token. Without one, the node fails at start and names the address and the flag. Pass the token through the variable: a flag shows in the process list.
+- **Firewall:** open the seed port for UDP on the seed host. Open each node's `--listen-addr` port for UDP (QUIC) and TCP (the bulk sidecar).
+- **NAT and containers:** set `--advertise-addr` to the address peers can reach. Publish the mesh port for both UDP and TCP. The seed node joins its own seed over loopback, so the seed cannot see its address. When both its seed and its `--listen-addr` bind `0.0.0.0`, it refuses to start without `--advertise-addr`. A worker with an unspecified IP advertises the IP the seed sees.
+- **Shared hosts:** give each node on one host its own `--listen-addr` port.
+- **Timeout:** `--join-timeout` bounds the whole formation on every node. `disagg` workers load their model before they join, so set it above the slowest model load.
+- **nexar config:** set the same `NEXAR_*` variables on every node. A bulk sidecar mismatch (`NEXAR_ENABLE_TCP_BULK_SIDECAR`, `NEXAR_ENCRYPT_BULK_TRANSPORT`) fails formation.
+
+A formation error names its cause and its fix: a token mismatch, a rank already taken, a world size that differs between nodes, or nodes that did not join in time.
+
+### Shutdown
+
+SIGINT or SIGTERM on the leader or router stops its HTTP server. It then sends every worker a shutdown notice. Each worker finishes the request in progress and leaves its loop. Every node then runs the nexar shutdown: it flushes the bulk sidecars and exchanges a done signal with each peer before it closes, so no sent data is lost. SIGINT or SIGTERM on a worker runs the same shutdown on that worker. A peer that does not answer within `NEXAR_BARRIER_TIMEOUT_SECS` (default `30`) is logged as a warning, and its connection closes anyway.
 
 ### Tensor parallelism
 
@@ -545,7 +581,8 @@ Blazr reads no `.env` file. Export these variables before the command runs.
 | `BLAZR_MODEL_DIR`                | `serve`, `pull`, `list`, `info` | Model directory. Then `model_dir`, then `./models`.    |
 | `BLAZR_API_KEY`                  | `serve`, `swarm`                | API key, when `--api-key` is absent.                   |
 | `BLAZR_VOICE_DIR`                | `serve`                         | Kokoro voice directory, when `--voice-dir` is absent.  |
-| `BLAZR_SWARM_TOKEN`              | `swarm`                         | Swarm membership token.                                |
+| `BLAZR_SWARM_TOKEN`              | `swarm`                         | Swarm token, when `--token` is absent.                 |
+| `NEXAR_CLUSTER_TOKEN`            | `disagg`                        | Cluster token, when `--cluster-token` is absent.       |
 | `BLAZR_TP_SIZE`, `BLAZR_TP_RANK` | `serve`, model loader           | Tensor parallel size. A set rank is refused.           |
 | `HF_HOME`, `HF_HUB_CACHE`        | `serve`, `pull`                 | Hugging Face cache location.                           |
 | `HF_HUB_OFFLINE`                 | `serve`                         | Blocks Hugging Face fetches when set.                  |

@@ -12,24 +12,23 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use colored::Colorize;
-use nexar::{NexarClient, Rank};
 
 use super::disaggregated_forward::{build_decode_open_fn, build_prefill_fn, check_disagg_model};
+use super::disaggregated_layout::DisaggLayout;
+use super::disaggregated_mesh::{
+    bind_seed, role_name, router_client, serve_decode, serve_prefill, start_router, stop_router,
+    worker_client,
+};
 use super::disaggregated_router::{router_executor, router_serving};
+use super::mesh::{after_shutdown, parse_addr, MeshSettings};
+use crate::cli::DisaggArgs;
 use crate::config::ClusterSettings;
-use crate::distributed::disaggregated::{DecodeWorker, DisaggConfig, DisaggRouter, PrefillWorker};
-use crate::distributed::transport;
+use crate::distributed::disaggregated::DisaggRole;
 use crate::engine::{Executor, Scheduler};
 use crate::runtime::ServerRuntime;
 use crate::server::{start_with_batch, LiveSettings};
-
-/// The largest serialized KV cache one request transfers.
-const MAX_KV_TRANSFER_BYTES: usize = 2 * 1024 * 1024 * 1024;
-
-/// The router's nexar rank.
-const ROUTER_RANK: Rank = 0;
 
 fn banner(role: &str, lines: &[(&str, String)]) {
     eprintln!();
@@ -45,37 +44,52 @@ fn banner(role: &str, lines: &[(&str, String)]) {
     eprintln!();
 }
 
-/// Run a disaggregated router.
-///
-/// The router loads the config, tokenizer and chat template of the model
-/// `settings` names, and no weights. It serves the whole HTTP API that
-/// `blazr serve` serves, and each generation runs on a prefill and a decode
-/// worker. `settings.server` holds the HTTP host and port.
+/// Run one `disagg` node: the router, a prefill worker or a decode worker.
 ///
 /// # Errors
 ///
-/// No `--model`, no prefill or decode address, a model whose tokenizer does
-/// not load, a failed nexar bootstrap, or a server that does not start.
-pub async fn run_disagg_router(
-    listen_addr: String,
-    prefill_addrs: Vec<String>,
-    decode_addrs: Vec<String>,
+/// See [`run_disagg_router`] and [`run_disagg_worker`].
+pub async fn run_disagg(args: DisaggArgs, settings: &ClusterSettings) -> Result<()> {
+    let layout =
+        DisaggLayout::resolve(args.role, args.index, args.prefill_count, args.decode_count)?;
+    match layout.role {
+        DisaggRole::Router => run_disagg_router(&args, &layout, settings).await,
+        DisaggRole::Prefill | DisaggRole::Decode => {
+            run_disagg_worker(&args, &layout, settings).await
+        }
+    }
+}
+
+/// Run a disaggregated router.
+///
+/// The router loads the config, tokenizer and chat template of the model
+/// `settings` names, and no weights. It binds the seed on `--router-addr`,
+/// waits until every worker joins, and serves the whole HTTP API that
+/// `blazr serve` serves. Each generation runs on a prefill and a decode
+/// worker. `settings.server` holds the HTTP host and port. When the server
+/// stops, the router stops every worker and shuts down its nexar client.
+///
+/// # Errors
+///
+/// No `--model`, a model whose tokenizer does not load, a bad address, a
+/// failed nexar formation, or a server that does not start.
+async fn run_disagg_router(
+    args: &DisaggArgs,
+    layout: &DisaggLayout,
     settings: &ClusterSettings,
 ) -> Result<()> {
     let model = settings.router_model().map_err(anyhow::Error::msg)?;
-    if prefill_addrs.is_empty() {
-        bail!("the router needs at least one --prefill address");
-    }
-    if decode_addrs.is_empty() {
-        bail!("the router needs at least one --decode address");
-    }
+    let router_addr = parse_addr("--router-addr", &args.router_addr)?;
+    let mesh = MeshSettings::parse(&args.listen_addr, &args.mesh, args.cluster_token.clone())?;
+    mesh.check_seed_reachable(router_addr, "--router-addr", layout.world_size())?;
     banner(
         "router",
         &[
             ("Model", model.clone()),
-            ("Listen", listen_addr),
-            ("Prefill workers", format!("{prefill_addrs:?}")),
-            ("Decode workers", format!("{decode_addrs:?}")),
+            ("Seed", router_addr.to_string()),
+            ("Mesh", mesh.listen.to_string()),
+            ("Prefill workers", args.prefill_count.to_string()),
+            ("Decode workers", args.decode_count.to_string()),
             ("HTTP API", settings.server.addr()),
         ],
     );
@@ -91,36 +105,21 @@ pub async fn run_disagg_router(
     })?;
     let executor = router_executor(&path, device)?;
 
-    let num_prefill = prefill_addrs.len() as u32;
-    let num_decode = decode_addrs.len() as u32;
-    let world_size = 1 + num_prefill + num_decode;
-    let clients = NexarClient::bootstrap_local(world_size, transport::cpu_adapter())
-        .await
-        .map_err(|e| anyhow!("router nexar bootstrap failed: {e}"))?;
-    let client = Arc::new(
-        clients
-            .into_iter()
-            .find(|c| c.rank() == ROUTER_RANK)
-            .ok_or_else(|| anyhow!("the nexar bootstrap returned no rank {ROUTER_RANK}"))?,
-    );
-    // Ranks 1..=num_prefill prefill. The decode workers follow.
-    let config = DisaggConfig {
-        prefill_workers: (1..=num_prefill).collect(),
-        decode_workers: (num_prefill + 1..world_size).collect(),
-        router_rank: ROUTER_RANK,
-        max_kv_transfer_bytes: MAX_KV_TRANSFER_BYTES,
-    };
-    let router = Arc::new(DisaggRouter::new(client, config)?);
+    let cfg = mesh.cluster_config(layout.world_size(), Some(layout.rank));
+    let seed = bind_seed(router_addr, &cfg)?;
+    tracing::info!(seed = %seed.local_addr(), world_size = layout.world_size(), "Router waiting for workers");
+    let (router, client) = start_router(router_client(seed, &cfg).await?, layout)?;
     tracing::info!(
-        prefill_count = num_prefill,
-        decode_count = num_decode,
+        prefill_count = args.prefill_count,
+        decode_count = args.decode_count,
         "Disaggregated router ready"
     );
 
-    let (scheduler, serving) = router_serving(router, &model, path, executor, models).await;
+    let (scheduler, serving) =
+        router_serving(Arc::clone(&router), &model, path, executor, models).await;
     let server = settings.server.clone();
     let live = LiveSettings::fixed(&server);
-    start_with_batch(
+    let run = start_with_batch(
         scheduler,
         server,
         live,
@@ -133,27 +132,9 @@ pub async fn run_disagg_router(
         Vec::new(),
         None,
     )
-    .await
-}
-
-/// A worker's nexar client: connect to the router, then join the mesh.
-async fn worker_client(role: &str, router_addr: &str) -> Result<Arc<NexarClient>> {
-    let seed_addr: std::net::SocketAddr = router_addr
-        .parse()
-        .map_err(|e| anyhow!("invalid router address '{router_addr}': {e}"))?;
-    let node = nexar::WorkerNode::connect(seed_addr)
-        .await
-        .map_err(|e| anyhow!("{role} worker failed to connect to the router: {e}"))?;
-    let (rank, world_size) = (node.rank, node.world_size);
-    tracing::info!(rank, world_size, "{role} worker connected");
-    let clients = NexarClient::bootstrap_local(world_size, transport::cpu_adapter())
-        .await
-        .map_err(|e| anyhow!("{role} worker mesh formation failed: {e}"))?;
-    let client = clients
-        .into_iter()
-        .find(|c| c.rank() == rank)
-        .ok_or_else(|| anyhow!("{role} worker found no rank {rank} in the mesh"))?;
-    Ok(Arc::new(client))
+    .await;
+    let shutdown = stop_router(router, client).await;
+    after_shutdown("router", run, shutdown)
 }
 
 /// The started executor of the model `settings` names, checked for the
@@ -177,86 +158,44 @@ async fn worker_executor(
     Ok(executor)
 }
 
-/// Run a disaggregated prefill worker.
+/// Run a disaggregated prefill or decode worker.
 ///
-/// It loads the model `settings` names, joins the router's mesh and serves
-/// prefill requests until the router disconnects.
-///
-/// # Errors
-///
-/// No model, a model the KV handoff cannot carry, or a failed connection.
-pub async fn run_disagg_prefill_worker(
-    router_addr: String,
-    listen_addr: String,
-    settings: &ClusterSettings,
-) -> Result<()> {
-    banner(
-        "prefill",
-        &[
-            ("Model", settings.model.clone().unwrap_or_default()),
-            ("Router", router_addr.clone()),
-            ("Listen", listen_addr),
-        ],
-    );
-    let executor = worker_executor("prefill", settings).await?;
-    let client = worker_client("prefill", &router_addr).await?;
-    let rank = client.rank();
-    let sampler = <ServerRuntime as boostr::Runtime>::default_client(executor.device());
-    let worker = PrefillWorker::new(
-        client,
-        rank,
-        ROUTER_RANK,
-        MAX_KV_TRANSFER_BYTES,
-        sampler,
-        build_prefill_fn(executor),
-    );
-    tracing::info!(rank, "Prefill worker entering run loop");
-    worker.run_loop().await?;
-    eprintln!("\n  Prefill worker shutting down.");
-    Ok(())
-}
-
-/// Run a disaggregated decode worker.
-///
-/// It loads the model `settings` names, joins the router's mesh and serves
-/// KV handoffs until every prefill worker disconnects.
+/// It loads the model `settings` names, joins the router's cluster with
+/// the rank of its role and `--index`, and serves until the router stops it
+/// or a signal arrives. Then it shuts down its nexar client.
 ///
 /// # Errors
 ///
-/// No model, a model the KV handoff cannot carry, or a failed connection.
-pub async fn run_disagg_decode_worker(
-    router_addr: String,
-    listen_addr: String,
+/// No model, a model the KV handoff cannot carry, a bad address, or a failed
+/// nexar formation.
+async fn run_disagg_worker(
+    args: &DisaggArgs,
+    layout: &DisaggLayout,
     settings: &ClusterSettings,
 ) -> Result<()> {
+    let role = role_name(layout.role);
+    let router_addr = parse_addr("--router-addr", &args.router_addr)?;
+    let mesh = MeshSettings::parse(&args.listen_addr, &args.mesh, args.cluster_token.clone())?;
     banner(
-        "decode",
+        role,
         &[
             ("Model", settings.model.clone().unwrap_or_default()),
-            ("Router", router_addr.clone()),
-            ("Listen", listen_addr),
+            ("Router", router_addr.to_string()),
+            ("Mesh", mesh.listen.to_string()),
+            ("Rank", layout.rank.to_string()),
         ],
     );
-    let executor = worker_executor("decode", settings).await?;
-    let client = worker_client("decode", &router_addr).await?;
-    let rank = client.rank();
-    // Each rank between the router and this one gets a handoff listener.
-    // A decode rank among them sends no handoff, so its listener stays idle.
-    let prefill_workers: Vec<Rank> = (1..rank).collect();
+    let executor = worker_executor(role, settings).await?;
+    let cfg = mesh.cluster_config(layout.world_size(), Some(layout.rank));
+    let client = worker_client(layout, router_addr, &cfg).await?;
     let sampler = <ServerRuntime as boostr::Runtime>::default_client(executor.device());
-    let worker = DecodeWorker::new(
-        client,
-        rank,
-        ROUTER_RANK,
-        prefill_workers,
-        MAX_KV_TRANSFER_BYTES,
-        sampler,
-        build_decode_open_fn(executor),
-    );
-    tracing::info!(rank, "Decode worker entering run loop");
-    worker.run_loop().await?;
-    eprintln!("\n  Decode worker shutting down.");
-    Ok(())
+    let result = if layout.role == DisaggRole::Prefill {
+        serve_prefill(client, layout, sampler, build_prefill_fn(executor)).await
+    } else {
+        serve_decode(client, layout, sampler, build_decode_open_fn(executor)).await
+    };
+    eprintln!("\n  {role} worker shut down.");
+    result
 }
 
 #[cfg(test)]
@@ -271,24 +210,67 @@ mod tests {
 
     #[test]
     fn the_router_role_requires_model() {
-        let err = parse(&[
+        let err = parse(&["disagg", "--role", "router", "--router-addr", "a:1"])
+            .err()
+            .expect("a router without --model is refused");
+        assert!(err.to_string().contains("--model"), "{err}");
+        let ok = &[
             "disagg",
             "--role",
             "router",
-            "--prefill",
+            "--model",
+            "m",
+            "--router-addr",
             "a:1",
-            "--decode",
-            "b:2",
-        ])
-        .err()
-        .expect("a router without --model is refused");
-        assert!(err.to_string().contains("--model"), "{err}");
-        assert!(parse(&["disagg", "--role", "router", "--model", "m"]).is_ok());
+        ];
+        assert!(parse(ok).is_ok());
     }
 
     #[test]
     fn a_worker_role_takes_its_model_from_the_config() {
         assert!(parse(&["disagg", "--role", "prefill", "--router-addr", "a:1"]).is_ok());
         assert!(parse(&["disagg", "--role", "decode", "--router-addr", "a:1"]).is_ok());
+    }
+
+    #[test]
+    fn every_role_needs_the_router_address_and_an_unknown_role_is_refused() {
+        let err = parse(&["disagg", "--role", "prefill"])
+            .err()
+            .expect("no --router-addr");
+        assert!(err.to_string().contains("--router-addr"), "{err}");
+        assert!(parse(&["disagg", "--role", "bogus", "--router-addr", "a:1"]).is_err());
+    }
+
+    #[test]
+    fn the_counts_index_and_token_parse() {
+        let cli = parse(&[
+            "disagg",
+            "--role",
+            "decode",
+            "--router-addr",
+            "10.0.0.1:9190",
+            "--prefill-count",
+            "2",
+            "--decode-count",
+            "3",
+            "--index",
+            "1",
+            "--cluster-token",
+            "s3cret",
+            "--advertise-addr",
+            "192.0.2.4:9191",
+        ])
+        .unwrap();
+        let crate::cli::Commands::Disagg(args) = cli.command else {
+            panic!("not the disagg command");
+        };
+        assert_eq!(
+            (args.prefill_count, args.decode_count, args.index),
+            (2, 3, Some(1))
+        );
+        assert_eq!(args.cluster_token.as_deref(), Some("s3cret"));
+        assert_eq!(args.mesh.advertise_addr.as_deref(), Some("192.0.2.4:9191"));
+        assert_eq!(args.mesh.join_timeout, 600);
+        assert_eq!(args.listen_addr, "0.0.0.0:9191");
     }
 }

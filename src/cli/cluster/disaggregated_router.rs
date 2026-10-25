@@ -68,18 +68,15 @@ pub(crate) async fn router_serving(
 #[cfg(all(test, not(any(feature = "cuda", feature = "wgpu"))))]
 mod tests {
     use anyhow::anyhow;
-    use axum::body::Body;
-    use axum::http::Request;
     use boostr::CpuDevice;
     use serde_json::{json, Value};
-    use tower::ServiceExt;
 
-    use super::super::disaggregated_test_rig::Cluster;
+    use super::super::disaggregated_test_rig::{app, ok, post, Cluster};
     use super::*;
     use crate::config::GenerationConfig;
     use crate::engine::batch_test_rig::alone_tokens;
     use crate::engine::test_support::seeded_full_vocab_executor;
-    use crate::server::handlers::{test_state, AppState};
+    use crate::server::handlers::test_state;
 
     const SEED: u64 = 0x0d15;
     const MODEL: &str = "m";
@@ -157,33 +154,6 @@ mod tests {
             assert_eq!(view(&got), view(&want), "temperature {}", cfg.temperature);
         }
         Ok(())
-    }
-
-    /// A server over `serving`, as `blazr serve` builds its state.
-    fn app(scheduler: Arc<Scheduler<ServerRuntime>>, serving: Serving) -> axum::Router {
-        let metrics = metrics_exporter_prometheus::PrometheusBuilder::new()
-            .build_recorder()
-            .handle();
-        let state = AppState::new(scheduler, metrics).with_serving(serving);
-        crate::server::api_routes().with_state(Arc::new(state))
-    }
-
-    async fn post(app: &axum::Router, path: &str, body: &Value) -> Result<(u16, String)> {
-        let request = Request::post(path)
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))?;
-        let response = app.clone().oneshot(request).await?;
-        let status = response.status().as_u16();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
-        Ok((status, String::from_utf8(bytes.to_vec())?))
-    }
-
-    async fn ok(app: &axum::Router, path: &str, body: &Value) -> Result<Value> {
-        let (status, raw) = post(app, path, body).await?;
-        if status != 200 {
-            return Err(anyhow!("{path} answered {status}: {raw}"));
-        }
-        Ok(serde_json::from_str(&raw)?)
     }
 
     /// The text, last finish reason and usage of an SSE completion stream.

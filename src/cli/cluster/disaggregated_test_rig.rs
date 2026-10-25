@@ -178,3 +178,175 @@ impl Drop for Cluster {
         }
     }
 }
+
+/// A server over `serving`, as `blazr serve` builds its state.
+pub(super) fn app(
+    scheduler: Arc<crate::engine::Scheduler<crate::runtime::ServerRuntime>>,
+    serving: crate::server::handlers::Serving,
+) -> axum::Router {
+    let metrics = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .build_recorder()
+        .handle();
+    let state = crate::server::handlers::AppState::new(scheduler, metrics).with_serving(serving);
+    crate::server::api_routes().with_state(Arc::new(state))
+}
+
+/// The status and body of a JSON `POST` of `body` to `path`.
+pub(super) async fn post(
+    app: &axum::Router,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<(u16, String)> {
+    use tower::ServiceExt;
+    let request = axum::http::Request::post(path)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))?;
+    let response = app.clone().oneshot(request).await?;
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((status, String::from_utf8(bytes.to_vec())?))
+}
+
+/// The JSON answer of a `POST` that must succeed.
+pub(super) async fn ok(
+    app: &axum::Router,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let (status, raw) = post(app, path, body).await?;
+    if status != 200 {
+        bail!("{path} answered {status}: {raw}");
+    }
+    Ok(serde_json::from_str(&raw)?)
+}
+
+/// The nodes of a cluster formed the production way, on the seeded model:
+/// the router binds a seed, and each worker joins with its requested rank.
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+pub(super) mod nodes {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use boostr::{CpuClient, CpuDevice};
+    use nexar::{ClusterConfig, SeedNode};
+    use serde_json::{json, Value};
+
+    use super::super::disaggregated_forward::{build_decode_open_fn, build_prefill_fn};
+    use super::super::disaggregated_layout::DisaggLayout;
+    use super::super::disaggregated_mesh::{
+        bind_seed, router_client, serve_decode, serve_prefill, start_router, stop_router,
+        worker_client,
+    };
+    use super::super::disaggregated_router::router_serving;
+    use super::super::mesh::{parse_addr, MeshSettings};
+    use super::{app, ok};
+    use crate::cli::{DisaggRoleArg, MeshArgs};
+    use crate::engine::test_support::seeded_full_vocab_executor;
+    use crate::engine::{Executor, Scheduler};
+    use crate::runtime::ServerRuntime;
+
+    pub(crate) const SEED: u64 = 0x0d15;
+    pub(crate) const MODEL: &str = "m";
+    pub(crate) const TOKEN: &str = "disagg-mesh-test-token";
+
+    pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
+        Ok(tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?)
+    }
+
+    pub(crate) fn layout(role: DisaggRoleArg) -> Result<DisaggLayout> {
+        let index = (role != DisaggRoleArg::Router).then_some(0);
+        DisaggLayout::resolve(role, index, 1, 1)
+    }
+
+    pub(crate) fn cfg(layout: &DisaggLayout) -> Result<ClusterConfig> {
+        let mesh = MeshArgs {
+            advertise_addr: None,
+            join_timeout: 60,
+        };
+        let settings = MeshSettings::parse("127.0.0.1:0", &mesh, Some(TOKEN.into()))?;
+        Ok(settings.cluster_config(layout.world_size(), Some(layout.rank)))
+    }
+
+    pub(crate) fn body() -> Value {
+        json!({"model": MODEL, "prompt": "Once upon a time", "max_tokens": 10, "temperature": 0})
+    }
+
+    /// The completion of `body()` on one process.
+    pub(crate) async fn plain_completion() -> Result<Value> {
+        let dir = model_dir()?;
+        let state = crate::server::handlers::test_state(dir.path());
+        state
+            .scheduler
+            .load_base(MODEL, |_| seeded_full_vocab_executor(SEED))
+            .await?;
+        let plain = crate::server::api_routes().with_state(Arc::new(state));
+        ok(&plain, "/v1/completions", &body()).await
+    }
+
+    /// A model directory that names `MODEL`, as the router and the plain server find it.
+    fn model_dir() -> Result<tempfile::TempDir> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join(MODEL))?;
+        std::fs::write(dir.path().join(MODEL).join("config.json"), "{}")?;
+        Ok(dir)
+    }
+
+    /// A router seed on a free loopback port.
+    pub(crate) fn seed() -> Result<SeedNode> {
+        bind_seed(
+            parse_addr("seed", "127.0.0.1:0")?,
+            &cfg(&layout(DisaggRoleArg::Router)?)?,
+        )
+    }
+
+    /// The router node: forms the cluster on `seed`, answers `body()`
+    /// through the workers, then stops them and shuts down.
+    pub(crate) async fn router_node(seed: SeedNode) -> Result<Value> {
+        let layout = layout(DisaggRoleArg::Router)?;
+        let client = router_client(seed, &cfg(&layout)?).await?;
+        let (router, client) = start_router(client, &layout)?;
+        let dir = model_dir()?;
+        let model = seeded_full_vocab_executor(SEED)?;
+        let executor = Executor::tokenizer_only(
+            model.config().clone(),
+            crate::tokenizer::from_pretrained("llama3")?,
+            CpuDevice::new(),
+            model.config().max_seq_len(),
+        )?;
+        let models = Scheduler::<ServerRuntime>::new(dir.path().to_path_buf(), CpuDevice::new());
+        let path = dir.path().join(MODEL);
+        let (scheduler, serving) =
+            router_serving(Arc::clone(&router), MODEL, path, executor, models).await;
+        let routed = app(scheduler, serving);
+        let got = ok(&routed, "/v1/completions", &body()).await;
+        drop(routed);
+        stop_router(router, client).await?;
+        got
+    }
+
+    /// A worker node: joins at `seed`, serves until the router stops it, and shuts down.
+    pub(crate) async fn worker_node(role: DisaggRoleArg, seed: SocketAddr) -> Result<()> {
+        let layout = layout(role)?;
+        let client = worker_client(&layout, seed, &cfg(&layout)?).await?;
+        let executor = Arc::new(seeded_full_vocab_executor(SEED)?);
+        let sampler = CpuClient::new(CpuDevice::new());
+        if role == DisaggRoleArg::Prefill {
+            serve_prefill(client, &layout, sampler, build_prefill_fn(executor)).await
+        } else {
+            serve_decode(client, &layout, sampler, build_decode_open_fn(executor)).await
+        }
+    }
+
+    pub(crate) fn assert_same(got: &Value, want: &Value) {
+        let choice = |v: &Value, f: &str| v["choices"][0][f].clone();
+        assert_eq!(choice(got, "text"), choice(want, "text"));
+        assert_eq!(choice(got, "finish_reason"), choice(want, "finish_reason"));
+        for field in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            assert_eq!(got["usage"][field], want["usage"][field], "{field}");
+        }
+    }
+}

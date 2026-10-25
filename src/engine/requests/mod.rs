@@ -3,6 +3,7 @@
 pub mod batch_decode;
 mod batch_emit;
 pub mod batch_engine;
+mod batch_engine_open;
 mod batch_prefill;
 mod batch_run;
 #[cfg(test)]
@@ -25,6 +26,4 @@ pub use engine_thread::{EngineThread, FailRequests, ThreadedScheduler};
 pub use queue_depth::{QueueDepth, Waiting};
 pub use request_registry::{CancelRequest, GenerationScheduler, RequestHandle, RequestRegistry};
 pub use request_scheduler::RequestScheduler;
-pub use slo_policy::SloBatchPolicy;
-pub use slots::SlotManager;
-pub use work_hold::WorkHold;
+pub use {slo_policy::SloBatchPolicy, slots::SlotManager, work_hold::WorkHold};

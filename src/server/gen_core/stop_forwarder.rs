@@ -1,61 +1,9 @@
 //! Stop-sequence cutting for one executor stream, on its decode thread.
 
-use super::stream_metrics::StreamMetrics;
-use super::stream_usage::StreamUsage;
+pub(super) use super::stop_forwarder_state::StopForwarder;
 use super::streaming::StreamToken;
-use crate::config::GenerationConfig;
 use crate::engine::decode_output::{DecodeOutput, Emit, StreamEnd};
-use crate::engine::{FinishReason, GeneratedToken, StopMatcher};
-
-/// Maps engine tokens to client items, cutting the text at the first stop
-/// sequence.
-///
-/// With `gen_config.logprobs` set, each item carries its engine token's
-/// logprobs. A token the matcher holds back then sends an empty-text item,
-/// so its logprob goes out when it arrives. Without logprobs it sends nothing.
-///
-/// A stream that ends with no finish token closes with `Length`, as the
-/// non-streaming collector reads it.
-///
-/// The item that carries the finish reason carries the token counts: the
-/// prompt ids and every engine token, held-back stop text included. A
-/// closed channel gets no final item.
-pub(super) struct StopForwarder {
-    matcher: StopMatcher,
-    /// Taken when the stream ends.
-    metrics: Option<StreamMetrics>,
-    prompt_len: usize,
-    logprobs: bool,
-    /// Names the path in the error log.
-    label: &'static str,
-    /// An engine error ended the stream, so it records no end metrics.
-    errored: bool,
-}
-
-impl StopForwarder {
-    pub(super) fn new(
-        prompt_len: usize,
-        gen_config: &GenerationConfig,
-        label: &'static str,
-    ) -> Self {
-        Self {
-            matcher: StopMatcher::new(&gen_config.stop_sequences),
-            metrics: Some(StreamMetrics::start(prompt_len)),
-            prompt_len,
-            logprobs: gen_config.logprobs,
-            label,
-            errored: false,
-        }
-    }
-
-    /// The token counts so far.
-    fn usage(&self) -> StreamUsage {
-        match &self.metrics {
-            Some(metrics) => metrics.usage(),
-            None => StreamUsage::new(self.prompt_len, 0),
-        }
-    }
-}
+use crate::engine::{FinishReason, GeneratedToken};
 
 impl DecodeOutput for StopForwarder {
     type Item = StreamToken;
@@ -110,7 +58,9 @@ impl DecodeOutput for StopForwarder {
 mod tests {
     use std::sync::Arc;
 
+    use super::super::stream_usage::StreamUsage;
     use super::*;
+    use crate::config::GenerationConfig;
 
     /// Forward `stream` through a [`StopForwarder`] to `tx` on this task.
     async fn forward_with_stop_sequences<S>(

@@ -6,13 +6,22 @@
 //! sequences and the finish reasons apply here, as the batching scheduler
 //! applies them, so every route, the streaming ones included, behaves as
 //! on `blazr serve`.
+//!
+//! A worker error fails its request only. A lost worker, or any other
+//! router error, marks the cluster down: `GET /health` then answers 503,
+//! and every new request is refused. A worker counts as lost when nexar
+//! reports its rank dead, or when the router ends a request because the
+//! worker's connection closed. The router itself fails the requests that
+//! the lost worker held.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use boostr::inference::scheduler::SequenceId;
+use nexar::Rank;
 use splintr::AnyTokenizer;
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
 use super::disaggregated_params::{disagg_refusal, finish_reason, generation_params};
@@ -37,17 +46,25 @@ pub struct DisaggScheduler {
     registry: Arc<RequestRegistry>,
     /// The stream task of each running request.
     tasks: Mutex<HashMap<SequenceId, AbortHandle>>,
+    /// The ranks nexar reports dead, from the router's client.
+    deaths: watch::Receiver<Vec<Rank>>,
+    /// Why the cluster can no longer serve. Set once, never cleared.
+    fault: Arc<OnceLock<String>>,
     me: Weak<DisaggScheduler>,
 }
 
 impl DisaggScheduler {
     /// A scheduler that routes through `router` and renders text with
     /// `tokenizer`.
+    ///
+    /// `deaths` is the `failure_watch` of the router's nexar client. A rank
+    /// it reports dead marks the cluster down.
     pub fn new(
         router: Arc<DisaggRouter>,
         tokenizer: Arc<AnyTokenizer>,
         eos_tokens: Vec<u32>,
         context_len: usize,
+        deaths: watch::Receiver<Vec<Rank>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             router,
@@ -56,6 +73,8 @@ impl DisaggScheduler {
             context_len,
             registry: Arc::new(RequestRegistry::new()),
             tasks: Mutex::new(HashMap::new()),
+            deaths,
+            fault: Arc::new(OnceLock::new()),
             me: me.clone(),
         })
     }
@@ -71,9 +90,19 @@ impl DisaggScheduler {
     }
 }
 
-/// The request error of a stream error item: a worker failure names its
-/// stage and rank, anything else passes through.
-fn stream_error(error: anyhow::Error) -> anyhow::Error {
+/// Records `reason` as the cluster's fault, once, and logs it.
+fn mark_down(fault: &OnceLock<String>, reason: String) {
+    if fault.set(reason.clone()).is_ok() {
+        tracing::error!("the disaggregated cluster is down: {reason}");
+    }
+}
+
+/// The request error of a router error.
+///
+/// A worker error names its stage and rank and fails its request only.
+/// Any other error is a lost worker or a broken router: it marks the
+/// cluster down through `fault`.
+fn stream_error(fault: &OnceLock<String>, error: anyhow::Error) -> anyhow::Error {
     match error.downcast_ref::<WorkerError>() {
         Some(w) => {
             let stage = match w.stage {
@@ -86,7 +115,11 @@ fn stream_error(error: anyhow::Error) -> anyhow::Error {
                 w.message
             )
         }
-        None => error.context("disaggregated generation failed"),
+        None => {
+            let reason = format!("{error:#}");
+            mark_down(fault, reason.clone());
+            anyhow!("the disaggregated cluster failed: {reason}. Restart every node")
+        }
     }
 }
 
@@ -98,6 +131,7 @@ struct StreamJob {
     router: Arc<DisaggRouter>,
     tokenizer: Arc<AnyTokenizer>,
     registry: Arc<RequestRegistry>,
+    fault: Arc<OnceLock<String>>,
     owner: Weak<DisaggScheduler>,
 }
 
@@ -120,9 +154,9 @@ impl StreamJob {
             .router
             .route_request_stream(&self.prompt, self.params.clone(), None)
             .await
-            .map_err(stream_error)?;
+            .map_err(|e| stream_error(&self.fault, e))?;
         while let Some(item) = tokens.next().await {
-            let event = item.map_err(stream_error)?;
+            let event = item.map_err(|e| stream_error(&self.fault, e))?;
             let finish = event.finish.map(finish_reason);
             let cut = self
                 .registry
@@ -152,12 +186,21 @@ impl GenerationScheduler for DisaggScheduler {
         prompt_tokens: Vec<u32>,
         gen_config: GenerationConfig,
     ) -> Result<RequestHandle> {
+        if let Some(reason) = self.fault() {
+            bail!("the disaggregated cluster is down: {reason}. Restart every node");
+        }
+        if prompt_tokens.is_empty() {
+            bail!("the prompt has no tokens: pass at least one token id");
+        }
         let params = generation_params(
             &gen_config,
             prompt_tokens.len(),
             self.context_len,
             &self.eos_tokens,
         )?;
+        // The router checks the params too. Checking them here keeps a bad
+        // request a request error, never a cluster fault.
+        params.check()?;
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| anyhow!("the disaggregated scheduler must run inside a tokio runtime"))?;
         let seq_id = self.registry.next_id();
@@ -173,6 +216,7 @@ impl GenerationScheduler for DisaggScheduler {
             router: Arc::clone(&self.router),
             tokenizer: Arc::clone(&self.tokenizer),
             registry: Arc::clone(&self.registry),
+            fault: Arc::clone(&self.fault),
             owner: self.me.clone(),
         };
         // The map lock spans the spawn, so the task's own removal runs after
@@ -188,6 +232,17 @@ impl GenerationScheduler for DisaggScheduler {
 
     fn refusal(&self, gen_config: &GenerationConfig) -> Option<String> {
         disagg_refusal(gen_config)
+    }
+
+    /// Why the cluster can no longer serve, or `None` while it can.
+    fn fault(&self) -> Option<String> {
+        if let Some(rank) = self.deaths.borrow().first().copied() {
+            mark_down(
+                &self.fault,
+                format!("nexar reports worker rank {rank} dead"),
+            );
+        }
+        self.fault.get().cloned()
     }
 }
 
@@ -219,7 +274,13 @@ mod tests {
 
     async fn scheduler(mock: &Mock, eos: Vec<u32>) -> Result<(Cluster, Arc<DisaggScheduler>)> {
         let cluster = Cluster::mock(mock).await?;
-        let s = DisaggScheduler::new(Arc::clone(&cluster.router), llama3()?, eos, 4096);
+        let s = DisaggScheduler::new(
+            Arc::clone(&cluster.router),
+            llama3()?,
+            eos,
+            4096,
+            cluster.deaths.clone(),
+        );
         Ok((cluster, s))
     }
 
@@ -450,6 +511,95 @@ mod tests {
         assert_eq!(seen, vec![2, 3], "prefill's token, then one decode step");
         assert!(err.contains("decode worker (rank 2)"), "{err}");
         assert!(err.contains("mock step failure"), "{err}");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_worker_error_leaves_the_cluster_up() -> Result<()> {
+        let mock = Mock {
+            prefill_fail: Some("out of device memory"),
+            ..Mock::default()
+        };
+        let (_cluster, s) = scheduler(&mock, Vec::new()).await?;
+        let mut handle = s.submit(vec![1], greedy(4))?;
+        assert!(collect(&mut handle).await.is_err());
+        assert_eq!(s.fault(), None);
+        assert!(s.submit(vec![1], greedy(4)).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lost_decode_worker_marks_the_cluster_down() -> Result<()> {
+        use super::super::disaggregated_test_rig::app;
+        use super::super::swarm_test_rig::get;
+        use crate::engine::Scheduler;
+        use crate::runtime::ServerRuntime;
+        use crate::server::handlers::{ServeReplica, Serving};
+
+        let mock = Mock {
+            delay: Some(Duration::from_millis(20)),
+            ..Mock::default()
+        };
+        let (cluster, s) = scheduler(&mock, Vec::new()).await?;
+        assert_eq!(s.fault(), None);
+        let mut handle = s.submit(vec![1], greedy(1000))?;
+        tokio::time::timeout(WAIT, handle.token_rx.recv())
+            .await?
+            .ok_or_else(|| anyhow!("closed"))??;
+        cluster.kill_decode();
+        let err = loop {
+            match tokio::time::timeout(WAIT, handle.token_rx.recv()).await? {
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => break e.to_string(),
+                None => return Err(anyhow!("the stream closed without the error")),
+            }
+        };
+        assert!(err.contains("rank 2"), "{err}");
+        eventually("the cluster to go down", || s.fault().is_some()).await?;
+        let refused = s.submit(vec![1], greedy(2)).err().map(|e| e.to_string());
+        assert!(
+            refused.is_some_and(|e| e.contains("the disaggregated cluster is down")),
+            "a new request is refused"
+        );
+
+        let dir = tempfile::tempdir()?;
+        let models =
+            Scheduler::<ServerRuntime>::new(dir.path().to_path_buf(), boostr::CpuDevice::new());
+        let executor = Arc::new(crate::engine::test_support::seeded_full_vocab_executor(1)?);
+        let disagg: Arc<dyn GenerationScheduler> = s;
+        let serving = Serving::Single(ServeReplica {
+            executor,
+            scheduler: Some(disagg),
+            device: "disaggregated".to_string(),
+        });
+        let routed = app(Arc::new(models.pinned()), serving);
+        let (status, body) = get(&routed, "/health").await?;
+        assert_eq!(status, 503, "{body}");
+        assert!(body.contains("\"unavailable\""), "{body}");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dead_rank_from_nexar_marks_the_cluster_down() -> Result<()> {
+        let mock = Mock::default();
+        let cluster = Cluster::mock(&mock).await?;
+        let (report, deaths) = watch::channel(Vec::new());
+        let s = DisaggScheduler::new(
+            Arc::clone(&cluster.router),
+            llama3()?,
+            Vec::new(),
+            4096,
+            deaths,
+        );
+        assert_eq!(s.fault(), None);
+        report.send(vec![1])?;
+        let fault = s.fault().unwrap_or_default();
+        assert!(fault.contains("worker rank 1 dead"), "{fault}");
+        // A fault stays set, whatever nexar reports after.
+        report.send(Vec::new())?;
+        assert_eq!(s.fault(), Some(fault));
+        assert!(s.submit(vec![1], greedy(2)).is_err());
+        assert!(mock.prompts().is_empty(), "no request reached a worker");
         Ok(())
     }
 

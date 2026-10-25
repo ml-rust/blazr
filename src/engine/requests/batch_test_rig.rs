@@ -110,6 +110,7 @@ pub(super) async fn alone(
 }
 
 /// Run one engine step.
+#[cfg(feature = "server")]
 pub(crate) async fn tick(rig: &mut Rig) {
     rig.engine.tick().await;
 }

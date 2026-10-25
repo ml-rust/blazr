@@ -219,14 +219,19 @@ pub(crate) fn seeded_executor_pair(
 ///
 /// Text encodes into its vocab, so a server test can send a text prompt.
 /// Its logits depend on the prompt, and its hidden states are nonzero.
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+#[cfg(all(feature = "server", not(any(feature = "cuda", feature = "wgpu"))))]
 pub(crate) fn seeded_full_vocab_executor(seed: u64) -> Result<Executor<CpuRuntime>> {
     seeded_full_vocab_on(seed, None, 1)
 }
 
 /// A [`seeded_full_vocab_executor`] of `layers` layers, so a pipeline test
 /// can split it across stages.
-#[cfg(all(feature = "distributed", not(any(feature = "cuda", feature = "wgpu"))))]
+#[cfg(all(
+    feature = "cli",
+    feature = "distributed",
+    feature = "server",
+    not(any(feature = "cuda", feature = "wgpu"))
+))]
 pub(crate) fn seeded_full_vocab_layers(seed: u64, layers: usize) -> Result<Executor<CpuRuntime>> {
     seeded_full_vocab_on(seed, None, layers)
 }
@@ -234,7 +239,12 @@ pub(crate) fn seeded_full_vocab_layers(seed: u64, layers: usize) -> Result<Execu
 /// Layers `layers` of the [`seeded_full_vocab_layers`] model of `total`
 /// layers, loaded as a swarm stage holds them: a `LlamaStage` built from the
 /// tensors of its own span only.
-#[cfg(all(feature = "distributed", not(any(feature = "cuda", feature = "wgpu"))))]
+#[cfg(all(
+    feature = "cli",
+    feature = "distributed",
+    feature = "server",
+    not(any(feature = "cuda", feature = "wgpu"))
+))]
 pub(crate) fn seeded_full_vocab_stage(
     seed: u64,
     total: usize,
@@ -261,7 +271,12 @@ pub(crate) fn seeded_full_vocab_stage(
 /// The weight-free executor a swarm leader serves a
 /// [`seeded_full_vocab_layers`] model of `layers` layers with: its config and
 /// tokenizer, as `blazr swarm` builds it.
-#[cfg(all(feature = "distributed", not(any(feature = "cuda", feature = "wgpu"))))]
+#[cfg(all(
+    feature = "cli",
+    feature = "distributed",
+    feature = "server",
+    not(any(feature = "cuda", feature = "wgpu"))
+))]
 pub(crate) fn full_vocab_front(layers: usize) -> Result<Executor<CpuRuntime>> {
     let (tokenizer, vocab) = full_vocab_tokenizer()?;
     let config = full_vocab_config(vocab, layers)?;
@@ -271,7 +286,7 @@ pub(crate) fn full_vocab_front(layers: usize) -> Result<Executor<CpuRuntime>> {
 }
 
 /// The config of a full-vocab tiny llama of `layers` layers.
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+#[cfg(all(feature = "server", not(any(feature = "cuda", feature = "wgpu"))))]
 fn full_vocab_config(vocab: usize, layers: usize) -> Result<boostr::model::UniversalConfig> {
     let yaml = full_vocab_yaml(vocab).replace("num_layers: 1", &format!("num_layers: {layers}"));
     Ok(serde_saphyr::from_str(&yaml)?)
@@ -282,12 +297,12 @@ fn full_vocab_config(vocab: usize, layers: usize) -> Result<boostr::model::Unive
 ///
 /// A pool smaller than [`FULL_VOCAB_CTX`] tokens runs dry while a long
 /// generation decodes. The generation then ends with an error.
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+#[cfg(all(feature = "server", not(any(feature = "cuda", feature = "wgpu"))))]
 pub(crate) fn seeded_full_vocab_paged(seed: u64, pool: PagedPool) -> Result<Executor<CpuRuntime>> {
     seeded_full_vocab_on(seed, Some(pool), 1)
 }
 
-#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+#[cfg(all(feature = "server", not(any(feature = "cuda", feature = "wgpu"))))]
 fn seeded_full_vocab_on(
     seed: u64,
     paged: Option<PagedPool>,

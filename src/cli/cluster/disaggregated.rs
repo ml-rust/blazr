@@ -115,8 +115,15 @@ async fn run_disagg_router(
         "Disaggregated router ready"
     );
 
-    let (scheduler, serving) =
-        router_serving(Arc::clone(&router), &model, path, executor, models).await;
+    let (scheduler, serving) = router_serving(
+        Arc::clone(&router),
+        client.failure_watch(),
+        &model,
+        path,
+        executor,
+        models,
+    )
+    .await;
     let server = settings.server.clone();
     let live = LiveSettings::fixed(&server);
     let run = start_with_batch(

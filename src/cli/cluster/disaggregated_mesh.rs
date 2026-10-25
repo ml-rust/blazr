@@ -118,7 +118,8 @@ pub(super) async fn serve_decode(
         MAX_KV_TRANSFER_BYTES,
         sampler,
         open,
-    );
+    )
+    .with_queue_limits(layout.config.decode_queue);
     tracing::info!(rank = layout.rank, "Decode worker entering run loop");
     let run = until_signal("decode worker", worker.run_loop()).await;
     let shutdown = worker.shutdown(RELEASE_WITHIN).await;

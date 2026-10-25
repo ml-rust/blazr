@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use nexar::Rank;
+use tokio::sync::watch;
 
 use super::disaggregated_scheduler::DisaggScheduler;
 use crate::config::DEFAULT_NUM_CTX;
@@ -40,9 +42,11 @@ pub(crate) fn router_executor(
 /// `models` becomes the model scheduler, pinned: it serves `name` only and
 /// never loads a model, so the router process holds no weights. Every
 /// generation route takes the one replica, whose scheduler is a
-/// [`DisaggScheduler`].
+/// [`DisaggScheduler`]. `deaths` is the router client's `failure_watch`:
+/// a dead worker rank turns `GET /health` to 503.
 pub(crate) async fn router_serving(
     router: Arc<DisaggRouter>,
+    deaths: watch::Receiver<Vec<Rank>>,
     name: &str,
     path: PathBuf,
     executor: Executor<ServerRuntime>,
@@ -55,6 +59,7 @@ pub(crate) async fn router_serving(
         Arc::clone(&executor.tokenizer),
         executor.eos_ids(),
         executor.config().max_seq_len(),
+        deaths,
     );
     let replica = ServeReplica {
         executor,
@@ -128,6 +133,7 @@ mod tests {
             Arc::clone(&executor.tokenizer),
             executor.eos_ids(),
             executor.config().max_seq_len(),
+            cluster.deaths.clone(),
         );
         let prompt = single.tokenizer().encode("The quick brown fox");
         let greedy = GenerationConfig {
@@ -193,6 +199,7 @@ mod tests {
         let models = Scheduler::<ServerRuntime>::new(dir.path().to_path_buf(), CpuDevice::new());
         let (scheduler, serving) = router_serving(
             Arc::clone(&cluster.router),
+            cluster.deaths.clone(),
             MODEL,
             dir.path().join(MODEL),
             executor,

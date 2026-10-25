@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use boostr::{CpuClient, CpuDevice, CpuRuntime, Tensor};
-use nexar::NexarClient;
+use nexar::{NexarClient, Rank};
+use tokio::sync::watch;
 
 use super::disaggregated_forward::{build_decode_open_fn, build_prefill_fn};
 use crate::distributed::disaggregated::{
@@ -121,6 +122,11 @@ impl Mock {
 /// A router on rank 0, one prefill worker on rank 1, one decode worker on rank 2.
 pub(super) struct Cluster {
     pub router: Arc<DisaggRouter>,
+    /// The `failure_watch` of the router's client.
+    pub deaths: watch::Receiver<Vec<Rank>>,
+    /// The decode worker's client, kept so a test can close its connections.
+    decode_client: Arc<NexarClient>,
+    /// The prefill worker's task, then the decode worker's.
     workers: Vec<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -154,16 +160,28 @@ impl Cluster {
         let (router, prefill_c, decode_c) = (next()?, next()?, next()?);
         let config = DisaggConfig::standard(1, 1, 1 << 26)?;
         let sampler = CpuClient::new(CpuDevice::new());
+        let decode_client = Arc::clone(&decode_c);
         let p = PrefillWorker::new(prefill_c, 1, 0, 1 << 26, sampler.clone(), prefill);
         let d = DecodeWorker::new(decode_c, 2, 0, vec![1], 1 << 26, sampler, open);
         let workers = vec![
             tokio::spawn(async move { p.run_loop().await }),
             tokio::spawn(async move { d.run_loop().await }),
         ];
+        let deaths = router.failure_watch();
         Ok(Self {
             router: Arc::new(DisaggRouter::new(router, config)?),
+            deaths,
+            decode_client,
             workers,
         })
+    }
+
+    /// Kills the decode worker: its task stops and its connections close.
+    pub(super) fn kill_decode(&self) {
+        if let Some(worker) = self.workers.get(1) {
+            worker.abort();
+        }
+        self.decode_client.close();
     }
 }
 
@@ -320,8 +338,15 @@ pub(super) mod nodes {
         )?;
         let models = Scheduler::<ServerRuntime>::new(dir.path().to_path_buf(), CpuDevice::new());
         let path = dir.path().join(MODEL);
-        let (scheduler, serving) =
-            router_serving(Arc::clone(&router), MODEL, path, executor, models).await;
+        let (scheduler, serving) = router_serving(
+            Arc::clone(&router),
+            client.failure_watch(),
+            MODEL,
+            path,
+            executor,
+            models,
+        )
+        .await;
         let routed = app(scheduler, serving);
         let got = ok(&routed, "/v1/completions", &body()).await;
         drop(routed);

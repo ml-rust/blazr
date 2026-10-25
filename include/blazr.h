@@ -118,8 +118,9 @@ enum BlazrStatus blazr_generate(struct BlazrModel *model,
                                 void *user_data,
                                 char **out_text);
 
-// Stop the generation running on `model`. It ends before its next token
-// and returns `BLAZR_STATUS_CANCELLED`.
+// Stop the generation running on `model`. It ends before its next token,
+// or during the prefill at its next prompt chunk, and returns
+// `BLAZR_STATUS_CANCELLED`.
 //
 // Call it from any thread. Each generation clears the request when it
 // starts, so a cancel with no generation running has no effect.

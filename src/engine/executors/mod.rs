@@ -1,6 +1,7 @@
 //! The `Executor`: generate, embed, multimodal, cache, warmup, and load paths.
 
 pub(crate) mod blocking_stream;
+pub(super) mod decode_job;
 pub(crate) mod decode_output;
 #[cfg(not(target_family = "wasm"))]
 mod decode_thread;
@@ -33,6 +34,6 @@ pub use executor_access::NoWeights;
 pub use executor_load::{load_executor, load_executor_from_bytes, LoadOptions, ModelBytes};
 #[cfg(all(feature = "distributed", feature = "server"))]
 pub(crate) use row_sampler::RowSampler;
-pub use types::{FinishReason, GeneratedToken, GenerationResult, TokenLogprob};
+pub use types::{FinishReason, GeneratedToken, GenerationResult, PrefillCancel, TokenLogprob};
 pub(crate) use unsupported::qwen35_unsupported;
 pub use vision_tower::{ImageTokenLimits, VisionTower};

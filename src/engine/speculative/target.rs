@@ -8,19 +8,21 @@ use boostr::inference::LayeredKvCache;
 use boostr::{DType, Runtime, Tensor};
 
 use super::target_glue::{
-    bias_tensor, biased_rows, greedy_ids, inference_error, no_verify_tokens, verify_rows,
-    LastLogits, TargetClient,
+    bias_tensor, biased_rows, chunked_logits, greedy_ids, inference_error, no_verify_tokens,
+    verify_rows, LastLogits, TargetClient,
 };
 use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 use crate::engine::tensor_parallel::KvCacheSpec;
+use crate::engine::types::PrefillCancel;
 
 /// One sequence of an executor's model as a boostr [`SpeculativeModel`].
 ///
 /// It owns a contiguous KV cache built like the plain contiguous decode
-/// path builds one. Each extend runs one forward at the cache end. The
-/// request's `logit_bias` adds to every logits row before the argmax or the
-/// verify, as the plain sampler adds it before its penalties.
+/// path builds one. Each extend runs at the cache end, in forwards of at
+/// most `inference.prefill_chunk_size` tokens. The request's `logit_bias`
+/// adds to every logits row before the argmax or the verify, as the plain
+/// sampler adds it before its penalties.
 pub(in crate::engine) struct ContiguousTarget<'a, R: Runtime<DType = DType>> {
     exec: &'a Executor<R>,
     kv: LayeredKvCache<R>,
@@ -32,6 +34,8 @@ pub(in crate::engine) struct ContiguousTarget<'a, R: Runtime<DType = DType>> {
     fed: Vec<u32>,
     /// The `[1, M, vocab]` logits of the last extend, before the bias.
     last_logits: Option<Tensor<R>>,
+    /// Read before each forward chunk.
+    cancel: PrefillCancel<'a>,
 }
 
 impl<'a, R> ContiguousTarget<'a, R>
@@ -58,7 +62,14 @@ where
             bias: bias_tensor(exec, gen)?,
             fed: Vec::with_capacity(prompt_len + max_tokens),
             last_logits: None,
+            cancel: PrefillCancel::never(),
         })
+    }
+
+    /// Stop an extend at its next chunk boundary once `cancel` trips.
+    pub(in crate::engine) fn with_cancel(mut self, cancel: PrefillCancel<'a>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// Every token the cache holds, in order.
@@ -75,16 +86,17 @@ where
         self.last_logits.as_ref()
     }
 
-    /// One forward over `tokens` at the cache end: the logits, then the
-    /// logits with the bias added.
+    /// The forward over `tokens` at the cache end, in chunks: the logits,
+    /// then the logits with the bias added.
     ///
     /// The cache and `fed` grow by `tokens.len()`.
     fn forward(&mut self, tokens: &[u32]) -> anyhow::Result<(Tensor<R>, Tensor<R>)> {
-        let input = self.exec.create_input_tensor(tokens)?;
-        let position = self.kv.seq_len();
-        let logits =
-            self.exec
-                .forward_contiguous(&input, &mut self.kv, position, self.fresh.take())?;
+        let start = self.kv.seq_len();
+        let (exec, kv, fresh) = (self.exec, &mut self.kv, &mut self.fresh);
+        let logits = chunked_logits(exec, &self.cancel, tokens.len(), |r| {
+            let input = exec.create_input_tensor(&tokens[r.clone()])?;
+            exec.forward_contiguous(&input, kv, start + r.start, fresh.take())
+        })?;
         self.fed.extend_from_slice(tokens);
         biased_rows(self.exec, &mut self.bias, logits, tokens.len())
     }
@@ -442,6 +454,44 @@ mod tests {
         assert_eq!((draft.len(), draft.fed()), (3, &[1, 2, 3][..]));
         assert!(draft.forward_logits(&[]).is_err());
         assert_eq!(draft.len(), 3);
+        Ok(())
+    }
+    /// Chunks of two: a chunked extend leaves the rows of one forward, and a
+    /// cancel read after the first chunk stops the extend there.
+    #[test]
+    fn a_chunked_extend_matches_one_forward_and_stops_on_cancel() -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+        let one = seeded_executor_ctx(SEED, CTX)?;
+        let mut chunked = seeded_executor_ctx(SEED, CTX)?;
+        chunked.config.inference.prefill_chunk_size = 2;
+        let prompt = [3, 7, 11, 3, 7, 11, 3];
+        let mut whole = ContiguousTarget::new(&one, &greedy_plain(), prompt.len(), 4)?;
+        let mut split = ContiguousTarget::new(&chunked, &greedy_plain(), prompt.len(), 4)?;
+        whole.extend_greedy(&prompt)?;
+        split.extend_greedy(&prompt)?;
+        let rows = |t: &ContiguousTarget<'_, CpuRuntime>| {
+            t.last_logits()
+                .map(|l| l.to_vec::<f32>())
+                .ok_or_else(|| anyhow!("the extend left no logits"))
+        };
+        let (a, b) = (rows(&whole)?, rows(&split)?);
+        assert_eq!(a.len(), b.len(), "one row per prompt token either way");
+        let diff = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max);
+        assert!(diff < 1e-4, "chunked rows differ by {diff}");
+        assert_eq!(split.len(), prompt.len());
+
+        let reads = AtomicUsize::new(0);
+        let probe = || reads.fetch_add(1, SeqCst) >= 1;
+        let mut stopped = ContiguousTarget::new(&chunked, &greedy_plain(), prompt.len(), 4)?
+            .with_cancel(PrefillCancel::when(&probe));
+        assert!(stopped.extend_greedy(&prompt).is_err());
+        assert_eq!(stopped.len(), 2, "one chunk of two ran");
+        assert_eq!(reads.load(SeqCst), 2);
         Ok(())
     }
 }

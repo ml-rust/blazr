@@ -14,10 +14,12 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Result};
 use boostr::{DType, IndexingOps, Runtime};
 
-use crate::distributed::disaggregated::{DecodeOpenFn, DecodeStepFn, PrefillFn, PrefillOutput};
+use crate::distributed::disaggregated::{
+    DecodeOpenFn, DecodeStepFn, PrefillCancel as RouterCancel, PrefillFn, PrefillOutput,
+};
 use crate::distributed::kv_serialize::{deserialize_kv_cache, serialize_kv_cache};
 use crate::engine::executor::EngineClient;
-use crate::engine::Executor;
+use crate::engine::{Executor, PrefillCancel};
 
 /// Checks that `executor`'s model state crosses the network whole.
 ///
@@ -50,20 +52,32 @@ where
 
 /// The prefill closure over `executor`.
 ///
-/// Each call builds a fresh contiguous cache, runs the whole prompt and
-/// returns the `[1, prompt_len, vocab]` logits with the serialized cache.
+/// Each call builds a fresh contiguous cache and runs the prompt in chunks
+/// of `inference.prefill_chunk_size` tokens. It returns the last chunk's
+/// `[1, n, vocab]` logits with the serialized cache. The router's cancel is
+/// read before each chunk, so a cancelled request stops at the next chunk
+/// boundary and drops its cache.
 pub(crate) fn build_prefill_fn<R>(executor: Arc<Executor<R>>) -> PrefillFn<R>
 where
     R: Runtime<DType = DType>,
     R::Client: EngineClient<R> + IndexingOps<R>,
 {
-    Box::new(move |prompt: &[u32]| {
+    Box::new(move |prompt: &[u32], cancel: &RouterCancel| {
         if prompt.is_empty() {
             bail!("the prompt has no tokens");
         }
         let (mut cache, spec) = executor.contiguous_kv_cache(prompt.len(), 0)?;
         let input = executor.create_input_tensor(prompt)?;
-        let logits = executor.forward_contiguous(&input, &mut cache, 0, Some(spec))?;
+        let chunk = executor.config().inference.prefill_chunk_size;
+        let left = || cancel.is_cancelled();
+        let mut fresh = Some(spec);
+        let prefilled = PrefillCancel::when(&left).run(0..prompt.len(), chunk, |r| {
+            let piece = executor.prompt_piece(&input, prompt, r.clone())?;
+            executor.forward_contiguous(&piece, &mut cache, r.start, fresh.take())
+        })?;
+        let Some(logits) = prefilled else {
+            bail!("the prefill stopped at a chunk boundary: the router cancelled the request");
+        };
         let kv_cache = serialize_kv_cache(&cache)?;
         Ok(PrefillOutput { logits, kv_cache })
     })
@@ -94,4 +108,67 @@ where
         });
         Ok(step)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    use boostr::CpuRuntime;
+
+    use super::*;
+    use crate::engine::test_support::seeded_executor;
+
+    const SEED: u64 = 0x5eed;
+    const PROMPT: [u32; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    fn prefill_fn(chunk: usize) -> Result<PrefillFn<CpuRuntime>> {
+        let mut exec = seeded_executor(SEED, None)?;
+        exec.config.inference.prefill_chunk_size = chunk;
+        Ok(build_prefill_fn(Arc::new(exec)))
+    }
+
+    /// The last logits row of `out`.
+    fn last_row(out: &PrefillOutput<CpuRuntime>) -> Vec<f32> {
+        let rows = out.logits.to_vec::<f32>();
+        let vocab = out.logits.shape().last().copied().unwrap_or(1);
+        rows[rows.len() - vocab..].to_vec()
+    }
+
+    /// Chunks of two leave the cache and the last row of one forward.
+    #[test]
+    fn a_chunked_prefill_matches_one_forward() -> Result<()> {
+        let whole = prefill_fn(0)?(&PROMPT, &RouterCancel::never())?;
+        let chunked = prefill_fn(2)?(&PROMPT, &RouterCancel::never())?;
+        assert_eq!(
+            chunked.logits.shape()[1],
+            1,
+            "the last chunk holds one token"
+        );
+        let diff = last_row(&whole)
+            .iter()
+            .zip(last_row(&chunked))
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(diff < 1e-4, "the last rows differ by {diff}");
+        assert_eq!(whole.kv_cache.len(), chunked.kv_cache.len());
+        Ok(())
+    }
+
+    /// The router's cancel, read before the second chunk, stops the prefill.
+    #[test]
+    fn a_router_cancel_stops_the_prefill_at_the_next_chunk() -> Result<()> {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let probe = {
+            let reads = Arc::clone(&reads);
+            RouterCancel::new(Arc::new(move || reads.fetch_add(1, SeqCst) >= 1))
+        };
+        let err = prefill_fn(2)?(&PROMPT, &probe).err().map(|e| e.to_string());
+        assert!(
+            err.is_some_and(|e| e.contains("cancelled")),
+            "the prefill must stop"
+        );
+        assert_eq!(reads.load(SeqCst), 2, "one of five chunks ran");
+        Ok(())
+    }
 }

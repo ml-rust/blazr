@@ -61,15 +61,19 @@ pub struct InferenceConfig {
     #[serde(default = "default_ram_tier_capacity")]
     pub gpu_prefix_cache_ram_tier: usize,
 
-    /// Chunk size for prefill (0 = no chunking, process entire prompt at once).
-    /// When set, long prompts are split into chunks of this size, interleaving
-    /// with decode steps between chunks to reduce TTFT for concurrent requests.
-    /// Also drives the lane path's chunked prefill, letting a long prompt
-    /// interleave with lanes that are already decoding. Chunking changes the
-    /// shapes the prefill runs at, so a non-zero value makes the prefill
-    /// arithmetic differ in the last bits from a one-shot prefill of the
-    /// same prompt. Neither path is bit-identical to the other.
-    #[serde(default)]
+    /// Prompt tokens per prefill forward. Default: 512.
+    ///
+    /// Every prefill path runs a longer prompt in chunks of this many
+    /// tokens: the single-sequence paths, the batch engine, the KV refill of
+    /// a resumed sequence, the qwen35 lanes, speculative decoding, the swarm
+    /// pipeline and the disaggregated prefill worker. A request cancelled
+    /// during its prefill stops at the next chunk boundary and frees its KV
+    /// cache. The batch engine and the lanes run decode steps for the other
+    /// requests between chunks. `0` runs the whole prompt in one forward,
+    /// which a cancel cannot interrupt. Chunking changes the shapes the
+    /// prefill runs at, so its arithmetic differs in the last bits from a
+    /// one-shot prefill of the same prompt.
+    #[serde(default = "default_prefill_chunk_size")]
     pub prefill_chunk_size: usize,
 
     /// Number of KV cache blocks in the shared pool.
@@ -151,6 +155,10 @@ fn default_ram_tier_capacity() -> usize {
     5000
 }
 
+fn default_prefill_chunk_size() -> usize {
+    512
+}
+
 fn default_decode_idle_timeout_secs() -> u64 {
     60
 }
@@ -171,7 +179,7 @@ impl Default for InferenceConfig {
             max_cached_blocks: default_max_cached_blocks(),
             gpu_prefix_cache: false,
             gpu_prefix_cache_ram_tier: default_ram_tier_capacity(),
-            prefill_chunk_size: 0,
+            prefill_chunk_size: default_prefill_chunk_size(),
             kv_pool_blocks: 0,
             decode_idle_timeout_secs: default_decode_idle_timeout_secs(),
             speculative: None,

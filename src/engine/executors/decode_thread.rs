@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use boostr::{DType, Runtime};
 
-use super::blocking_stream::DecodeJob;
+use super::decode_job::DecodeJob;
 use super::decode_output::{send_item, DecodeOutput};
 use super::executor::{EngineClient, Executor};
 use crate::engine::load::blocking::panic_message;

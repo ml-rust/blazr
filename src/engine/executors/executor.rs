@@ -382,4 +382,16 @@ mod tests {
     fn an_ssm_model_builds_with_paged_attention_off() {
         assert!(tiny_mamba2(false, false).is_ok());
     }
+
+    /// Chunks of two over nine tokens: each chunk continues the SSM state,
+    /// and a cancel read before the third chunk stops the prefill there.
+    #[tokio::test]
+    async fn an_ssm_prefill_stops_at_the_chunk_after_the_cancel() -> anyhow::Result<()> {
+        let mut exec = tiny_mamba2(false, false)?;
+        exec.config.inference.prefill_chunk_size = 2;
+        let prompt: Vec<u32> = (1..=9).collect();
+        let stopped = super::super::executor_generate::tests::stopped_at(&exec, &prompt, 3).await;
+        assert_eq!(stopped, (0, 3), "two of five chunks ran");
+        Ok(())
+    }
 }

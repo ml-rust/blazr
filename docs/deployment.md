@@ -470,7 +470,7 @@ The leader sends each worker its layer range and the model path, and starts the 
 The leader serves the HTTP API of `blazr serve` for its model, and every generation runs through the pipeline. The leader runs stage 0, and the last worker returns the logits of each step. The leader samples every token, so grammars, `logprobs`, `logit_bias`, DRY, mirostat and the seed work as on one process. The leader's HTTP front end holds the model's config, tokenizer and chat template, and no weights beyond stage 0. Embeddings, images and LoRA variants need the whole model, so the leader answers them with `501`. A request for another model is a `404`.
 
 - **Concurrency:** at most `--max-requests` requests run at once. Each stage holds one KV cache per request. A request past the cap waits for a slot.
-- **Long prompts:** with `inference.prefill_chunk_size` above `0`, a prompt goes through the pipeline in chunks of that many tokens. `0` sends the whole prompt as one frame.
+- **Long prompts:** with `inference.prefill_chunk_size` above `0` (default `512`), a prompt goes through the pipeline in chunks of that many tokens. A client that leaves mid-prefill frees its request at the next chunk. `0` sends the whole prompt as one frame.
 - **Errors:** a stage error ends only its request. A lost worker ends every request in flight and refuses every new one. `GET /health` then answers `503` with the reason. Restart every node to recover.
 - **Models:** Mamba, hybrid and qwen35 models, and tensor-parallel shards, cannot run as stages. The leader fails at start with the reason, before it reads a weight and before any worker joins. A multimodal checkpoint runs its text model, and its vision and audio towers stay unread.
 
@@ -524,6 +524,8 @@ The workers sample with temperature, `top_k`, `top_p`, `min_p`, the repeat, freq
 - `logprobs`
 
 Embeddings return `501`. Image inputs and LoRA variants are not served. GDN (`qwen35`), SSM and tensor-parallel models fail at worker start.
+
+A client that leaves cancels its request on both workers. The prefill worker runs a prompt in chunks of `inference.prefill_chunk_size` tokens and stops at the next chunk once the cancel arrives.
 
 Prefill worker:
 

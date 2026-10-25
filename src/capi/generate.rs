@@ -10,7 +10,7 @@ use super::error::{guard, BlazrStatus, FfiError};
 use super::handle::{self, with_executor, BlazrModel, EngineClient, ModelInner};
 use super::string::{into_c_string, read_str, write_out};
 use crate::config::GenerationConfig;
-use crate::engine::Executor;
+use crate::engine::{Executor, PrefillCancel};
 use boostr::{DType, Runtime};
 
 /// Sampling settings for `blazr_generate`. Start from
@@ -163,24 +163,31 @@ where
         ));
     }
     inner.cancel.store(false, Ordering::SeqCst);
+    let cancelled = || inner.cancel.load(Ordering::SeqCst);
     inner.runtime.block_on(async {
         let mut text = String::new();
-        let mut tokens = pin!(executor.generate(&prompt_ids, config));
+        let cancel = PrefillCancel::when(&cancelled);
+        let mut tokens = pin!(executor.generate_cancellable(&prompt_ids, config, cancel));
         while let Some(token) = tokens.next().await {
             let token =
                 token.map_err(|e| FfiError::new(BlazrStatus::Generate, format!("{e:#}")))?;
             text.push_str(&token.text);
             let stop = sink.send(&token.text);
-            if stop || inner.cancel.load(Ordering::SeqCst) {
+            if stop || cancelled() {
                 return Ok((text, BlazrStatus::Cancelled));
             }
+        }
+        // A cancel during the prefill ends the stream before its first token.
+        if cancelled() {
+            return Ok((text, BlazrStatus::Cancelled));
         }
         Ok((text, BlazrStatus::Ok))
     })
 }
 
-/// Stop the generation running on `model`. It ends before its next token
-/// and returns `BLAZR_STATUS_CANCELLED`.
+/// Stop the generation running on `model`. It ends before its next token,
+/// or during the prefill at its next prompt chunk, and returns
+/// `BLAZR_STATUS_CANCELLED`.
 ///
 /// Call it from any thread. Each generation clears the request when it
 /// starts, so a cancel with no generation running has no effect.

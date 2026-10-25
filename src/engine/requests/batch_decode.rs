@@ -22,6 +22,7 @@ use super::request_cancel::end_cancelled;
 use super::request_scheduler::RequestScheduler;
 use super::seq_sampler::BatchSeqs;
 use crate::engine::executor::Executor;
+use crate::engine::types::PrefillCancel;
 
 /// Per-sequence data collected before the batched decode forward pass.
 pub(in crate::engine) struct DecodeSeqData {
@@ -39,7 +40,8 @@ pub(in crate::engine) struct DecodeSeqData {
 /// output logits [N, 1, vocab_size] are then split per sequence for sampling.
 ///
 /// A sequence `seqs` marks stale first refills its KV blocks from its
-/// history, in forwards of at most `chunk_size` tokens.
+/// history, in forwards of at most `chunk_size` tokens. A cancel read
+/// before each of those forwards ends the sequence at that chunk.
 pub(in crate::engine) async fn process_decode_batch<R: Runtime<DType = DType>>(
     executor: &Executor<R>,
     scheduler: &RequestScheduler,
@@ -98,15 +100,22 @@ where
 
         let token_pos = seq_len - 1;
         // A resumed sequence's blocks are new: refill every position before
-        // the one this step writes.
+        // the one this step writes. A cancel stops the refill at its next
+        // chunk and frees the sequence.
         if seqs.take_stale(seq_id) {
-            recompute_kv(
+            let gone = || !scheduler.is_live(seq_id);
+            let filled = recompute_kv(
                 executor,
                 paged_cache,
                 &token_history[..token_pos],
                 blocks,
                 chunk_size,
+                PrefillCancel::when(&gone),
             )?;
+            if !filled {
+                end_cancelled(scheduler, seqs, seq_id, CancelPhase::Decode)?;
+                continue;
+            }
         }
         let slot = block_slot(blocks, block_size, token_pos);
         let block_table = block_ids(blocks);

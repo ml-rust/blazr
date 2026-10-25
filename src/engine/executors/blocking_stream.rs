@@ -16,155 +16,22 @@
 //! A WebAssembly target starts no threads, so there the stream runs on the
 //! caller.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::Result;
-use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use boostr::{DType, Runtime};
 
-use crate::config::GenerationConfig;
-
-use super::decode_output::{forward_tokens, DecodeOutput, RawTokens};
+use super::decode_output::{DecodeOutput, RawTokens};
 use super::executor::{EngineClient, Executor};
 use super::generate_text::collect_generation;
 use super::types::GenerationResult;
 
+pub(crate) use super::decode_job::DecodeJob;
+#[cfg(test)]
+pub(crate) use super::decode_job::StepHook;
+
 /// Items a decode channel buffers: the capacity of the handlers' stream channels.
 pub(crate) const DECODE_CHANNEL_CAPACITY: usize = 32;
-
-/// A test hook that runs on the decode thread after each engine item.
-#[cfg(test)]
-pub(crate) type StepHook = Arc<dyn Fn(usize) + Send + Sync>;
-
-/// The inputs a generation path takes beside the prompt ids.
-enum DecodeMedia {
-    /// Text only: `Executor::generate`.
-    Text,
-    /// Images and audio: `Executor::generate_multimodal`.
-    Multimodal {
-        images: Vec<Vec<u8>>,
-        audio: Vec<Vec<f32>>,
-    },
-    /// Images through the vision tower: `Executor::generate_with_images`.
-    Images { images: Vec<Vec<u8>> },
-}
-
-/// One generation, owned, ready to move to its decode thread.
-pub(crate) struct DecodeJob<R: Runtime<DType = DType>> {
-    executor: Arc<Executor<R>>,
-    prompt: Vec<u32>,
-    config: GenerationConfig,
-    media: DecodeMedia,
-    /// How long a send waits for room. `None` waits without limit.
-    pub(super) idle: Option<Duration>,
-    #[cfg(test)]
-    on_step: Option<StepHook>,
-}
-
-impl<R> DecodeJob<R>
-where
-    R: Runtime<DType = DType>,
-    R::Client: EngineClient<R>,
-{
-    /// A text generation of `prompt`.
-    pub(crate) fn text(
-        executor: Arc<Executor<R>>,
-        prompt: Vec<u32>,
-        config: GenerationConfig,
-    ) -> Self {
-        Self::new(executor, prompt, config, DecodeMedia::Text)
-    }
-
-    /// A generation of `prompt` with `images` and `audio` through the
-    /// model's own encoders.
-    pub(crate) fn multimodal(
-        executor: Arc<Executor<R>>,
-        prompt: Vec<u32>,
-        images: Vec<Vec<u8>>,
-        audio: Vec<Vec<f32>>,
-        config: GenerationConfig,
-    ) -> Self {
-        let media = DecodeMedia::Multimodal { images, audio };
-        Self::new(executor, prompt, config, media)
-    }
-
-    /// A generation of `prompt` with `images` through the vision tower.
-    pub(crate) fn images(
-        executor: Arc<Executor<R>>,
-        prompt: Vec<u32>,
-        images: Vec<Vec<u8>>,
-        config: GenerationConfig,
-    ) -> Self {
-        Self::new(executor, prompt, config, DecodeMedia::Images { images })
-    }
-
-    fn new(
-        executor: Arc<Executor<R>>,
-        prompt: Vec<u32>,
-        config: GenerationConfig,
-        media: DecodeMedia,
-    ) -> Self {
-        let secs = executor.config().inference.decode_idle_timeout_secs;
-        Self {
-            executor,
-            prompt,
-            config,
-            media,
-            idle: (secs > 0).then(|| Duration::from_secs(secs)),
-            #[cfg(test)]
-            on_step: None,
-        }
-    }
-
-    /// Run `hook` on the decode thread after each engine item.
-    #[cfg(test)]
-    pub(crate) fn with_step_hook(mut self, hook: StepHook) -> Self {
-        self.on_step = Some(hook);
-        self
-    }
-
-    /// Replace the idle timeout the executor config set.
-    #[cfg(test)]
-    pub(crate) fn with_idle_timeout(mut self, idle: Option<Duration>) -> Self {
-        self.idle = idle;
-        self
-    }
-
-    /// Build the stream and forward it through `out` to `tx`, on the thread
-    /// that calls this.
-    pub(super) async fn pump<O: DecodeOutput>(self, out: &mut O, tx: &mpsc::Sender<O::Item>) {
-        #[cfg(test)]
-        let hook = self.on_step.clone();
-        let on_step = move |step: usize| {
-            #[cfg(test)]
-            if let Some(hook) = &hook {
-                hook(step);
-            }
-            let _ = step;
-        };
-        let Self {
-            executor,
-            prompt,
-            config,
-            media,
-            idle,
-            ..
-        } = self;
-        let stream = match &media {
-            DecodeMedia::Text => executor.generate(&prompt, &config).boxed_local(),
-            DecodeMedia::Multimodal { images, audio } => executor
-                .generate_multimodal(&prompt, images, audio, &config)
-                .boxed_local(),
-            DecodeMedia::Images { images } => executor
-                .generate_with_images(&prompt, images, &config)
-                .boxed_local(),
-        };
-        forward_tokens(stream, out, tx, idle, on_step).await;
-    }
-}
 
 /// Run `job` on a decode thread and send each item `out` maps to `tx`.
 ///
@@ -236,7 +103,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use anyhow::anyhow;
     use boostr::CpuRuntime;

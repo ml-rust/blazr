@@ -13,8 +13,9 @@
 //! `inference.prefill_chunk_size` above 0 feeds an admitted prompt in slices
 //! of that many tokens and runs one decode step for the already occupied
 //! lanes between the slices, so a long prompt no longer holds back the token
-//! streams of the requests already decoding. At 0 the whole prompt goes
-//! through one prefill.
+//! streams of the requests already decoding. A request cancelled during its
+//! prefill stops at the next slice and frees its lane state. At 0 the whole
+//! prompt goes through one prefill that runs to its end.
 //!
 //! Logprobs are not produced on this path: a lane's logits are consumed by its
 //! own sampler and not kept.
@@ -184,15 +185,19 @@ impl LaneEngine {
             .max(1);
 
             let outcome = if self.chunk_size > 0 {
-                self.admit_chunked(&prompt_tokens, &gen_config).await
+                self.admit_chunked(seq_id, &prompt_tokens, &gen_config)
+                    .await
             } else {
                 self.executor
                     .qwen35_lane_admit(&prompt_tokens, &gen_config)
                     .await
+                    .map(Some)
             };
 
             match outcome {
-                Ok(admitted) => self.attach(seq_id, admitted).await,
+                Ok(Some(admitted)) => self.attach(seq_id, admitted).await,
+                // The caller left mid-prefill: its request is gone already.
+                Ok(None) => {}
                 Err(e) => {
                     let reason = anyhow!("admitting a request into a qwen35 lane failed: {e}");
                     self.scheduler.registry().send_error(seq_id, reason).await;
@@ -204,6 +209,10 @@ impl LaneEngine {
 
     /// Prefill one prompt in `chunk_size` slices, running one decode step for
     /// the already occupied lanes between the slices.
+    ///
+    /// Before each slice the request must still be in the registry. A
+    /// cancelled request leaves it, so the prefill stops at that slice,
+    /// drops its part-way state and returns `None`.
     ///
     /// A step between chunks forwards its tokens and releases its finished
     /// lanes exactly as the driver loop's own step does, so the requests
@@ -217,20 +226,29 @@ impl LaneEngine {
     /// way.
     async fn admit_chunked(
         &mut self,
+        seq_id: SequenceId,
         prompt_tokens: &[u32],
         gen_config: &GenerationConfig,
-    ) -> Result<LaneAdmitted> {
+    ) -> Result<Option<LaneAdmitted>> {
         self.executor
             .qwen35_lane_admit_begin(prompt_tokens, gen_config)
             .await?;
 
         loop {
+            if !self.scheduler.registry().contains(seq_id) {
+                tracing::debug!(
+                    seq_id,
+                    "lane prefill stopped at a chunk boundary: the caller left"
+                );
+                self.executor.qwen35_lane_admit_cancel().await;
+                return Ok(None);
+            }
             match self
                 .executor
                 .qwen35_lane_prefill_chunk(self.chunk_size)
                 .await
             {
-                Ok(Some(admitted)) => return Ok(admitted),
+                Ok(Some(admitted)) => return Ok(Some(admitted)),
                 Ok(None) => {}
                 Err(e) => {
                     self.executor.qwen35_lane_admit_cancel().await;

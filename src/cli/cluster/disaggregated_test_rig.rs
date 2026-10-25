@@ -15,7 +15,8 @@ use nexar::NexarClient;
 
 use super::disaggregated_forward::{build_decode_open_fn, build_prefill_fn};
 use crate::distributed::disaggregated::{
-    DecodeOpenFn, DecodeWorker, DisaggConfig, DisaggRouter, PrefillFn, PrefillOutput, PrefillWorker,
+    DecodeOpenFn, DecodeWorker, DisaggConfig, DisaggRouter, PrefillCancel, PrefillFn,
+    PrefillOutput, PrefillWorker,
 };
 use crate::distributed::transport;
 use crate::engine::Executor;
@@ -69,7 +70,7 @@ impl Mock {
 
     fn prefill_fn(&self) -> PrefillFn<CpuRuntime> {
         let opts = self.clone();
-        Box::new(move |prompt: &[u32]| {
+        Box::new(move |prompt: &[u32], _cancel: &PrefillCancel| {
             if let Ok(mut seen) = opts.prompts.lock() {
                 seen.push(prompt.to_vec());
             }

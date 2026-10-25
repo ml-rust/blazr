@@ -339,4 +339,39 @@ mod tests {
         assert!(body.contains("\"unavailable\""), "{body}");
         Ok(())
     }
+    /// Chunks of two over a twelve-token prompt: six prefill frames. The
+    /// handle drops once the first frame reached the last stage, so the
+    /// request leaves at its next frame and every stage frees it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_mid_prefill_stops_at_the_next_chunk() -> Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let mut front = full_vocab_front(LAYERS)?;
+        front.config.inference.prefill_chunk_size = 2;
+        let slow = Probe {
+            delay: Some(std::time::Duration::from_millis(50)),
+            ..Probe::default()
+        };
+        let s = Swarm::start(
+            Arc::new(front),
+            vec![Probe::default(), Probe::default(), slow],
+        )
+        .await?;
+        let handle = s.scheduler.submit((1..=12).collect(), greedy(4))?;
+        eventually("the first frame to reach the last stage", || {
+            s.probes[2].frames.load(SeqCst) >= 1
+        })
+        .await?;
+        drop(handle);
+        eventually("every stage to free the request", || s.idle()).await?;
+        let frames = s.probes[2].frames.load(SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            s.probes[2].frames.load(SeqCst),
+            frames,
+            "the prefill went on"
+        );
+        assert!(frames < 6, "{frames} of 6 prefill frames ran");
+        s.shutdown().await
+    }
 }

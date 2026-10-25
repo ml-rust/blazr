@@ -10,14 +10,15 @@ use boostr::inference::speculative::{
 use boostr::{DType, RoPEPackedOps, Runtime, Tensor};
 
 use super::target_glue::{
-    bias_tensor, biased_rows, greedy_ids, inference_error, no_verify_tokens, verify_rows,
-    LastLogits, TargetClient,
+    bias_tensor, biased_rows, chunked_logits, greedy_ids, inference_error, no_verify_tokens,
+    verify_rows, LastLogits, TargetClient,
 };
 use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
 use crate::engine::executors::executor_cache::prefix_cache_allocate;
 use crate::engine::executors::paged_pool::PoolLease;
 use crate::engine::requests::kv_recompute::{block_ids, block_slots};
+use crate::engine::types::PrefillCancel;
 
 /// One sequence of an executor's model as a boostr [`SpeculativeModel`], over
 /// blocks of the executor's paged KV pool.
@@ -45,6 +46,8 @@ pub(in crate::engine) struct PagedTarget<'a, R: Runtime<DType = DType>> {
     bias: Option<Tensor<R>>,
     /// The `[1, M, vocab]` logits of the last extend, before the bias.
     last_logits: Option<Tensor<R>>,
+    /// Read before each forward chunk.
+    cancel: PrefillCancel<'a>,
 }
 
 impl<'a, R> PagedTarget<'a, R>
@@ -74,7 +77,14 @@ where
             fed: Vec::new(),
             bias: bias_tensor(exec, gen)?,
             last_logits: None,
+            cancel: PrefillCancel::never(),
         })
+    }
+
+    /// Stop an extend at its next chunk boundary once `cancel` trips.
+    pub(in crate::engine) fn with_cancel(mut self, cancel: PrefillCancel<'a>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// Every token the cache holds, in order.
@@ -131,8 +141,8 @@ where
         Ok(start)
     }
 
-    /// One forward over `tokens` at the sequence end: the logits, then the
-    /// logits with the bias added.
+    /// The forward over `tokens` at the sequence end, in chunks: the logits,
+    /// then the logits with the bias added.
     ///
     /// The lease covers the new positions. The sequence and `fed` grow by
     /// `tokens.len()`.
@@ -140,26 +150,29 @@ where
         let start = self.len;
         let end = start + tokens.len();
         self.lease.cover(end)?;
+        let (exec, pool) = (self.exec, self.pool);
         let blocks = self.lease.blocks();
-        let slots = block_slots(blocks, self.lease.block_size(), start..end);
-        let slot_mapping = Tensor::from_slice(&slots, &[tokens.len()], self.exec.device())?;
+        let block_size = self.lease.block_size();
         let table = block_ids(blocks);
-        let block_table = Tensor::from_slice(&table, &[1, table.len()], self.exec.device())?;
-        let input = self.exec.create_input_tensor(tokens)?;
-        let logits = self
-            .exec
-            .model()?
-            .forward_with_paged_kv_cache(
-                &input,
-                self.pool,
-                &slot_mapping,
-                &block_table,
-                end,
-                start,
-                None,
-                None,
-            )
-            .map_err(|e| anyhow!("Paged forward over {} tokens failed: {e}", tokens.len()))?;
+        let block_table = Tensor::from_slice(&table, &[1, table.len()], exec.device())?;
+        let logits = chunked_logits(exec, &self.cancel, tokens.len(), |r| {
+            let (from, to) = (start + r.start, start + r.end);
+            let slots = block_slots(blocks, block_size, from..to);
+            let slot_mapping = Tensor::from_slice(&slots, &[r.len()], exec.device())?;
+            let input = exec.create_input_tensor(&tokens[r])?;
+            exec.model()?
+                .forward_with_paged_kv_cache(
+                    &input,
+                    pool,
+                    &slot_mapping,
+                    &block_table,
+                    to,
+                    from,
+                    None,
+                    None,
+                )
+                .map_err(|e| anyhow!("Paged forward over positions {from}..{to} failed: {e}"))
+        })?;
         self.len = end;
         self.fed.extend_from_slice(tokens);
         biased_rows(self.exec, &mut self.bias, logits, tokens.len())

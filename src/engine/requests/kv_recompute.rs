@@ -18,6 +18,7 @@ use boostr::{
 };
 
 use crate::engine::executor::Executor;
+use crate::engine::types::PrefillCancel;
 
 /// The paged-cache slot of `position`, or -1 past the end of `blocks`, which
 /// the kernels skip.
@@ -48,7 +49,9 @@ pub(in crate::engine) fn block_ids(blocks: &[BlockId]) -> Vec<i32> {
 /// `0..tokens.len()`.
 ///
 /// `chunk` caps the tokens one forward takes. A `chunk` of 0 runs every token
-/// in one forward. The logits are dropped.
+/// in one forward. The logits are dropped. `cancel` is read before each
+/// forward. Returns whether every position was filled: `false` when
+/// `cancel` stopped the refill.
 ///
 /// # Errors
 ///
@@ -59,7 +62,8 @@ pub(in crate::engine) fn recompute_kv<R: Runtime<DType = DType>>(
     tokens: &[u32],
     blocks: &[BlockId],
     chunk: usize,
-) -> Result<()>
+    cancel: PrefillCancel<'_>,
+) -> Result<bool>
 where
     R::Client: TensorOps<R>
         + ScalarOps<R>
@@ -75,15 +79,15 @@ where
         + RoPEPackedOps<R>
         + boostr::quant::traits::DequantOps<R>,
 {
+    if tokens.is_empty() {
+        return Ok(true);
+    }
     let device = executor.device();
     let block_size = paged_cache.block_size();
-    let step = if chunk == 0 { tokens.len() } else { chunk };
     let bt_vec = block_ids(blocks);
     let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], device)?;
-
-    let mut start = 0;
-    while start < tokens.len() {
-        let end = (start + step).min(tokens.len());
+    let filled = cancel.run(0..tokens.len(), chunk, |r| {
+        let (start, end) = (r.start, r.end);
         let slots = block_slots(blocks, block_size, start..end);
         let slot_tensor = Tensor::from_slice(&slots, &[end - start], device)?;
         let input = executor.create_input_tensor(&tokens[start..end])?;
@@ -106,9 +110,9 @@ where
                     tokens.len()
                 )
             })?;
-        start = end;
-    }
-    Ok(())
+        Ok(())
+    })?;
+    Ok(filled.is_some())
 }
 
 #[cfg(test)]
@@ -169,8 +173,9 @@ mod tests {
         let next = 6;
 
         // The original prefill writes blocks 0 and 1. Chunks of 2 refill 4 and 5.
-        recompute_kv(&exec, &cache, &context, &[0, 1], 0)?;
-        recompute_kv(&exec, &cache, &context, &[4, 5], 2)?;
+        let never = PrefillCancel::never();
+        assert!(recompute_kv(&exec, &cache, &context, &[0, 1], 0, never)?);
+        assert!(recompute_kv(&exec, &cache, &context, &[4, 5], 2, never)?);
 
         let original = decode_logits(&exec, &cache, &[0, 1], next, context.len())?;
         let refilled = decode_logits(&exec, &cache, &[4, 5], next, context.len())?;
@@ -183,6 +188,37 @@ mod tests {
             .fold(0.0f32, f32::max);
         assert!(max_diff < 1e-4, "refilled blocks differ by {max_diff}");
         assert_ne!(original, empty, "decoding over empty blocks must differ");
+        Ok(())
+    }
+
+    #[test]
+    fn a_cancel_stops_the_refill_at_the_next_chunk() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let exec = seeded_executor(3, None)?;
+        let model = exec.model()?;
+        let cache = LayeredPagedKvCache::<CpuRuntime>::new(
+            model.num_layers(),
+            8,
+            BLOCK_SIZE,
+            model.num_kv_heads().unwrap_or(1),
+            model.head_dim().unwrap_or(1),
+            DType::F32,
+            exec.device(),
+        )?;
+        let reads = AtomicUsize::new(0);
+        let probe = || reads.fetch_add(1, Ordering::SeqCst) >= 1;
+        let context = [1, 2, 3, 4, 5];
+        let filled = recompute_kv(
+            &exec,
+            &cache,
+            &context,
+            &[0, 1],
+            2,
+            PrefillCancel::when(&probe),
+        )?;
+        assert!(!filled, "the refill reports the stop");
+        assert_eq!(reads.load(Ordering::SeqCst), 2, "one of three chunks ran");
         Ok(())
     }
 }

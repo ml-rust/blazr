@@ -19,7 +19,7 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 
-use super::types::{FinishReason, GeneratedToken};
+use super::types::{FinishReason, GeneratedToken, PrefillCancel};
 
 use super::executor::Executor;
 
@@ -52,6 +52,27 @@ where
         images: &'a [Vec<u8>],
         audio_segments: &'a [Vec<f32>],
         gen_config: &'a GenerationConfig,
+    ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
+        self.generate_multimodal_cancellable(
+            prompt_tokens,
+            images,
+            audio_segments,
+            gen_config,
+            PrefillCancel::never(),
+        )
+    }
+
+    /// [`Self::generate_multimodal`], with a prefill of the merged
+    /// embeddings in chunks of `inference.prefill_chunk_size` rows that
+    /// reads `cancel` before each chunk. A cancelled prefill ends the stream
+    /// with no item. The image and audio encoders run whole.
+    pub fn generate_multimodal_cancellable<'a>(
+        &'a self,
+        prompt_tokens: &'a [u32],
+        images: &'a [Vec<u8>],
+        audio_segments: &'a [Vec<f32>],
+        gen_config: &'a GenerationConfig,
+        cancel: PrefillCancel<'a>,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             // Check that the model is multimodal
@@ -291,13 +312,20 @@ where
                 num_audio = audio_segments.len(),
             );
 
-            let mut logits = llm.forward_layers_range(
-                merged_embeds, None, &mut kv_cache, 0, num_layers, 0,
-            ).map_err(|e| anyhow!("Multimodal prefill layers failed: {}", e))
-            .and_then(|(hidden, prev_mlp)| {
-                llm.forward_head(hidden, prev_mlp)
-                    .map_err(|e| anyhow!("Multimodal prefill head failed: {}", e))
+            // Each chunk writes its rows' KV. Only the last chunk's head runs.
+            let chunk = self.config.inference.prefill_chunk_size;
+            let prefilled = cancel.run(0..merged_seq_len, chunk, |r| {
+                let rows = if r.len() == merged_seq_len {
+                    merged_embeds.tensor().clone()
+                } else {
+                    merged_embeds.tensor().narrow(1, r.start, r.len())?.contiguous()?
+                };
+                llm.forward_layers_range(Var::new(rows, false), None, &mut kv_cache, 0, num_layers, r.start)
+                    .map_err(|e| anyhow!("Multimodal prefill layers of rows {r:?} failed: {e}"))
             })?;
+            let Some((hidden, prev_mlp)) = prefilled else { return; };
+            let mut logits = llm.forward_head(hidden, prev_mlp)
+                .map_err(|e| anyhow!("Multimodal prefill head failed: {}", e))?;
 
             tracing::info!(phase = "prefill_end", backend = "multimodal");
 

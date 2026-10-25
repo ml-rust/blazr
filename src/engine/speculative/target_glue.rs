@@ -1,5 +1,8 @@
 //! The parts of a speculative target that do not depend on the KV cache: the
-//! client bound, the logit bias, the greedy read and the verify call.
+//! client bound, the chunked forward, the logit bias, the greedy read and
+//! the verify call.
+
+use std::ops::Range;
 
 use anyhow::anyhow;
 
@@ -15,6 +18,7 @@ use boostr::{
 
 use crate::config::GenerationConfig;
 use crate::engine::executor::Executor;
+use crate::engine::types::PrefillCancel;
 
 /// The device client a speculative target needs.
 pub trait TargetClient<R: Runtime<DType = DType>>:
@@ -69,6 +73,50 @@ pub(super) fn inference_error(e: anyhow::Error) -> Error {
     Error::InferenceError {
         reason: format!("{e:#}"),
     }
+}
+
+/// Run `forward` over the token positions `0..len` in chunks of
+/// `inference.prefill_chunk_size`, and join the logits rows in order.
+///
+/// `cancel` is read before each chunk, so a long prompt extend stops at a
+/// chunk boundary once the caller leaves. A chunk size of 0 runs one forward.
+///
+/// # Errors
+///
+/// An error when a chunk's forward fails, the rows cannot be joined, or
+/// `cancel` stopped the forward.
+pub(super) fn chunked_logits<R>(
+    exec: &Executor<R>,
+    cancel: &PrefillCancel<'_>,
+    len: usize,
+    mut forward: impl FnMut(Range<usize>) -> anyhow::Result<Tensor<R>>,
+) -> anyhow::Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TargetClient<R>,
+{
+    let chunk = exec.config().inference.prefill_chunk_size;
+    let mut rows = Vec::new();
+    let ran = cancel.run(0..len, chunk, |r| {
+        rows.push(forward(r)?);
+        Ok(())
+    })?;
+    if ran.is_none() {
+        return Err(match len {
+            0 => anyhow!("a forward needs at least one token; got none"),
+            _ => anyhow!(
+                "the forward over {len} tokens stopped at a chunk boundary: the caller left"
+            ),
+        });
+    }
+    if rows.len() == 1 {
+        if let Some(only) = rows.pop() {
+            return Ok(only);
+        }
+    }
+    let refs: Vec<&Tensor<R>> = rows.iter().collect();
+    Tensor::cat(&refs, 1)
+        .map_err(|e| anyhow!("joining the logits of {} chunks failed: {e}", rows.len()))
 }
 
 /// The `[1, 1, vocab]` logit bias of `gen`, or none when it sets no bias.

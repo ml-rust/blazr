@@ -19,7 +19,7 @@ use crate::config::GenerationConfig;
 
 use super::executor::Executor;
 use super::executor_generate_qwen35::DecodeSetup;
-use super::types::GeneratedToken;
+use super::types::{GeneratedToken, PrefillCancel};
 use super::vision_tower::{grid_of, NO_TOWER_ERROR};
 
 impl<R: Runtime<DType = DType>> Executor<R>
@@ -96,9 +96,26 @@ where
         images: &'a [Vec<u8>],
         gen_config: &'a GenerationConfig,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
+        self.generate_with_images_cancellable(
+            prompt_tokens,
+            images,
+            gen_config,
+            PrefillCancel::never(),
+        )
+    }
+
+    /// [`Self::generate_with_images`], with a prefill that stops once
+    /// `cancel` trips, as [`Executor::generate_cancellable`] stops.
+    pub fn generate_with_images_cancellable<'a>(
+        &'a self,
+        prompt_tokens: &'a [u32],
+        images: &'a [Vec<u8>],
+        gen_config: &'a GenerationConfig,
+        cancel: PrefillCancel<'a>,
+    ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             if images.is_empty() {
-                let inner = self.generate(prompt_tokens, gen_config);
+                let inner = self.generate_cancellable(prompt_tokens, gen_config, cancel);
                 for await item in inner {
                     yield item;
                 }
@@ -120,7 +137,7 @@ where
                 sampler,
                 plan: Some(plan),
             };
-            let inner = self.generate_qwen35(prompt_tokens, gen_config, setup);
+            let inner = self.generate_qwen35(prompt_tokens, gen_config, setup, cancel);
             for await item in inner {
                 yield item;
             }

@@ -14,7 +14,7 @@ use super::target_glue::{LastLogits, TargetClient};
 use super::{ContiguousTarget, Fallback, PagedTarget, SpeculativePlan};
 use crate::config::{DrafterSpec, GenerationConfig};
 use crate::engine::executor::Executor;
-use crate::engine::types::{FinishReason, GeneratedToken};
+use crate::engine::types::{FinishReason, GeneratedToken, PrefillCancel};
 use crate::telemetry::record::{
     record_speculative, record_speculative_fallback, SpeculativeCounts,
 };
@@ -92,39 +92,46 @@ where
     /// Emitted token `j` of a step takes row `j` of that forward's logits
     /// for its logprobs. The last token of the final step carries the
     /// finish reason. Dropping the stream drops the request's KV cache.
+    ///
+    /// The target and the draft model run each extend in chunks of
+    /// `inference.prefill_chunk_size` tokens and read `cancel` before each
+    /// chunk. A cancel ends the stream with no item.
     pub(in crate::engine) fn generate_speculative<'a>(
         &'a self,
         prompt: &'a [u32],
         gen: &'a GenerationConfig,
         plan: SpeculativePlan,
+        cancel: PrefillCancel<'a>,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             let SpeculativePlan { config, drafter } = plan;
             let paged = self.config.inference.paged_attention;
             match drafter {
                 DrafterSpec::PromptLookup(lookup) if paged => {
-                    let target = PagedTarget::new(self, gen, prompt.len())?;
-                    for await item in self.drive_speculative(target, prompt, gen, config, lookup) {
+                    let target = PagedTarget::new(self, gen, prompt.len())?.with_cancel(cancel);
+                    for await item in self.drive_speculative(target, prompt, gen, config, lookup, cancel) {
                         yield item;
                     }
                 }
                 DrafterSpec::PromptLookup(lookup) => {
-                    let target = ContiguousTarget::new(self, gen, prompt.len(), config.max_tokens)?;
-                    for await item in self.drive_speculative(target, prompt, gen, config, lookup) {
+                    let target = ContiguousTarget::new(self, gen, prompt.len(), config.max_tokens)?
+                        .with_cancel(cancel);
+                    for await item in self.drive_speculative(target, prompt, gen, config, lookup, cancel) {
                         yield item;
                     }
                 }
                 DrafterSpec::Model if paged => {
-                    let target = PagedTarget::new(self, gen, prompt.len())?;
-                    let drafter = self.model_drafter(gen, prompt.len(), &config)?;
-                    for await item in self.drive_speculative(target, prompt, gen, config, drafter) {
+                    let target = PagedTarget::new(self, gen, prompt.len())?.with_cancel(cancel);
+                    let drafter = self.model_drafter(gen, prompt.len(), &config, cancel)?;
+                    for await item in self.drive_speculative(target, prompt, gen, config, drafter, cancel) {
                         yield item;
                     }
                 }
                 DrafterSpec::Model => {
-                    let target = ContiguousTarget::new(self, gen, prompt.len(), config.max_tokens)?;
-                    let drafter = self.model_drafter(gen, prompt.len(), &config)?;
-                    for await item in self.drive_speculative(target, prompt, gen, config, drafter) {
+                    let target = ContiguousTarget::new(self, gen, prompt.len(), config.max_tokens)?
+                        .with_cancel(cancel);
+                    let drafter = self.model_drafter(gen, prompt.len(), &config, cancel)?;
+                    for await item in self.drive_speculative(target, prompt, gen, config, drafter, cancel) {
                         yield item;
                     }
                 }
@@ -146,6 +153,7 @@ where
         gen: &GenerationConfig,
         prompt_len: usize,
         config: &SpeculativeConfig,
+        cancel: PrefillCancel<'a>,
     ) -> Result<ModelDrafter<R, ContiguousTarget<'a, R>, R::Client>> {
         let draft = self.draft.as_deref().ok_or_else(|| {
             anyhow!(
@@ -154,11 +162,14 @@ where
             )
         })?;
         let budget = config.max_tokens + config.num_draft_tokens;
-        let model = ContiguousTarget::new(draft, gen, prompt_len, budget)?;
+        let model = ContiguousTarget::new(draft, gen, prompt_len, budget)?.with_cancel(cancel);
         Ok(ModelDrafter::new(model, R::default_client(draft.device())))
     }
 
     /// The speculative loop over `target`, drafting with `drafter`.
+    ///
+    /// An error after `cancel` tripped is the stopped extend: the stream
+    /// ends with no item.
     fn drive_speculative<'a, M, D>(
         &'a self,
         target: M,
@@ -166,6 +177,7 @@ where
         gen: &'a GenerationConfig,
         config: SpeculativeConfig,
         drafter: D,
+        cancel: PrefillCancel<'a>,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a
     where
         M: SpeculativeModel + LastLogits<R> + 'a,
@@ -179,11 +191,20 @@ where
             let mut text = TokenTextStream::new(self.tokenizer(), prompt);
 
             tracing::info!(phase = "prefill_start", backend = "speculative", prompt_tokens = prompt.len());
-            generator.start(prompt)?;
+            if let Err(e) = generator.start(prompt) {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                Err::<(), _>(e)?;
+            }
             tracing::info!(phase = "prefill_end", backend = "speculative");
             tracing::info!(phase = "decode_start", backend = "speculative", max_tokens, num_draft_tokens);
             loop {
-                let StepOutput { tokens, finish } = generator.step()?;
+                let StepOutput { tokens, finish } = match generator.step() {
+                    Ok(step) => step,
+                    Err(_) if cancel.is_cancelled() => return,
+                    Err(e) => Err::<StepOutput, _>(e)?,
+                };
                 stats.0 = generator.stats();
                 let logits = generator
                     .model()

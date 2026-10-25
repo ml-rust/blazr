@@ -23,7 +23,7 @@ use crate::config::GenerationConfig;
 
 use super::executor::Executor;
 use super::sampler_state::SamplerState;
-use super::types::{FinishReason, GeneratedToken};
+use super::types::{FinishReason, GeneratedToken, PrefillCancel};
 
 /// Per-request state `generate` builds before it picks a decode arm.
 pub(in crate::engine) struct DecodeSetup<R: Runtime<DType = DType>> {
@@ -177,6 +177,50 @@ where
             })
     }
 
+    /// [`Self::qwen35_prefill`] in chunks of `inference.prefill_chunk_size`
+    /// rows, reading `cancel` before each chunk.
+    ///
+    /// Each chunk continues the KV cache and the GDN state the chunks
+    /// before it left. An image plan's chunk takes its rows of the plan's
+    /// embeddings and positions. Returns the last chunk's logits, or `None`
+    /// when `cancel` stopped the prefill.
+    ///
+    /// # Errors
+    ///
+    /// An error when a chunk's forward fails.
+    pub(in crate::engine) fn qwen35_prefill_chunked(
+        &self,
+        input: &Tensor<R>,
+        plan: Option<&Qwen35PromptPlan<R>>,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+        cancel: PrefillCancel<'_>,
+    ) -> Result<Option<Tensor<R>>> {
+        let chunk = self.config.inference.prefill_chunk_size;
+        let rows = plan.map_or_else(
+            || input.shape().last().copied().unwrap_or(0),
+            Qwen35PromptPlan::seq_len,
+        );
+        cancel.run(0..rows, chunk, |r| {
+            if r == (0..rows) {
+                return self.qwen35_prefill(input, plan, kv_cache, gdn_state);
+            }
+            match plan {
+                Some(plan) => {
+                    let embeds = plan.embeds.narrow(1, r.start, r.len())?.contiguous()?;
+                    let positions = plan.positions.narrow(1, r.start, r.len())?.contiguous()?;
+                    self.model()?
+                        .forward_qwen35_embeds(&embeds, &positions, kv_cache, gdn_state)
+                        .map_err(|e| anyhow!("qwen35 image prefill of rows {r:?} failed: {e}"))
+                }
+                None => {
+                    let piece = input.narrow(1, r.start, r.len())?.contiguous()?;
+                    self.qwen35_prefill_at(&piece, r.start, kv_cache, gdn_state)
+                }
+            }
+        })
+    }
+
     /// Rope position of the first decode token after a prefill: the plan's
     /// next position, or the KV slot for a text-only prompt.
     pub(in crate::engine) fn qwen35_first_rope_pos(
@@ -191,11 +235,15 @@ where
     /// The rope position of a decode step is the KV slot minus the lag the
     /// prefill left: zero for text, `sum(n_i - max(nx_i, ny_i))` after
     /// images.
+    ///
+    /// The prefill runs in chunks and reads `cancel` before each one. A
+    /// cancelled prefill ends the stream with no item.
     pub(in crate::engine) fn generate_qwen35<'a>(
         &'a self,
         prompt_tokens: &'a [u32],
         gen_config: &'a GenerationConfig,
         setup: DecodeSetup<R>,
+        cancel: PrefillCancel<'a>,
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             let DecodeSetup {
@@ -212,7 +260,8 @@ where
 
             tracing::info!(phase = "prefill_start", backend = "qwen35", prompt_tokens = prompt_tokens.len(), prompt_rows = prompt_rows);
             let t0 = std::time::Instant::now();
-            let mut logits = self.qwen35_prefill(&input, plan.as_ref(), &mut kv_cache, &mut gdn_state)?;
+            let prefilled = self.qwen35_prefill_chunked(&input, plan.as_ref(), &mut kv_cache, &mut gdn_state, cancel)?;
+            let Some(mut logits) = prefilled else { return; };
             let rope_lag = kv_cache.seq_len() - Self::qwen35_first_rope_pos(plan.as_ref(), &kv_cache);
             drop(plan);
             tracing::info!("Prefill: {:?} (seq_len={}, kv={})", t0.elapsed(), prompt_rows, kv_cache.seq_len());

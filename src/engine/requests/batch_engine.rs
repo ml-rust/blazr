@@ -219,11 +219,11 @@ mod tests {
 
     use crate::config::{Constraint, GenerationConfig};
     use crate::engine::requests::batch_test_rig::{
-        alone, drain, greedy, ids, received, rig, rig_on, POOL,
+        alone, drain, free_blocks, greedy, ids, received, rig, rig_on, Rig, POOL, SEED, TINY_CTX,
     };
     use crate::engine::test_support::{
-        check_two_field_instance, full_vocab_executor, two_field_bias, two_field_schema, PagedPool,
-        FULL_VOCAB_CTX,
+        check_two_field_instance, full_vocab_executor, seeded_executor, two_field_bias,
+        two_field_schema, PagedPool, FULL_VOCAB_CTX,
     };
     use crate::tokenizer::token_piece_bytes;
 
@@ -391,6 +391,40 @@ mod tests {
 
         rig.scheduler.cancel(handle.seq_id)?;
         rig.engine.tick().await;
+        assert_eq!(rig.engine.seqs.len(), 0);
+        Ok(())
+    }
+
+    /// With no engine override the chunk size is `inference.prefill_chunk_size`.
+    /// The handle drops after the first of five chunks, so no other runs.
+    #[tokio::test]
+    async fn the_config_chunk_size_stops_a_cancelled_prefill() -> Result<()> {
+        let mut executor = seeded_executor(SEED, Some(POOL))?;
+        executor.config.inference.prefill_chunk_size = 2;
+        let Rig {
+            executor,
+            scheduler,
+            ..
+        } = rig_on(executor, POOL, TINY_CTX)?;
+        let engine = BatchEngine::new(Arc::clone(&executor), Arc::clone(&scheduler))?;
+        let mut rig = Rig {
+            executor,
+            scheduler,
+            engine,
+        };
+        let start = free_blocks(&rig)?;
+        let handle = rig.scheduler.submit((1..=9).collect(), greedy(4))?;
+        let seq_id = handle.seq_id;
+        let mut slot = Some(handle);
+        rig.engine.after_chunk = Some(Box::new(move |_: usize| drop(slot.take())));
+
+        rig.engine.tick().await;
+        rig.engine.after_chunk = None;
+
+        assert_eq!(rig.engine.seqs.forwards, 1, "one chunk ran");
+        assert!(!rig.scheduler.is_live(seq_id));
+        assert!(!rig.engine.has_live_work());
+        assert_eq!(free_blocks(&rig)?, start, "the prompt blocks are free");
         assert_eq!(rig.engine.seqs.len(), 0);
         Ok(())
     }

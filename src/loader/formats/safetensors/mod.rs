@@ -3,6 +3,7 @@ mod bytes;
 mod checkpoint_map;
 mod config;
 mod config_dtype;
+mod decomposed;
 mod detect_arch;
 pub mod gptq;
 mod hf_qwen35;

@@ -87,6 +87,7 @@ mod tests {
     };
     use crate::engine::{GeneratedToken, RequestHandle, RequestRegistry};
     use crate::server::completion_stream::create_completion_stream;
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
     use crate::server::routed_stream::stream_routed;
     use crate::server::stream_usage::StreamUsage;
     use crate::server::streaming::sse_test;

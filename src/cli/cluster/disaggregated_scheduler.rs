@@ -61,7 +61,7 @@ impl DisaggScheduler {
     }
 
     /// Requests whose stream task still runs.
-    #[cfg(test)]
+    #[cfg(all(test, not(any(feature = "cuda", feature = "wgpu"))))]
     fn running(&self) -> usize {
         self.tasks.lock().map_or(0, |t| t.len())
     }
@@ -200,7 +200,7 @@ impl CancelRequest for DisaggScheduler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(feature = "cuda", feature = "wgpu"))))]
 mod tests {
     use std::collections::HashMap;
     use std::time::Duration;

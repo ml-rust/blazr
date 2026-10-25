@@ -133,7 +133,7 @@ impl SwarmScheduler {
     }
 
     /// Requests whose task still runs.
-    #[cfg(test)]
+    #[cfg(all(test, not(any(feature = "cuda", feature = "wgpu"))))]
     pub(super) fn running(&self) -> usize {
         self.tasks.lock().map_or(0, |t| t.cancels.len())
     }

@@ -45,26 +45,23 @@ impl TokenBudget {
         self.inflight() as f64 / self.max as f64
     }
 
-    /// Reserve `tokens`. Returns `None` and reserves nothing when the limit
-    /// would be exceeded. The permit gives the tokens back on drop.
+    /// Reserve `tokens`. Returns `None` and reserves nothing when `tokens`
+    /// more go past the limit, or when the count in flight cannot hold them.
+    /// The permit gives the tokens back on drop.
     pub fn try_admit(self: &Arc<Self>, tokens: usize) -> Option<BudgetPermit> {
-        if self.max == 0 {
-            self.inflight.fetch_add(tokens, Ordering::Relaxed);
-        } else {
-            let mut current = self.inflight.load(Ordering::Relaxed);
-            loop {
-                if current.saturating_add(tokens) > self.max {
-                    return None;
-                }
-                match self.inflight.compare_exchange_weak(
-                    current,
-                    current + tokens,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(seen) => current = seen,
-                }
+        let mut current = self.inflight.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(tokens)
+                .filter(|&next| self.max == 0 || next <= self.max)?;
+            match self.inflight.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(seen) => current = seen,
             }
         }
         metrics::adjust_inflight_tokens(tokens as f64);
@@ -78,6 +75,14 @@ impl TokenBudget {
         self.inflight.fetch_sub(tokens, Ordering::Relaxed);
         metrics::adjust_inflight_tokens(-(tokens as f64));
     }
+}
+
+/// The tokens one request reserves: its prompt plus its generation limit.
+///
+/// The sum saturates at `usize::MAX`. A huge `max_tokens` then asks for more
+/// than any limit, and never wraps to a small count.
+pub fn request_tokens(prompt_len: usize, max_tokens: usize) -> usize {
+    prompt_len.saturating_add(max_tokens)
 }
 
 /// Reserved tokens. Dropping the permit releases them once.
@@ -180,6 +185,45 @@ mod tests {
         assert_eq!(budget.inflight(), 50);
         drop(body);
         assert_eq!(budget.inflight(), 0);
+    }
+
+    #[test]
+    fn request_tokens_saturates_instead_of_wrapping() {
+        assert_eq!(request_tokens(10, 20), 30);
+        assert_eq!(request_tokens(10, usize::MAX), usize::MAX);
+        assert_eq!(request_tokens(usize::MAX, usize::MAX), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn a_huge_max_tokens_is_refused_by_a_limited_budget() {
+        let budget = TokenBudget::new(100);
+        assert!(budget.try_admit(request_tokens(5, usize::MAX)).is_none());
+        assert_eq!(budget.inflight(), 0);
+        assert!(budget.try_admit(request_tokens(5, 20)).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_limit_of_usize_max_never_overflows() {
+        let budget = TokenBudget::new(usize::MAX);
+        let first = budget.try_admit(request_tokens(1, usize::MAX));
+        assert!(first.is_some());
+        assert!(budget.try_admit(1).is_none());
+        assert_eq!(budget.inflight(), usize::MAX);
+        drop(first);
+        assert_eq!(budget.inflight(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unlimited_budget_admits_a_huge_request_without_wrapping() {
+        let budget = TokenBudget::new(0);
+        let first = budget.try_admit(request_tokens(5, usize::MAX));
+        assert!(first.is_some());
+        assert_eq!(budget.inflight(), usize::MAX);
+        // A second reservation cannot be counted, so it is refused, never wrapped.
+        assert!(budget.try_admit(10).is_none());
+        drop(first);
+        assert_eq!(budget.inflight(), 0);
+        assert!(budget.try_admit(10).is_some());
     }
 
     #[tokio::test]

@@ -60,7 +60,11 @@ where
             kv,
             fresh: Some(fresh),
             bias: bias_tensor(exec, gen)?,
-            fed: Vec::with_capacity(prompt_len + max_tokens),
+            fed: Vec::with_capacity(
+                prompt_len
+                    .saturating_add(max_tokens)
+                    .min(exec.config().max_seq_len()),
+            ),
             last_logits: None,
             cancel: PrefillCancel::never(),
         })

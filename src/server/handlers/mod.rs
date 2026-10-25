@@ -12,7 +12,7 @@ mod tokenize;
 mod variant;
 
 pub use auxiliary::{AuxiliaryKind, AuxiliaryModel};
-pub use budget::{BudgetPermit, DecodeSlot, TokenBudget};
+pub use budget::{request_tokens, BudgetPermit, DecodeSlot, TokenBudget};
 pub use health::health;
 pub use models::{get_model, list_models, ModelInfo, ModelsResponse};
 pub use route::{Route, ServeReplica, Serving};

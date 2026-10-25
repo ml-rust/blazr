@@ -24,7 +24,7 @@ use crate::server::generation::{
     admit_generation, overloaded_response, record_generation_metrics, validate_generation_params,
     HasSamplingFields,
 };
-use crate::server::handlers::{classify_lookup, AppState, DecodeSlot};
+use crate::server::handlers::{classify_lookup, request_tokens, AppState, DecodeSlot};
 use crate::server::reasoning::ReasoningParser;
 use crate::server::route_stream::{generate_for_media, spawn_media_stream};
 
@@ -113,7 +113,7 @@ pub async fn messages(
     let reasoning_format = state.reasoning_format();
 
     // Token budget admission
-    let estimated_tokens = prompt_tokens.len() + gen_config.max_tokens;
+    let estimated_tokens = request_tokens(prompt_tokens.len(), gen_config.max_tokens);
     let Some(permit) = state.try_admit(estimated_tokens) else {
         return overloaded_response();
     };

@@ -227,7 +227,7 @@ impl Executor<CudaRuntime> {
             let block_size = self.config().inference.block_size;
 
             // Pre-allocate enough blocks for full capacity
-            let total_tokens = prompt_tokens.len() + max_tokens;
+            let total_tokens = prompt_tokens.len().saturating_add(max_tokens);
             let num_blocks = BlockTable::blocks_needed(total_tokens, block_size) + 4;
             let allocator = CpuBlockAllocator::new(num_blocks, block_size);
 

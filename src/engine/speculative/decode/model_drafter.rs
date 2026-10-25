@@ -37,7 +37,7 @@ where
                  and reload the model"
             )
         })?;
-        let budget = config.max_tokens + config.num_draft_tokens;
+        let budget = config.max_tokens.saturating_add(config.num_draft_tokens);
         let model = ContiguousTarget::new(draft, gen, prompt_len, budget)?.with_cancel(cancel);
         Ok(ModelDrafter::new(model, R::default_client(draft.device())))
     }

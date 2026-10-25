@@ -294,7 +294,7 @@ where
             let num_layers = llm.num_layers();
             let num_kv_heads = llm.num_kv_heads().unwrap_or(8);
             let head_dim = llm.head_dim().unwrap_or(64);
-            let initial_capacity = (merged_seq_len + max_tokens).min(max_seq_len);
+            let initial_capacity = merged_seq_len.saturating_add(max_tokens).min(max_seq_len);
             let kv_dtype = self.config.kv_cache_dtype()?;
 
             let mut kv_cache = LayeredKvCache::new_positional(

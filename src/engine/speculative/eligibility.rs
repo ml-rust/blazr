@@ -150,7 +150,11 @@ where
         let drafter = spec.drafter_spec().map_err(|_| Fallback::Drafter)?;
         if drafter == DrafterSpec::Model {
             let draft = self.draft.as_deref().ok_or(Fallback::DraftModel)?;
-            if prompt.len() + max_tokens + num_draft_tokens > draft.config.max_seq_len() {
+            let needed = prompt
+                .len()
+                .saturating_add(max_tokens)
+                .saturating_add(num_draft_tokens);
+            if needed > draft.config.max_seq_len() {
                 return Err(Fallback::DraftContext);
             }
         }

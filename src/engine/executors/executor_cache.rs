@@ -196,7 +196,7 @@ where
         let model = self.model()?;
         let num_kv_heads = model.num_kv_heads().unwrap_or(8);
         let head_dim = model.head_dim().unwrap_or(64);
-        let initial_capacity = (prompt_len + max_tokens).min(max_seq_len);
+        let initial_capacity = prompt_len.saturating_add(max_tokens).min(max_seq_len);
         let dtype = self.config.kv_cache_dtype()?;
         let cache = LayeredKvCache::new_positional(
             model.num_layers(),

@@ -271,7 +271,7 @@ where
             .is_some_and(|n| n > 0)
         {
             let max_seq_len = self.executor.config().max_seq_len();
-            let capacity = (prompt_len + max_tokens).min(max_seq_len);
+            let capacity = prompt_len.saturating_add(max_tokens).min(max_seq_len);
             let (kv, ssm) = self.executor.hybrid_caches(capacity, max_seq_len)?;
             return Ok((kv, Some(ssm)));
         }

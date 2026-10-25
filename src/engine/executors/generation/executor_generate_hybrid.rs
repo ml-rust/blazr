@@ -93,7 +93,10 @@ where
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             let max_seq_len = self.config.max_seq_len();
-            let initial_capacity = (prompt_tokens.len() + max_tokens).min(max_seq_len);
+            let initial_capacity = prompt_tokens
+                .len()
+                .saturating_add(max_tokens)
+                .min(max_seq_len);
             let (mut kv_cache, mut ssm_state) = self.hybrid_caches(initial_capacity, max_seq_len)?;
             let chunk = self.config.inference.prefill_chunk_size;
 

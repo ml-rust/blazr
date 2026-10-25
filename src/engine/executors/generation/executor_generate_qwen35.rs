@@ -255,7 +255,7 @@ where
 
             let prompt_rows = plan.as_ref().map_or(prompt_tokens.len(), Qwen35PromptPlan::seq_len);
             let max_seq_len = self.config.max_seq_len();
-            let initial_capacity = (prompt_rows + max_tokens).min(max_seq_len);
+            let initial_capacity = prompt_rows.saturating_add(max_tokens).min(max_seq_len);
             let (mut kv_cache, mut gdn_state) = self.qwen35_caches(initial_capacity, max_seq_len)?;
 
             tracing::info!(phase = "prefill_start", backend = "qwen35", prompt_tokens = prompt_tokens.len(), prompt_rows = prompt_rows);

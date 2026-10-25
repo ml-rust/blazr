@@ -1,345 +1,97 @@
-//! Forward function builders and HTTP server for disaggregated prefill/decode.
+//! The model forward closures of the disaggregated prefill and decode workers.
 //!
-//! Contains:
-//! - `build_prefill_fn` / `run_prefill_forward` — prefill worker compute
-//! - `build_decode_step_fn` / `run_decode_step` — decode worker compute
-//! - `run_router_http_server` — HTTP server for the router role
-//! - `resolve_model_path` — model path resolution helper
+//! - `build_prefill_fn`: the prompt forward, its logits and its serialized KV cache
+//! - `build_decode_open_fn`: one request's decode steps over the cache prefill sent
+//! - `check_disagg_model`: the models whose whole state is a contiguous KV cache
+//!
+//! Both closures run the executor's own contiguous-cache forward, so a
+//! request split across the workers computes the logits a single process
+//! computes. The workers sample. A closure returns logits or an error,
+//! never a token.
 
-use anyhow::Result;
 use std::sync::Arc;
 
-use crate::distributed::disaggregated::DisaggRouter;
-use crate::distributed::disaggregated::{DecodeStepFn, PrefillFn};
-use crate::distributed::kv_serialize;
+use anyhow::{anyhow, bail, Result};
+use boostr::{DType, IndexingOps, Runtime};
 
-use crate::engine::host_read::{last_logits_row, to_host_f32};
-use crate::runtime::ServerRuntime;
+use crate::distributed::disaggregated::{DecodeOpenFn, DecodeStepFn, PrefillFn, PrefillOutput};
+use crate::distributed::kv_serialize::{deserialize_kv_cache, serialize_kv_cache};
+use crate::engine::executor::EngineClient;
+use crate::engine::Executor;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Forward function builders
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Build the prefill forward function for the given loaded model.
+/// Checks that `executor`'s model state crosses the network whole.
 ///
-/// The closure:
-/// 1. Decodes `token_ids_bytes` as little-endian `i64` token IDs.
-/// 2. Runs the model's full forward pass (embed + all layers + head).
-/// 3. Serializes the resulting KV cache for network transfer.
+/// The KV handoff carries one contiguous `LayeredKvCache`. A model with SSM
+/// or Gated DeltaNet state, or one sharded across tensor-parallel ranks,
+/// holds state the handoff does not carry.
 ///
-/// Returns `(activation_bytes, kv_cache_bytes)` as required by `PrefillWorker`.
-pub fn build_prefill_fn(
-    model: Arc<boostr::model::LoadedModel<ServerRuntime>>,
-    device: <ServerRuntime as boostr::Runtime>::Device,
-) -> PrefillFn {
-    use boostr::inference::{LayeredKvCache, LayeredKvCacheConfig};
-    use boostr::DType;
-
-    use std::sync::Mutex;
-
-    let num_layers = model.num_layers();
-    let num_kv_heads = model.num_kv_heads().unwrap_or(1);
-    let head_dim = model.head_dim().unwrap_or(64);
-    let hidden_size = model.hidden_size();
-
-    // KV cache shared across calls (one request at a time per worker).
-    let kv_cache: Option<Mutex<LayeredKvCache<ServerRuntime>>> = if model.needs_kv_cache() {
-        let config = LayeredKvCacheConfig {
-            batch_size: 1,
-            num_kv_heads,
-            initial_capacity: 4096,
-            max_seq_len: 32768,
-            head_dim,
-            dtype: DType::F32,
-        };
-        match LayeredKvCache::<ServerRuntime>::new(num_layers, &config, &device) {
-            Ok(c) => Some(Mutex::new(c)),
-            Err(e) => {
-                tracing::error!("Prefill: failed to create KV cache: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let kv_cache = Arc::new(kv_cache);
-    let model = Arc::clone(&model);
-    let device_clone = device.clone();
-
-    Box::new(
-        move |token_ids_bytes: &[u8], seq_len: usize| -> (Vec<u8>, Vec<u8>) {
-            // Reset KV cache for this new request.
-            if let Some(ref mutex) = *kv_cache {
-                if let Ok(mut cache) = mutex.lock() {
-                    cache.reset();
-                }
-            }
-
-            let result = run_prefill_forward(
-                &model,
-                &device_clone,
-                token_ids_bytes,
-                seq_len,
-                hidden_size,
-                &kv_cache,
-            );
-
-            match result {
-                Ok((activation, kv_bytes)) => (activation, kv_bytes),
-                Err(e) => {
-                    tracing::error!("Prefill forward failed: {}", e);
-                    (Vec::new(), Vec::new())
-                }
-            }
-        },
-    )
-}
-
-/// Run the prefill forward pass and serialize the resulting KV cache.
-fn run_prefill_forward(
-    model: &boostr::model::LoadedModel<ServerRuntime>,
-    device: &<ServerRuntime as boostr::Runtime>::Device,
-    token_ids_bytes: &[u8],
-    _seq_len: usize,
-    _hidden_size: usize,
-    kv_cache: &Arc<Option<std::sync::Mutex<boostr::inference::LayeredKvCache<ServerRuntime>>>>,
-) -> Result<(Vec<u8>, Vec<u8>)> {
-    use boostr::Tensor;
-
-    if !token_ids_bytes
-        .len()
-        .is_multiple_of(std::mem::size_of::<i64>())
-    {
-        anyhow::bail!(
-            "Token ID buffer length {} is not a multiple of 8",
-            token_ids_bytes.len()
-        );
-    }
-
-    let token_ids: &[i64] = bytemuck::cast_slice(token_ids_bytes);
-    let seq_len = token_ids.len();
-
-    let input_tensor = Tensor::<ServerRuntime>::from_slice(token_ids, &[1, seq_len], device)?;
-
-    // Embed tokens.
-    let hidden = model.forward_embed(&input_tensor)?;
-
-    // Run all layers through the KV cache.
-    let (hidden_out, _prev_mlp_out) = if let Some(ref mutex) = **kv_cache {
-        let mut cache = mutex
-            .lock()
-            .map_err(|_| anyhow::anyhow!("KV cache lock poisoned"))?;
-        let position = cache.seq_len();
-        let num_layers = model.num_layers();
-        model.forward_layers_range(hidden, None, &mut cache, 0, num_layers, position)?
-    } else {
-        (hidden, None)
-    };
-
-    // Serialize the current KV cache state.
-    let kv_bytes = if let Some(ref mutex) = **kv_cache {
-        let cache = mutex
-            .lock()
-            .map_err(|_| anyhow::anyhow!("KV cache lock poisoned"))?;
-        kv_serialize::serialize_kv_cache::<ServerRuntime>(&cache)?
-    } else {
-        // No KV cache (e.g. Mamba/SSM): return empty payload.
-        Vec::new()
-    };
-
-    // Activation: final hidden state serialised as raw f32 bytes.
-    // The decode worker doesn't strictly need this (it uses the KV cache),
-    // but we return it for completeness / future use.
-    let hidden_f32 = to_host_f32(hidden_out.tensor())?;
-    let activation_bytes = bytemuck::cast_slice::<f32, u8>(&hidden_f32).to_vec();
-
-    Ok((activation_bytes, kv_bytes))
-}
-
-/// Build the decode step function for the given loaded model.
+/// # Errors
 ///
-/// The closure:
-/// 1. Deserializes `kv_cache_bytes` into a `LayeredKvCache`.
-/// 2. Embeds `last_token_id`, runs one decode step at `position`.
-/// 3. Samples the next token (greedy argmax for simplicity).
-/// 4. Serializes the updated KV cache and returns `(next_token_id, updated_kv_bytes)`.
-///
-/// EOS is signalled by returning `i64::MIN` as the token ID.
-pub fn build_decode_step_fn(
-    model: Arc<boostr::model::LoadedModel<ServerRuntime>>,
-    device: <ServerRuntime as boostr::Runtime>::Device,
-) -> DecodeStepFn {
-    let model = Arc::clone(&model);
-    let device_clone = device.clone();
-
-    Box::new(
-        move |kv_cache_bytes: &[u8], last_token_id: i64, _position: u32| -> (i64, Vec<u8>) {
-            let result = run_decode_step(&model, &device_clone, kv_cache_bytes, last_token_id);
-
-            match result {
-                Ok(pair) => pair,
-                Err(e) => {
-                    tracing::error!("Decode step failed: {}", e);
-                    // Signal EOS on error so the router doesn't hang.
-                    (i64::MIN, Vec::new())
-                }
-            }
-        },
-    )
-}
-
-/// Run a single decode step and return the next token plus the updated KV cache.
-fn run_decode_step(
-    model: &boostr::model::LoadedModel<ServerRuntime>,
-    device: &<ServerRuntime as boostr::Runtime>::Device,
-    kv_cache_bytes: &[u8],
-    last_token_id: i64,
-) -> Result<(i64, Vec<u8>)> {
-    use boostr::Tensor;
-
-    // Deserialize the KV cache from bytes.
-    let mut kv_cache = kv_serialize::deserialize_kv_cache::<ServerRuntime>(kv_cache_bytes, device)?;
-
-    // Embed the single token.
-    let token_slice = [last_token_id];
-    let input_tensor = Tensor::<ServerRuntime>::from_slice(&token_slice, &[1, 1], device)?;
-    let hidden = model.forward_embed(&input_tensor)?;
-
-    // Run all layers with the restored KV cache.
-    let position = kv_cache.seq_len();
-    let num_layers = model.num_layers();
-    let (hidden_out, _prev_mlp) =
-        model.forward_layers_range(hidden, None, &mut kv_cache, 0, num_layers, position)?;
-
-    // Compute logits.
-    let logits = model.forward_head(hidden_out, None)?;
-
-    // Greedy argmax over the last token position.
-    let last_logits = last_logits_row(&logits)?;
-
-    let next_token = last_logits
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(idx, _)| idx as i64)
-        .unwrap_or(0);
-
-    // Serialize the updated KV cache.
-    let updated_kv = kv_serialize::serialize_kv_cache::<ServerRuntime>(&kv_cache)?;
-
-    Ok((next_token, updated_kv))
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Router HTTP server
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Start the HTTP server for the router role.
-///
-/// The router's HTTP server accepts `/v1/completions`-style requests and
-/// routes them through `DisaggRouter::route_request`, then streams the
-/// generated tokens back as a text response.
-pub async fn run_router_http_server(
-    router: Arc<DisaggRouter>,
-    server_config: crate::config::ServerConfig,
-) -> Result<()> {
-    use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
-
-    #[derive(serde::Deserialize)]
-    struct CompletionRequest {
-        prompt: String,
-        #[serde(default = "default_max_tokens")]
-        max_tokens: u32,
-        #[serde(default)]
-        session_id: Option<String>,
+/// An error naming `role`, the model type and why the model cannot serve.
+pub(crate) fn check_disagg_model<R>(executor: &Executor<R>, role: &str) -> Result<()>
+where
+    R: Runtime<DType = DType>,
+    R::Client: EngineClient<R>,
+{
+    let model = executor.model()?;
+    let kind = model.model_type();
+    if model.needs_gdn_state() {
+        bail!("the disaggregated {role} worker cannot serve {kind}: its Gated DeltaNet state does not cross the KV handoff. Serve it with `blazr serve`");
     }
-
-    fn default_max_tokens() -> u32 {
-        256
+    if model.needs_ssm_state() || !model.needs_kv_cache() {
+        bail!("the disaggregated {role} worker cannot serve {kind}: its SSM state does not cross the KV handoff. Serve it with `blazr serve`");
     }
-
-    #[derive(serde::Serialize)]
-    struct CompletionResponse {
-        tokens: Vec<i64>,
-        token_count: usize,
+    let tp = executor.config().inference.tensor_parallel_size;
+    if tp > 1 {
+        bail!("the disaggregated {role} worker cannot serve a model sharded {tp} ways: the KV handoff carries one rank's cache. Set tensor_parallel_size to 1");
     }
-
-    async fn handle_completion(
-        State(router): State<Arc<DisaggRouter>>,
-        Json(req): Json<CompletionRequest>,
-    ) -> impl IntoResponse {
-        // Simple tokenization placeholder: encode prompt as UTF-8 bytes
-        // mapped to i64 codepoints. In production this would call splintr.
-        let token_ids: Vec<i64> = req.prompt.chars().map(|c| c as i64).collect();
-
-        let seq_len = token_ids.len() as u32;
-        let token_ids_bytes: Vec<u8> = token_ids.iter().flat_map(|&t| t.to_le_bytes()).collect();
-
-        let session_key = req.session_id.as_deref();
-
-        match router
-            .route_request(&token_ids_bytes, seq_len, req.max_tokens, session_key)
-            .await
-        {
-            Ok(tokens) => {
-                let count = tokens.len();
-                axum::Json(CompletionResponse {
-                    tokens,
-                    token_count: count,
-                })
-                .into_response()
-            }
-            Err(e) => {
-                tracing::error!("Router request failed: {}", e);
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({
-                        "error": { "message": e.to_string(), "type": "server_error" }
-                    })),
-                )
-                    .into_response()
-            }
-        }
-    }
-
-    let app = Router::new()
-        .route("/v1/completions", post(handle_completion))
-        .route(
-            "/health",
-            axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
-        )
-        .with_state(router);
-
-    let bind_addr = format!("{}:{}", server_config.host, server_config.port);
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to bind router HTTP server to {}: {}", bind_addr, e)
-        })?;
-
-    tracing::info!(
-        addr = %bind_addr,
-        "Disaggregated router HTTP server listening"
-    );
-
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| anyhow::anyhow!("Router HTTP server error: {}", e))?;
-
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+/// The prefill closure over `executor`.
+///
+/// Each call builds a fresh contiguous cache, runs the whole prompt and
+/// returns the `[1, prompt_len, vocab]` logits with the serialized cache.
+pub(crate) fn build_prefill_fn<R>(executor: Arc<Executor<R>>) -> PrefillFn<R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: EngineClient<R> + IndexingOps<R>,
+{
+    Box::new(move |prompt: &[u32]| {
+        if prompt.is_empty() {
+            bail!("the prompt has no tokens");
+        }
+        let (mut cache, spec) = executor.contiguous_kv_cache(prompt.len(), 0)?;
+        let input = executor.create_input_tensor(prompt)?;
+        let logits = executor.forward_contiguous(&input, &mut cache, 0, Some(spec))?;
+        let kv_cache = serialize_kv_cache(&cache)?;
+        Ok(PrefillOutput { logits, kv_cache })
+    })
+}
 
-/// `model` as given when it is absolute or exists, else under `model_dir`.
-pub fn resolve_model_path(model: &str, model_dir: &std::path::Path) -> std::path::PathBuf {
-    let p = std::path::Path::new(model);
-    if p.is_absolute() || p.exists() {
-        p.to_path_buf()
-    } else {
-        model_dir.join(model)
-    }
+/// The decode open closure over `executor`.
+///
+/// Opening deserializes the handoff cache once onto the executor's device.
+/// Each step feeds one token at its position and returns `[1, 1, vocab]`
+/// logits. Dropping the step closure frees the cache.
+pub(crate) fn build_decode_open_fn<R>(executor: Arc<Executor<R>>) -> DecodeOpenFn<R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: EngineClient<R> + IndexingOps<R>,
+{
+    Box::new(move |bytes: &[u8]| {
+        let mut cache = deserialize_kv_cache::<R>(bytes, executor.device())?;
+        let executor = Arc::clone(&executor);
+        let step: DecodeStepFn<R> = Box::new(move |token: u32, position: u32| {
+            let cached = cache.seq_len();
+            if position as usize != cached {
+                return Err(anyhow!(
+                    "decode step at position {position}, but the KV cache holds {cached} tokens"
+                ));
+            }
+            let input = executor.create_input_tensor(&[token])?;
+            executor.forward_contiguous(&input, &mut cache, cached, None)
+        });
+        Ok(step)
+    })
 }

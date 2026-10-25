@@ -169,12 +169,13 @@ where
         max_tokens: usize,
     ) -> Result<(LayeredKvCache<R>, KvCacheSpec)> {
         let max_seq_len = self.config.max_seq_len();
-        let num_kv_heads = self.model.num_kv_heads().unwrap_or(8);
-        let head_dim = self.model.head_dim().unwrap_or(64);
+        let model = self.model()?;
+        let num_kv_heads = model.num_kv_heads().unwrap_or(8);
+        let head_dim = model.head_dim().unwrap_or(64);
         let initial_capacity = (prompt_len + max_tokens).min(max_seq_len);
         let dtype = self.config.kv_cache_dtype()?;
         let cache = LayeredKvCache::new_positional(
-            self.model.num_layers(),
+            model.num_layers(),
             1,
             num_kv_heads,
             initial_capacity,

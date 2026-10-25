@@ -75,7 +75,7 @@ pub async fn configure_batching(
 ) -> Result<Option<Arc<dyn GenerationScheduler>>> {
     let max_batch = executor.config().inference.max_batch_size;
     let choice = batching_choice(
-        executor.model().needs_gdn_state(),
+        executor.model()?.needs_gdn_state(),
         max_batch,
         executor.config().inference.paged_attention,
     );
@@ -127,7 +127,7 @@ async fn lane_batching(
     tracing::warn!(
         "model {} decodes in lanes, which needs a CUDA build; inference.max_batch_size = {} is \
          ignored and requests run one at a time. Rebuild with --features cuda to batch them.",
-        executor.model().model_type(),
+        executor.model()?.model_type(),
         max_batch,
     );
     Ok(None)

@@ -1,301 +1,294 @@
 //! Disaggregated prefill/decode CLI entry points.
 //!
-//! Provides three roles that can be launched independently:
-//! - `router`  — accepts HTTP requests, dispatches to prefill workers, streams tokens
-//! - `prefill` — loads a model, runs prompt forward passes, transfers KV cache
-//! - `decode`  — receives KV cache, runs autoregressive generation
+//! Three roles launch independently:
+//! - `router`: serves the HTTP API with the model's tokenizer and chat
+//!   template, and routes every generation to the workers
+//! - `prefill`: loads the model, runs each prompt, samples the first token
+//!   and hands the KV cache to a decode worker
+//! - `decode`: loads the model, resumes from the KV cache and streams the
+//!   remaining tokens
 //!
-//! Wire protocol is defined in `crate::distributed::disaggregated`.
+//! boostr's `distributed::inference::disaggregated` defines the protocol.
 
-use anyhow::Result;
-
-use colored::Colorize;
-use nexar::NexarClient;
 use std::sync::Arc;
 
-use crate::config::{ClusterSettings, ServerConfig};
+use anyhow::{anyhow, bail, Result};
+use colored::Colorize;
+use nexar::{NexarClient, Rank};
+
+use super::disaggregated_forward::{build_decode_open_fn, build_prefill_fn, check_disagg_model};
+use super::disaggregated_router::{router_executor, router_serving};
+use crate::config::ClusterSettings;
 use crate::distributed::disaggregated::{DecodeWorker, DisaggConfig, DisaggRouter, PrefillWorker};
 use crate::distributed::transport;
-
-use super::disaggregated_forward::{
-    build_decode_step_fn, build_prefill_fn, resolve_model_path, run_router_http_server,
-};
-
+use crate::engine::{Executor, Scheduler};
 use crate::runtime::ServerRuntime;
+use crate::server::{start_with_batch, LiveSettings};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public entry points
-// ─────────────────────────────────────────────────────────────────────────────
+/// The largest serialized KV cache one request transfers.
+const MAX_KV_TRANSFER_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+/// The router's nexar rank.
+const ROUTER_RANK: Rank = 0;
+
+fn banner(role: &str, lines: &[(&str, String)]) {
+    eprintln!();
+    eprintln!(
+        "  {} v{}",
+        format!("blazr disagg {role}").bold().cyan(),
+        env!("CARGO_PKG_VERSION")
+    );
+    eprintln!("  Role: {}", role.green().bold());
+    for (label, value) in lines {
+        eprintln!("  {label}: {}", value.bold());
+    }
+    eprintln!();
+}
 
 /// Run a disaggregated router.
 ///
-/// The router accepts HTTP inference requests and dispatches them to prefill
-/// workers, then coordinates the decode workers and streams tokens back over
-/// the HTTP response. `server_config` holds the HTTP host and port.
+/// The router loads the config, tokenizer and chat template of the model
+/// `settings` names, and no weights. It serves the whole HTTP API that
+/// `blazr serve` serves, and each generation runs on a prefill and a decode
+/// worker. `settings.server` holds the HTTP host and port.
+///
+/// # Errors
+///
+/// No `--model`, no prefill or decode address, a model whose tokenizer does
+/// not load, a failed nexar bootstrap, or a server that does not start.
 pub async fn run_disagg_router(
     listen_addr: String,
     prefill_addrs: Vec<String>,
     decode_addrs: Vec<String>,
-    server_config: ServerConfig,
+    settings: &ClusterSettings,
 ) -> Result<()> {
-    eprintln!();
-    eprintln!(
-        "  {} v{}",
-        "blazr disagg router".bold().cyan(),
-        env!("CARGO_PKG_VERSION")
+    let model = settings.router_model().map_err(anyhow::Error::msg)?;
+    if prefill_addrs.is_empty() {
+        bail!("the router needs at least one --prefill address");
+    }
+    if decode_addrs.is_empty() {
+        bail!("the router needs at least one --decode address");
+    }
+    banner(
+        "router",
+        &[
+            ("Model", model.clone()),
+            ("Listen", listen_addr),
+            ("Prefill workers", format!("{prefill_addrs:?}")),
+            ("Decode workers", format!("{decode_addrs:?}")),
+            ("HTTP API", settings.server.addr()),
+        ],
     );
-    eprintln!("  Role: {}", "router".green().bold());
-    eprintln!("  Listen: {}", listen_addr.bold());
-    eprintln!("  Prefill workers: {:?}", prefill_addrs);
-    eprintln!("  Decode workers: {:?}", decode_addrs);
-    eprintln!("  HTTP API: {}", server_config.addr());
-    eprintln!();
 
-    let num_prefill = prefill_addrs.len();
-    let num_decode = decode_addrs.len();
+    let device = crate::runtime::open_device(settings.gpu_index)?;
+    let models = Scheduler::<ServerRuntime>::new(settings.model_dir.clone(), device.clone());
+    let path = models.model_path(&model).ok_or_else(|| {
+        anyhow!(
+            "model '{model}' not found as a path or under {}: the router reads its \
+                 tokenizer and chat template",
+            settings.model_dir.display()
+        )
+    })?;
+    let executor = router_executor(&path, device)?;
 
-    if num_prefill == 0 {
-        anyhow::bail!("Router requires at least one --prefill address");
-    }
-    if num_decode == 0 {
-        anyhow::bail!("Router requires at least one --decode address");
-    }
-
-    // Total world size: 1 router + N prefill + M decode workers.
-    let world_size = (1 + num_prefill + num_decode) as u32;
-
-    let adapter = transport::cpu_adapter();
-    let clients = NexarClient::bootstrap_local(world_size, adapter)
+    let num_prefill = prefill_addrs.len() as u32;
+    let num_decode = decode_addrs.len() as u32;
+    let world_size = 1 + num_prefill + num_decode;
+    let clients = NexarClient::bootstrap_local(world_size, transport::cpu_adapter())
         .await
-        .map_err(|e| anyhow::anyhow!("Router nexar bootstrap failed: {}", e))?;
-
-    // Router is always rank 0.
-    let router_rank: nexar::Rank = 0;
+        .map_err(|e| anyhow!("router nexar bootstrap failed: {e}"))?;
     let client = Arc::new(
         clients
             .into_iter()
-            .find(|c| c.rank() == router_rank)
-            .ok_or_else(|| anyhow::anyhow!("Could not find rank 0 in bootstrap"))?,
+            .find(|c| c.rank() == ROUTER_RANK)
+            .ok_or_else(|| anyhow!("the nexar bootstrap returned no rank {ROUTER_RANK}"))?,
     );
-
-    // Assign ranks: prefill workers get ranks 1..=num_prefill,
-    // decode workers get ranks num_prefill+1..=num_prefill+num_decode.
-    let prefill_ranks: Vec<nexar::Rank> = (1..=num_prefill as u32).collect();
-    let decode_ranks: Vec<nexar::Rank> =
-        ((num_prefill as u32 + 1)..=(num_prefill + num_decode) as u32).collect();
-
+    // Ranks 1..=num_prefill prefill. The decode workers follow.
     let config = DisaggConfig {
-        prefill_workers: prefill_ranks,
-        decode_workers: decode_ranks,
-        router_rank,
-        max_kv_transfer_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB default
+        prefill_workers: (1..=num_prefill).collect(),
+        decode_workers: (num_prefill + 1..world_size).collect(),
+        router_rank: ROUTER_RANK,
+        max_kv_transfer_bytes: MAX_KV_TRANSFER_BYTES,
     };
-
-    let router = Arc::new(DisaggRouter::new(Arc::clone(&client), config));
-
+    let router = Arc::new(DisaggRouter::new(client, config)?);
     tracing::info!(
         prefill_count = num_prefill,
         decode_count = num_decode,
         "Disaggregated router ready"
     );
 
-    // Start HTTP server that uses the router to handle requests.
-    // Build a scheduler backed by the router's token generation.
-    // We use a simple no-model scheduler since the router delegates compute
-    // to remote workers.
-    run_router_http_server(router, server_config).await
+    let (scheduler, serving) = router_serving(router, &model, path, executor, models).await;
+    let server = settings.server.clone();
+    let live = LiveSettings::fixed(&server);
+    start_with_batch(
+        scheduler,
+        server,
+        live,
+        settings.api_key.clone().into_iter().collect(),
+        serving,
+        Vec::new(),
+        #[cfg(feature = "audio")]
+        Vec::new(),
+        #[cfg(feature = "audio")]
+        Vec::new(),
+        None,
+    )
+    .await
+}
+
+/// A worker's nexar client: connect to the router, then join the mesh.
+async fn worker_client(role: &str, router_addr: &str) -> Result<Arc<NexarClient>> {
+    let seed_addr: std::net::SocketAddr = router_addr
+        .parse()
+        .map_err(|e| anyhow!("invalid router address '{router_addr}': {e}"))?;
+    let node = nexar::WorkerNode::connect(seed_addr)
+        .await
+        .map_err(|e| anyhow!("{role} worker failed to connect to the router: {e}"))?;
+    let (rank, world_size) = (node.rank, node.world_size);
+    tracing::info!(rank, world_size, "{role} worker connected");
+    let clients = NexarClient::bootstrap_local(world_size, transport::cpu_adapter())
+        .await
+        .map_err(|e| anyhow!("{role} worker mesh formation failed: {e}"))?;
+    let client = clients
+        .into_iter()
+        .find(|c| c.rank() == rank)
+        .ok_or_else(|| anyhow!("{role} worker found no rank {rank} in the mesh"))?;
+    Ok(Arc::new(client))
+}
+
+/// The started executor of the model `settings` names, checked for the
+/// disaggregated `role`.
+async fn worker_executor(
+    role: &str,
+    settings: &ClusterSettings,
+) -> Result<Arc<Executor<ServerRuntime>>> {
+    let model = settings
+        .require_model(&format!("disagg {role}"))
+        .map_err(anyhow::Error::msg)?;
+    let device = crate::runtime::open_device(settings.gpu_index)?;
+    let loader = Scheduler::<ServerRuntime>::new(settings.model_dir.clone(), device);
+    let executor = loader.get_executor(&model).await?;
+    check_disagg_model(&executor, role)?;
+    tracing::info!(
+        model = %model,
+        vocab_size = executor.vocab_size(),
+        "Model loaded on {role} worker"
+    );
+    Ok(executor)
 }
 
 /// Run a disaggregated prefill worker.
 ///
-/// The worker:
-/// 1. Loads the model `settings` names.
-/// 2. Connects to the router via nexar.
-/// 3. Builds a prefill forward function over the loaded model.
-/// 4. Runs `PrefillWorker::run_loop()`.
+/// It loads the model `settings` names, joins the router's mesh and serves
+/// prefill requests until the router disconnects.
+///
+/// # Errors
+///
+/// No model, a model the KV handoff cannot carry, or a failed connection.
 pub async fn run_disagg_prefill_worker(
     router_addr: String,
     listen_addr: String,
     settings: &ClusterSettings,
 ) -> Result<()> {
-    let model = settings
-        .require_model("disagg prefill")
-        .map_err(anyhow::Error::msg)?;
-    eprintln!();
-    eprintln!(
-        "  {} v{}",
-        "blazr disagg prefill".bold().cyan(),
-        env!("CARGO_PKG_VERSION")
+    banner(
+        "prefill",
+        &[
+            ("Model", settings.model.clone().unwrap_or_default()),
+            ("Router", router_addr.clone()),
+            ("Listen", listen_addr),
+        ],
     );
-    eprintln!("  Role: {}", "prefill".yellow().bold());
-    eprintln!("  Model: {}", model.bold());
-    eprintln!("  Router: {}", router_addr.bold());
-    eprintln!("  Listen: {}", listen_addr.bold());
-    eprintln!();
-
-    // Parse listen address to get the port and derive world_size from config.
-    // For a minimal bootstrap we need the rank assigned by the router.
-    // We connect as a worker node and obtain our rank from nexar.
-    let seed_addr: std::net::SocketAddr = router_addr
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid router address '{}': {}", router_addr, e))?;
-
-    let worker_node = nexar::WorkerNode::connect(seed_addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("Prefill worker failed to connect to router: {}", e))?;
-
-    let our_rank = worker_node.rank;
-    let world_size = worker_node.world_size;
-
-    tracing::info!(rank = our_rank, world_size, "Prefill worker connected");
-
-    let adapter = transport::cpu_adapter();
-    let clients = NexarClient::bootstrap_local(world_size, adapter)
-        .await
-        .map_err(|e| anyhow::anyhow!("Prefill worker mesh formation failed: {}", e))?;
-
-    let client = Arc::new(
-        clients
-            .into_iter()
-            .find(|c| c.rank() == our_rank)
-            .ok_or_else(|| anyhow::anyhow!("Prefill worker could not find its rank in mesh"))?,
-    );
-
-    // Load model on the `device` key's GPU index.
-    let device = crate::runtime::open_device(settings.gpu_index)?;
-
-    let model_path = resolve_model_path(&model, &settings.model_dir);
-    let (loaded_model, _blazr_config) =
-        crate::loader::load_model::<ServerRuntime, _>(&model_path, &device)?;
-    let model = Arc::new(loaded_model);
-
-    tracing::info!(
-        rank = our_rank,
-        layers = model.num_layers(),
-        vocab_size = model.vocab_size(),
-        "Model loaded on prefill worker"
-    );
-
-    if model.needs_gdn_state() {
-        return Err(crate::engine::qwen35_unsupported(
-            "disaggregated prefill",
-            None,
-            None,
-        ));
-    }
-
-    // Build the prefill forward function.
-    let forward_fn = build_prefill_fn(Arc::clone(&model), device);
-
-    let router_rank: nexar::Rank = 0;
+    let executor = worker_executor("prefill", settings).await?;
+    let client = worker_client("prefill", &router_addr).await?;
+    let rank = client.rank();
+    let sampler = <ServerRuntime as boostr::Runtime>::default_client(executor.device());
     let worker = PrefillWorker::new(
         client,
-        our_rank,
-        router_rank,
-        2 * 1024 * 1024 * 1024, // 2 GiB
-        forward_fn,
+        rank,
+        ROUTER_RANK,
+        MAX_KV_TRANSFER_BYTES,
+        sampler,
+        build_prefill_fn(executor),
     );
-
-    tracing::info!(rank = our_rank, "Prefill worker entering run loop");
+    tracing::info!(rank, "Prefill worker entering run loop");
     worker.run_loop().await?;
-
     eprintln!("\n  Prefill worker shutting down.");
     Ok(())
 }
 
 /// Run a disaggregated decode worker.
 ///
-/// The worker:
-/// 1. Loads the model `settings` names.
-/// 2. Connects to the router via nexar.
-/// 3. Builds a decode step function over the loaded model.
-/// 4. Runs `DecodeWorker::run_loop()`.
+/// It loads the model `settings` names, joins the router's mesh and serves
+/// KV handoffs until every prefill worker disconnects.
+///
+/// # Errors
+///
+/// No model, a model the KV handoff cannot carry, or a failed connection.
 pub async fn run_disagg_decode_worker(
     router_addr: String,
     listen_addr: String,
     settings: &ClusterSettings,
 ) -> Result<()> {
-    let model = settings
-        .require_model("disagg decode")
-        .map_err(anyhow::Error::msg)?;
-    eprintln!();
-    eprintln!(
-        "  {} v{}",
-        "blazr disagg decode".bold().cyan(),
-        env!("CARGO_PKG_VERSION")
+    banner(
+        "decode",
+        &[
+            ("Model", settings.model.clone().unwrap_or_default()),
+            ("Router", router_addr.clone()),
+            ("Listen", listen_addr),
+        ],
     );
-    eprintln!("  Role: {}", "decode".yellow().bold());
-    eprintln!("  Model: {}", model.bold());
-    eprintln!("  Router: {}", router_addr.bold());
-    eprintln!("  Listen: {}", listen_addr.bold());
-    eprintln!();
-
-    let seed_addr: std::net::SocketAddr = router_addr
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid router address '{}': {}", router_addr, e))?;
-
-    let worker_node = nexar::WorkerNode::connect(seed_addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("Decode worker failed to connect to router: {}", e))?;
-
-    let our_rank = worker_node.rank;
-    let world_size = worker_node.world_size;
-
-    tracing::info!(rank = our_rank, world_size, "Decode worker connected");
-
-    let adapter = transport::cpu_adapter();
-    let clients = NexarClient::bootstrap_local(world_size, adapter)
-        .await
-        .map_err(|e| anyhow::anyhow!("Decode worker mesh formation failed: {}", e))?;
-
-    let client = Arc::new(
-        clients
-            .into_iter()
-            .find(|c| c.rank() == our_rank)
-            .ok_or_else(|| anyhow::anyhow!("Decode worker could not find its rank in mesh"))?,
-    );
-
-    // Load model on the `device` key's GPU index.
-    let device = crate::runtime::open_device(settings.gpu_index)?;
-
-    let model_path = resolve_model_path(&model, &settings.model_dir);
-    let (loaded_model, _blazr_config) =
-        crate::loader::load_model::<ServerRuntime, _>(&model_path, &device)?;
-    let model = Arc::new(loaded_model);
-
-    tracing::info!(
-        rank = our_rank,
-        layers = model.num_layers(),
-        vocab_size = model.vocab_size(),
-        "Model loaded on decode worker"
-    );
-
-    if model.needs_gdn_state() {
-        return Err(crate::engine::qwen35_unsupported(
-            "disaggregated decode",
-            None,
-            None,
-        ));
-    }
-
-    // Build the decode step function.
-    let step_fn = build_decode_step_fn(Arc::clone(&model), device);
-
-    let router_rank: nexar::Rank = 0;
-    // By convention: rank 0 = router, ranks 1..our_rank = prefill workers.
-    let prefill_workers: Vec<nexar::Rank> = (1..our_rank).collect();
+    let executor = worker_executor("decode", settings).await?;
+    let client = worker_client("decode", &router_addr).await?;
+    let rank = client.rank();
+    // Each rank between the router and this one gets a handoff listener.
+    // A decode rank among them sends no handoff, so its listener stays idle.
+    let prefill_workers: Vec<Rank> = (1..rank).collect();
+    let sampler = <ServerRuntime as boostr::Runtime>::default_client(executor.device());
     let worker = DecodeWorker::new(
         client,
-        our_rank,
-        router_rank,
+        rank,
+        ROUTER_RANK,
         prefill_workers,
-        2 * 1024 * 1024 * 1024, // 2 GiB
-        step_fn,
+        MAX_KV_TRANSFER_BYTES,
+        sampler,
+        build_decode_open_fn(executor),
     );
-
-    tracing::info!(rank = our_rank, "Decode worker entering run loop");
+    tracing::info!(rank, "Decode worker entering run loop");
     worker.run_loop().await?;
-
     eprintln!("\n  Decode worker shutting down.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::Cli;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("blazr").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_router_role_requires_model() {
+        let err = parse(&[
+            "disagg",
+            "--role",
+            "router",
+            "--prefill",
+            "a:1",
+            "--decode",
+            "b:2",
+        ])
+        .err()
+        .expect("a router without --model is refused");
+        assert!(err.to_string().contains("--model"), "{err}");
+        assert!(parse(&["disagg", "--role", "router", "--model", "m"]).is_ok());
+    }
+
+    #[test]
+    fn a_worker_role_takes_its_model_from_the_config() {
+        assert!(parse(&["disagg", "--role", "prefill", "--router-addr", "a:1"]).is_ok());
+        assert!(parse(&["disagg", "--role", "decode", "--router-addr", "a:1"]).is_ok());
+    }
 }

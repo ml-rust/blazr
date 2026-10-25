@@ -4,6 +4,7 @@ pub(super) mod decision_flags;
 pub(super) mod env;
 pub mod resolve;
 pub(super) mod resolve_cluster;
+pub(super) mod resolve_router;
 pub(super) mod resolve_serve;
 
 pub use decision_flags::{resolve_decision, DecisionFlags};

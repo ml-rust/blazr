@@ -19,7 +19,17 @@ pub(in crate::engine) fn sample_rule(gen: &GenerationConfig) -> Option<SampleRul
     if gen.is_greedy() && !gen.has_penalties() {
         return None;
     }
-    Some(SampleRule {
+    Some(request_sample_rule(gen))
+}
+
+/// The boostr sampling rule of `gen`: its filter, penalties, penalty window
+/// and seed, the greedy case included.
+///
+/// The penalty window is the last `repeat_last_n` tokens of the prefix, as
+/// the plain sampler counts it. The rule carries no mirostat, DRY,
+/// typical-p, dynamic temperature, logit bias or grammar.
+pub(crate) fn request_sample_rule(gen: &GenerationConfig) -> SampleRule {
+    SampleRule {
         filter: FilterRule {
             temperature: gen.temperature,
             top_k: gen.top_k,
@@ -31,7 +41,7 @@ pub(in crate::engine) fn sample_rule(gen: &GenerationConfig) -> Option<SampleRul
         presence_penalty: gen.presence_penalty,
         penalty_last_n: gen.repeat_last_n,
         seed: gen.seed,
-    })
+    }
 }
 
 #[cfg(test)]

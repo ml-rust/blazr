@@ -7,8 +7,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 
 use boostr::inference::kv_cache::LayeredPagedKvCache;
-use boostr::inference::memory::{BlockTable, CpuBlockAllocator};
-use boostr::inference::prefix_cache::{PrefixCache, PrefixCacheConfig};
+use boostr::inference::memory::CpuBlockAllocator;
+use boostr::inference::prefix_cache::PrefixCache;
 use boostr::model::LoadedModel;
 use boostr::model::ModelClient;
 use boostr::ops::TensorOps;
@@ -22,6 +22,7 @@ use splintr::AnyTokenizer;
 use crate::config::BlazrConfig;
 use crate::model::chat_template::ChatTemplate;
 
+use super::executor_pools::KvPools;
 use super::vision_tower::{ImageTokenLimits, VisionTower};
 
 /// `config` with `inference.dtype` set to the dtype `R` computes.
@@ -84,8 +85,8 @@ where
 /// Wraps a loaded model and provides text generation capabilities.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub struct Executor<R: Runtime<DType = DType>> {
-    /// The loaded model
-    pub(crate) model: Arc<LoadedModel<R>>,
+    /// The loaded model. `None` on a [`Self::tokenizer_only`] executor.
+    pub(crate) model: Option<Arc<LoadedModel<R>>>,
     /// Model configuration
     pub(crate) config: BlazrConfig,
     /// Tokenizer — splintr's universal loaded-tokenizer handle, whatever its
@@ -177,117 +178,71 @@ where
                 return Err(anyhow!(reason));
             }
         }
+        let pools = KvPools::new::<R>(&config, num_ctx, &device)?;
+        Ok(Self::assemble(
+            Some(Arc::new(model)),
+            config,
+            tokenizer,
+            device,
+            num_ctx,
+            pools,
+        ))
+    }
+
+    /// An executor over a model's config, tokenizer and chat template, with
+    /// no weights.
+    ///
+    /// It encodes prompts, renders chat templates and decodes tokens for a
+    /// front end whose model runs elsewhere, such as the disaggregated
+    /// router. Every path that runs the model returns
+    /// [`NoWeights`](super::executor_access::NoWeights).
+    ///
+    /// # Errors
+    ///
+    /// An error when `config` names a dtype that does not parse.
+    pub fn tokenizer_only(
+        config: BlazrConfig,
+        tokenizer: AnyTokenizer,
+        device: R::Device,
+        num_ctx: usize,
+    ) -> Result<Self> {
+        let config = with_runtime_dtype::<R>(config)?;
+        Ok(Self::assemble(
+            None,
+            config,
+            Arc::new(tokenizer),
+            device,
+            num_ctx,
+            KvPools::none(),
+        ))
+    }
+
+    fn assemble(
+        model: Option<Arc<LoadedModel<R>>>,
+        config: BlazrConfig,
+        tokenizer: Arc<AnyTokenizer>,
+        device: R::Device,
+        num_ctx: usize,
+        pools: KvPools,
+    ) -> Self {
         let chat_template = ChatTemplate::from_model_type(config.model_type());
-
-        // Shared block allocator for paged attention (shared across all concurrent requests)
-        let shared_allocator = if config.inference.paged_attention {
-            let block_size = config.inference.block_size;
-            let total_blocks = if config.inference.kv_pool_blocks > 0 {
-                config.inference.kv_pool_blocks
-            } else {
-                // Auto-compute: enough for max_batch_size concurrent requests at max context
-                let max_ctx = config.inference.max_context_len.unwrap_or(num_ctx);
-                let blocks_per_seq = BlockTable::blocks_needed(max_ctx, block_size);
-                let batch = config.inference.max_batch_size.max(1);
-                // Pool = batch * per-seq blocks + 20% headroom for prefix cache + fragmentation
-                let base = blocks_per_seq * batch;
-                base + base / 5 + 64
-            };
-            tracing::info!(
-                "Shared KV block pool: {} blocks × {} tokens/block = {} token slots",
-                total_blocks,
-                block_size,
-                total_blocks * block_size
-            );
-            Some(Arc::new(std::sync::Mutex::new(CpuBlockAllocator::new(
-                total_blocks,
-                block_size,
-            ))))
-        } else {
-            None
-        };
-
-        let prefix_cache = if config.inference.prefix_cache && config.inference.paged_attention {
-            let block_size = config.inference.block_size;
-            let max_cached = config.inference.max_cached_blocks;
-            // Use the shared allocator for prefix cache
-            let allocator = if let Some(ref shared) = shared_allocator {
-                shared
-                    .lock()
-                    .map_err(|e| anyhow!("Block allocator lock poisoned: {e}"))?
-                    .clone()
-            } else {
-                let total_blocks = max_cached + 1024;
-                CpuBlockAllocator::new(total_blocks, block_size)
-            };
-            let cache_config = PrefixCacheConfig {
-                enabled: true,
-                max_cached_blocks: max_cached,
-                block_size,
-                ..PrefixCacheConfig::default()
-            };
-            tracing::info!(
-                "Prefix cache enabled: max_cached_blocks={}, block_size={}",
-                max_cached,
-                block_size
-            );
-            Some(std::sync::Mutex::new(PrefixCache::new(
-                allocator,
-                cache_config,
-            )))
-        } else {
-            None
-        };
-
-        // GPU prefix cache (CUDA only, opt-in)
-        #[cfg(feature = "cuda")]
-        let gpu_prefix_cache = if config.inference.gpu_prefix_cache
-            && config.inference.prefix_cache
-            && config.inference.paged_attention
-        {
-            let capacity = config.inference.max_cached_blocks;
-            let block_size = config.inference.block_size;
-            let ram_tier = config.inference.gpu_prefix_cache_ram_tier;
-            tracing::info!(
-                "GPU prefix cache enabled: capacity={}, block_size={}, ram_tier={}",
-                capacity,
-                block_size,
-                ram_tier,
-            );
-            {
-                // Construct CudaDevice matching the executor's actual GPU via Device::id()
-                use boostr::runtime::Device;
-                let cuda_device = boostr::CudaDevice::new(device.id());
-                Some(std::sync::Mutex::new(
-                    boostr::inference::prefix_cache::GpuPrefixCache::new(
-                        capacity,
-                        block_size,
-                        cuda_device,
-                        ram_tier,
-                    ),
-                ))
-            }
-        } else {
-            None
-        };
-
-        Ok(Self {
-            model: Arc::new(model),
+        Self {
+            model,
             config,
             tokenizer,
             device,
             num_ctx,
             chat_template,
-            shared_allocator,
+            shared_allocator: pools.shared_allocator,
             paged_pool: std::sync::OnceLock::new(),
-            prefix_cache,
+            prefix_cache: pools.prefix_cache,
             vision_tower: None,
             draft: None,
             grammar_vocab: std::sync::OnceLock::new(),
             #[cfg(feature = "cuda")]
             tp_state: None,
             #[cfg(feature = "cuda")]
-            gpu_prefix_cache,
+            gpu_prefix_cache: pools.gpu_prefix_cache,
             #[cfg(feature = "cuda")]
             llama_graph_session: tokio::sync::Mutex::new(None),
             #[cfg(feature = "cuda")]
@@ -296,7 +251,7 @@ where
             qwen35_lane_session: tokio::sync::Mutex::new(None),
             #[cfg(feature = "cuda")]
             graph_captures: std::sync::atomic::AtomicUsize::new(0),
-        })
+        }
     }
 
     /// Create a new executor for a tensor-parallel model.
@@ -337,10 +292,11 @@ where
         let Some(mmproj) = self.config.inference.mmproj.clone() else {
             return Ok(self);
         };
-        if !matches!(&*self.model, LoadedModel::Qwen35(_)) {
+        let model = self.model()?;
+        if !matches!(model, LoadedModel::Qwen35(_)) {
             return Err(anyhow!(
                 "--mmproj needs a qwen35 model; the loaded model is {}",
-                self.model.model_type()
+                model.model_type()
             ));
         }
         let limits = ImageTokenLimits {
@@ -362,94 +318,6 @@ where
     pub fn with_vision_tower(mut self, tower: VisionTower<R>) -> Self {
         self.vision_tower = Some(Arc::new(tower));
         self
-    }
-
-    /// The vision tower, when `mmproj` was configured.
-    pub fn vision_tower(&self) -> Option<&Arc<VisionTower<R>>> {
-        self.vision_tower.as_ref()
-    }
-
-    /// Get the chat template for this model
-    pub fn chat_template(&self) -> &ChatTemplate {
-        &self.chat_template
-    }
-
-    /// Get model configuration
-    pub fn config(&self) -> &BlazrConfig {
-        &self.config
-    }
-
-    /// Get the tokenizer
-    pub fn tokenizer(&self) -> &AnyTokenizer {
-        &self.tokenizer
-    }
-
-    /// Get prefix cache statistics (if enabled)
-    pub fn prefix_cache_stats(&self) -> Option<boostr::inference::PrefixCacheStats> {
-        self.prefix_cache
-            .as_ref()
-            .and_then(|pc| pc.lock().ok().map(|c| c.stats()))
-    }
-
-    /// Get GPU prefix cache statistics (CUDA only).
-    #[cfg(feature = "cuda")]
-    pub fn gpu_prefix_cache_stats(&self) -> Option<boostr::inference::prefix_cache::GpuRadixStats> {
-        self.gpu_prefix_cache
-            .as_ref()
-            .and_then(|pc| pc.lock().ok().map(|c| c.stats()))
-    }
-
-    /// Access the GPU prefix cache (CUDA only, for batch engine integration).
-    #[cfg(feature = "cuda")]
-    pub fn gpu_prefix_cache(
-        &self,
-    ) -> Option<&std::sync::Mutex<boostr::inference::prefix_cache::GpuPrefixCache>> {
-        self.gpu_prefix_cache.as_ref()
-    }
-
-    /// Get vocabulary size
-    pub fn vocab_size(&self) -> usize {
-        self.model.vocab_size()
-    }
-
-    /// The ids that end generation, inside the model vocabulary.
-    ///
-    /// They come from the tokenizer, never from a hard-coded list.
-    /// [`Self::decode_finish_reason`] ends on the same ids. The model can
-    /// never emit an id past its vocabulary.
-    pub(in crate::engine) fn eos_ids(&self) -> Vec<u32> {
-        self.tokenizer()
-            .eos_token_id()
-            .filter(|&id| usize::try_from(id).is_ok_and(|at| at < self.vocab_size()))
-            .into_iter()
-            .collect()
-    }
-
-    /// Get the device
-    pub(crate) fn device(&self) -> &R::Device {
-        &self.device
-    }
-
-    /// Get the loaded model as an Arc (for sharing with batch engines)
-    pub(crate) fn model_arc(&self) -> &Arc<LoadedModel<R>> {
-        &self.model
-    }
-
-    /// The loaded model: the base model, or for a LoRA variant the model
-    /// with its adapter attached.
-    pub fn model(&self) -> &LoadedModel<R> {
-        &self.model
-    }
-
-    /// Get the shared block allocator (if paged attention enabled)
-    pub(crate) fn shared_allocator(&self) -> Option<&Arc<std::sync::Mutex<CpuBlockAllocator>>> {
-        self.shared_allocator.as_ref()
-    }
-
-    /// Get num_ctx
-    #[cfg(feature = "cuda")]
-    pub(crate) fn num_ctx(&self) -> usize {
-        self.num_ctx
     }
 }
 

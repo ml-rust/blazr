@@ -246,7 +246,9 @@ where
             .get_executor(name)
             .await
             .map_err(|e| DecisionFailure::of_lookup(name, e))?;
-        let model = executor.model_arc();
+        let model = executor
+            .model_arc()
+            .map_err(|e| DecisionFailure::Unavailable(format!("model '{name}': {e}")))?;
         if let Some(service) = self.decisions.current(name, model) {
             return Ok(service);
         }

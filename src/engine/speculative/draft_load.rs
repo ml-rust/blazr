@@ -117,7 +117,9 @@ where
         };
         if !spec.enabled
             || spec.drafter != DrafterKind::Model
-            || load_fallback(&self.model).is_err()
+            || self
+                .model()
+                .map_or(true, |model| load_fallback(model).is_err())
         {
             return Ok(self);
         }

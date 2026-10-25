@@ -47,7 +47,7 @@ where
         let seq_len = ids_i64.len();
         let input = Tensor::<R>::from_slice(&ids_i64, &[1, seq_len], device)?;
 
-        let hidden_var = self.model.forward_hidden(&input)?;
+        let hidden_var = self.model()?.forward_hidden(&input)?;
         let hidden_tensor = hidden_var.tensor();
 
         // A BF16 or F16 model returns half-width states, so they cast first.

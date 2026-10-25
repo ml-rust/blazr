@@ -66,7 +66,7 @@ impl LaneEngine {
         scheduler: Arc<LaneScheduler>,
     ) -> Result<Self> {
         let lanes = scheduler.lanes();
-        let mode = if executor.model().supports_gdn_graph_mode() {
+        let mode = if executor.model()?.supports_gdn_graph_mode() {
             LaneDecodeMode::Graph
         } else {
             LaneDecodeMode::Eager

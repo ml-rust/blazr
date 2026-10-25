@@ -55,7 +55,14 @@ where
     ) -> impl Stream<Item = Result<GeneratedToken>> + 'a {
         stream! {
             // Check that the model is multimodal
-            let multimodal_model = match &*self.model {
+            let loaded = match self.model() {
+                Ok(m) => m,
+                Err(e) => {
+                    yield Err(e.into());
+                    return;
+                }
+            };
+            let multimodal_model = match loaded {
                 boostr::model::LoadedModel::Multimodal(m) => m,
                 _ => {
                     yield Err(anyhow!(

@@ -6,7 +6,7 @@ pub(in crate::engine) mod decode;
 pub(in crate::engine) mod draft_load;
 pub(in crate::engine) mod eligibility;
 pub(in crate::engine) mod paged_target;
-pub(in crate::engine) mod rule;
+pub(crate) mod rule;
 pub(in crate::engine) mod startup;
 pub(in crate::engine) mod target;
 mod target_glue;

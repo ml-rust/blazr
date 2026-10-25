@@ -516,7 +516,7 @@ The model loads on the build's runtime and the `device` key's GPU. A label file 
 | `swarm`  | `--api-key <KEY>`      | `BLAZR_API_KEY`     | API key for the leader's HTTP API                    |
 | `swarm`  | `--mdns`               | off                 | Enables LAN discovery                                |
 | `disagg` | `--role <ROLE>`        | `router`            | `router`, `prefill`, or `decode`                     |
-| `disagg` | `-m`, `--model <NAME>` | `default_model`     | Model. Required for `prefill` and `decode`.          |
+| `disagg` | `-m`, `--model <NAME>` | `default_model` (workers) | Required. Workers load it. The router reads its tokenizer and chat template from `--model` only. |
 | `disagg` | `--listen-addr <ADDR>` | `0.0.0.0:9190`      | Address this node listens on                         |
 | `disagg` | `--router-addr <ADDR>` | unset               | Router address. Required for `prefill` and `decode`. |
 | `disagg` | `--prefill <ADDR>...`  | unset               | Prefill worker addresses. Router only.               |
@@ -524,7 +524,7 @@ The model loads on the build's runtime and the `device` key's GPU. A label file 
 | `disagg` | `--port <PORT>`        | `server.port`, else `8080` | HTTP API port. Router only.                   |
 | `disagg` | `--host <HOST>`        | `server.host`, else `0.0.0.0` | HTTP API host. Router only.                |
 
-The swarm leader and the disaggregated router take the `server` section. Every role loads its model from `model_dir` on the `device` index.
+The swarm leader and the disaggregated router take the `server` section. Every role finds its model in `model_dir`, on the `device` index. The disaggregated router loads no weights. It refuses a request that sets a grammar or constraint, mirostat, DRY, typical-p, dynamic temperature, `logit_bias` or `logprobs` with `400`. See [Deployment](deployment.md).
 
 The narration commands `speak`, `transcribe`, and `sound-review` need the `audio` feature. Their flags live in `src/cli/narration/` and this page does not list them.
 

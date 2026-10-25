@@ -171,7 +171,7 @@ where
 
     /// The model and the device group fit a speculative target.
     fn speculative_backend(&self) -> Result<(), Fallback> {
-        load_fallback(&self.model)?;
+        load_fallback(self.model().map_err(|_| Fallback::Architecture)?)?;
         #[cfg(feature = "cuda")]
         if self.tp_state.is_some() {
             return Err(Fallback::TensorParallel);

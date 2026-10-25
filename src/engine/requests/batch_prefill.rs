@@ -110,7 +110,7 @@ where
             self.seqs.count_forward();
             logits = Some(
                 self.executor
-                    .model()
+                    .model()?
                     .forward_with_paged_kv_cache(
                         &input,
                         paged_cache,
@@ -238,7 +238,7 @@ where
         self.seqs.count_forward();
         let logits = self
             .executor
-            .model()
+            .model()?
             .forward_with_paged_kv_cache(
                 &input,
                 paged_cache,

@@ -47,8 +47,9 @@ impl Executor<CudaRuntime> {
             if prompt_tokens.is_empty() {
                 return;
             }
-            if self.model().needs_gdn_state() {
-                if !self.model().supports_gdn_graph_mode() {
+            let model = self.model()?;
+            if model.needs_gdn_state() {
+                if !model.supports_gdn_graph_mode() {
                     yield Err(crate::engine::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
                     return;
                 }
@@ -155,14 +156,15 @@ impl Executor<CudaRuntime> {
                 yield Err(anyhow!("image prompt has no ids: the markers alone are missing"));
                 return;
             }
-            if !self.model().needs_gdn_state() {
+            let model = self.model()?;
+            if !model.needs_gdn_state() {
                 yield Err(anyhow!(
                     "image input needs a qwen35 model; the loaded model is {}",
-                    self.model().model_type()
+                    model.model_type()
                 ));
                 return;
             }
-            if !self.model().supports_gdn_graph_mode() {
+            if !model.supports_gdn_graph_mode() {
                 yield Err(crate::engine::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
                 return;
             }
@@ -192,7 +194,8 @@ impl Executor<CudaRuntime> {
             if prompt_tokens.is_empty() {
                 return;
             }
-            if self.model().needs_gdn_state() {
+            let model = self.model()?;
+            if model.needs_gdn_state() {
                 yield Err(crate::engine::qwen35_unsupported("CUDA graph", None, Some("run without --graphs")));
                 return;
             }
@@ -206,9 +209,9 @@ impl Executor<CudaRuntime> {
             let input = self.create_input_tensor(prompt_tokens)?;
 
             // ── Paged KV cache setup ──
-            let num_layers = self.model().num_layers();
-            let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
-            let head_dim = self.model().head_dim().unwrap_or(64);
+            let num_layers = model.num_layers();
+            let num_kv_heads = model.num_kv_heads().unwrap_or(8);
+            let head_dim = model.head_dim().unwrap_or(64);
             let half_dim = head_dim / 2;
             let kv_dtype = self.config().kv_cache_dtype()?;
             let block_size = self.config().inference.block_size;
@@ -239,14 +242,14 @@ impl Executor<CudaRuntime> {
             paged_cache.set_seq_len(seq_len_k);
 
             let t0 = std::time::Instant::now();
-            let prefill_logits = self.model().forward_with_paged_kv_cache(
+            let prefill_logits = model.forward_with_paged_kv_cache(
                 &input, &paged_cache, &prefill_slot_mapping, &block_table,
                 seq_len_k, 0, None, None,
             ).map_err(|e| anyhow!("Paged graph prefill failed: {}", e))?;
             tracing::info!("Paged graph prefill: {:?} (seq_len={})", t0.elapsed(), prompt_tokens.len());
 
             // ── Extract RoPE tables ──
-            let (rope_cos_var, rope_sin_var) = self.model()
+            let (rope_cos_var, rope_sin_var) = model
                 .rope_caches()
                 .ok_or_else(|| anyhow!("Model has no RoPE cache — cannot use CUDA graph mode"))?;
             let rope_cos_cache = rope_cos_var.tensor().clone();
@@ -272,7 +275,7 @@ impl Executor<CudaRuntime> {
             // ── Warmup pass (JIT kernels) ──
             device_scalars.update(&client, &[seq_len_k])
                 .map_err(|e| anyhow!("DeviceScalars warmup update failed: {}", e))?;
-            let warmup_logits = self.model().forward_graph_paged(
+            let warmup_logits = model.forward_graph_paged(
                 &client, &token_buf, &paged_cache, &slot_mapping, &block_table,
                 &device_scalars, &cos_slice, &sin_slice,
             ).map_err(|e| anyhow!("Paged graph warmup forward failed: {}", e))?;
@@ -293,7 +296,7 @@ impl Executor<CudaRuntime> {
             let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
             paged_cache.set_seq_len(seq_len_k);
 
-            let _ = self.model().forward_with_paged_kv_cache(
+            let _ = model.forward_with_paged_kv_cache(
                 &input, &paged_cache, &prefill_slot_mapping, &block_table,
                 seq_len_k, 0, None, None,
             ).map_err(|e| anyhow!("Re-prefill for capture failed: {}", e))?;
@@ -306,7 +309,7 @@ impl Executor<CudaRuntime> {
 
             // ── CUDA graph capture ──
             let graph = CudaRuntime::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
-                let logits = self.model().forward_graph_paged(
+                let logits = model.forward_graph_paged(
                     c, &token_buf, &paged_cache, &slot_mapping, &block_table,
                     &device_scalars, &cos_slice, &sin_slice,
                 ).map_err(|e| boostr::NumrError::Backend(format!("Capture paged forward failed: {e}")))?;

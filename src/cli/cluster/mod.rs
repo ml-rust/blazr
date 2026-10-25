@@ -2,6 +2,11 @@
 
 pub(super) mod disaggregated;
 pub(super) mod disaggregated_forward;
+pub(super) mod disaggregated_params;
+pub(super) mod disaggregated_router;
+pub(super) mod disaggregated_scheduler;
+#[cfg(test)]
+mod disaggregated_test_rig;
 pub(super) mod swarm;
 pub(super) mod swarm_forward;
 

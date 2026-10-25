@@ -64,7 +64,8 @@ where
 {
     /// Create a new batch engine
     pub fn new(executor: Arc<Executor<R>>, scheduler: Arc<RequestScheduler>) -> Result<Self> {
-        if executor.model().needs_gdn_state() {
+        let model = executor.model()?;
+        if model.needs_gdn_state() {
             return Err(crate::engine::qwen35_unsupported(
                 "continuous batching",
                 None,
@@ -73,9 +74,9 @@ where
         }
         let config = executor.config();
         let paged_cache = if config.inference.paged_attention {
-            let num_layers = executor.model().num_layers();
-            let num_kv_heads = executor.model().num_kv_heads().unwrap_or(8);
-            let head_dim = executor.model().head_dim().unwrap_or(64);
+            let num_layers = model.num_layers();
+            let num_kv_heads = model.num_kv_heads().unwrap_or(8);
+            let head_dim = model.head_dim().unwrap_or(64);
             let block_size = config.inference.block_size;
             let kv_dtype = config.kv_cache_dtype()?;
             let total_blocks = Self::kv_pool_blocks(&executor)?;

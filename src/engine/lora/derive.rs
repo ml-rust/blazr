@@ -89,7 +89,12 @@ where
     /// does not fit the model, [`LoraError::BaseLoad`] when the executor
     /// does not start.
     pub fn derive_variant(&self, spec: &AdapterSpec) -> Result<DerivedVariant<R>, LoraError> {
-        let (model, rank) = derive_model(&self.model, spec, &self.device)?;
+        let (model, rank) = derive_model(
+            self.model()
+                .map_err(|e| LoraError::Unsupported(e.to_string()))?,
+            spec,
+            &self.device,
+        )?;
         let adapted_modules = model.adapted_modules().len();
         let mut executor = Executor::build(
             model,

@@ -60,10 +60,11 @@ where
             .vision_tower
             .as_ref()
             .ok_or_else(|| anyhow!("{NO_TOWER_ERROR}"))?;
-        let LoadedModel::Qwen35(model) = &*self.model else {
+        let loaded = self.model()?;
+        let LoadedModel::Qwen35(model) = loaded else {
             return Err(anyhow!(
                 "image input needs a qwen35 model; the loaded model is {}",
-                self.model.model_type()
+                loaded.model_type()
             ));
         };
         let markers = tower.markers();

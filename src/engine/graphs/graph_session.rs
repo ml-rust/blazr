@@ -123,7 +123,7 @@ impl Executor<CudaRuntime> {
     ) -> Result<Tensor<CudaRuntime>> {
         session.kv_cache.reset();
         let logits = self
-            .model()
+            .model()?
             .forward_with_kv_cache(input, &mut session.kv_cache, 0)
             .map_err(|e| anyhow!("Prefill forward pass failed: {}", e))?;
         let client = CudaRuntime::default_client(self.device());
@@ -147,9 +147,10 @@ impl Executor<CudaRuntime> {
         input: &Tensor<CudaRuntime>,
         capacity: usize,
     ) -> Result<(LlamaGraphSession, Tensor<CudaRuntime>)> {
-        let num_layers = self.model().num_layers();
-        let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
-        let head_dim = self.model().head_dim().unwrap_or(64);
+        let model = self.model()?;
+        let num_layers = model.num_layers();
+        let num_kv_heads = model.num_kv_heads().unwrap_or(8);
+        let head_dim = model.head_dim().unwrap_or(64);
         let half_dim = head_dim / 2;
         let kv_dtype = self.config().kv_cache_dtype()?;
         let device = self.device();
@@ -172,8 +173,7 @@ impl Executor<CudaRuntime> {
         })?;
 
         let t0 = std::time::Instant::now();
-        let warm_logits = self
-            .model()
+        let warm_logits = model
             .forward_with_kv_cache(input, &mut kv_cache, 0)
             .map_err(|e| anyhow!("Prefill forward pass failed: {}", e))?;
         tracing::info!(
@@ -183,8 +183,7 @@ impl Executor<CudaRuntime> {
         );
         drop(warm_logits);
 
-        let (rope_cos_var, rope_sin_var) = self
-            .model()
+        let (rope_cos_var, rope_sin_var) = model
             .rope_caches()
             .ok_or_else(|| anyhow!("Model has no RoPE cache — cannot use CUDA graph mode"))?;
         let rope_cos_cache = rope_cos_var.tensor().clone();
@@ -209,8 +208,7 @@ impl Executor<CudaRuntime> {
         device_scalars
             .update(&client, &[kv_cache.seq_len()])
             .map_err(|e| anyhow!("DeviceScalars warmup update failed: {}", e))?;
-        let warmup_logits = self
-            .model()
+        let warmup_logits = model
             .forward_graph_mode(
                 &token_buf,
                 &mut kv_cache,
@@ -226,8 +224,7 @@ impl Executor<CudaRuntime> {
         // The warmup wrote the cache in place: reset and prefill again so
         // capture starts from the prompt state at the same addresses.
         kv_cache.reset();
-        let prefill_logits = self
-            .model()
+        let prefill_logits = model
             .forward_with_kv_cache(input, &mut kv_cache, 0)
             .map_err(|e| anyhow!("Re-prefill for capture failed: {}", e))?;
 
@@ -249,8 +246,7 @@ impl Executor<CudaRuntime> {
 
         let graph =
             CudaRuntime::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
-                let logits = self
-                    .model()
+                let logits = model
                     .forward_graph_mode(
                         &token_buf,
                         &mut kv_cache,

@@ -60,16 +60,17 @@ where
             .lock()
             .map_err(|e| anyhow!("Block allocator lock poisoned: {e}"))?
             .total_blocks();
+        let model = self.model()?;
         let pool = LayeredPagedKvCache::new(
-            self.model.num_layers(),
+            model.num_layers(),
             total_blocks,
             self.config.inference.block_size,
-            self.model.num_kv_heads().ok_or_else(|| {
+            model.num_kv_heads().ok_or_else(|| {
                 anyhow!(
                     "The model reports no KV head count, so paged attention cannot size its pool."
                 )
             })?,
-            self.model.head_dim().ok_or_else(|| {
+            model.head_dim().ok_or_else(|| {
                 anyhow!(
                     "The model reports no head dimension, so paged attention cannot size its pool."
                 )

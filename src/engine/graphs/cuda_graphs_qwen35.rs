@@ -111,6 +111,7 @@ impl Executor<CudaRuntime> {
         arena_bytes: usize,
         capacity: usize,
     ) -> Result<boostr::runtime::CapturedGraph<CudaRuntime>> {
+        let model = self.model()?;
         Self::qwen35_write_scalars(
             client,
             &mut inputs.device_scalars,
@@ -125,8 +126,7 @@ impl Executor<CudaRuntime> {
             &[logits_buf],
             arena_bytes,
             |c| {
-                let logits = self
-                    .model()
+                let logits = model
                     .forward_qwen35_graph_mode(
                         c,
                         &inputs.token_buf,
@@ -231,7 +231,7 @@ impl Executor<CudaRuntime> {
             capacity,
         )?;
         let warmup_logits = self
-            .model()
+            .model()?
             .forward_qwen35_graph_mode(
                 client,
                 &inputs.token_buf,

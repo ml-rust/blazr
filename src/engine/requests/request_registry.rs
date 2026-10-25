@@ -98,6 +98,15 @@ pub trait GenerationScheduler: Send + Sync {
     fn queue_depth(&self) -> usize {
         0
     }
+
+    /// Why this scheduler cannot run `gen_config` as asked, or `None`.
+    ///
+    /// A handler answers a refusal with 400 before it submits, so a request
+    /// never runs with a field silently dropped. `submit` refuses the same
+    /// configs.
+    fn refusal(&self, _gen_config: &GenerationConfig) -> Option<String> {
+        None
+    }
 }
 
 /// Per-request state stored beside whichever scheduler queued it.

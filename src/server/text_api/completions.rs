@@ -97,6 +97,9 @@ pub async fn completions(
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
     let placement = state.route(executor, &first.tokens);
+    if let Some(e) = placement.refusal(&gen_config) {
+        return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
+    }
 
     if request.stream.unwrap_or(false) {
         let id = format!("cmpl-{}", uuid::Uuid::new_v4());

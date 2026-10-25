@@ -31,3 +31,5 @@ pub use lifecycle::*;
 pub use lora::{AdapterSpec, LoraError, VariantInfo};
 pub use parallel::*;
 pub use requests::*;
+#[cfg(all(feature = "distributed", feature = "server"))]
+pub(crate) use speculative::rule::request_sample_rule;

@@ -95,18 +95,13 @@ where
         position: usize,
         fresh_cache: Option<KvCacheSpec>,
     ) -> anyhow::Result<boostr::Tensor<R>> {
+        let model = self.model()?;
         #[cfg(all(feature = "cuda", feature = "nccl"))]
         if let Some(group) = self.tp_state.as_ref().and_then(|s| s.group.as_ref()) {
-            return group.forward_with_kv_cache(
-                &self.model,
-                input,
-                kv_cache,
-                position,
-                fresh_cache,
-            );
+            return group.forward_with_kv_cache(model, input, kv_cache, position, fresh_cache);
         }
         let _ = fresh_cache;
-        self.model
+        model
             .forward_with_kv_cache(input, kv_cache, position)
             .map_err(|e| anyhow::anyhow!("Forward pass failed: {e}"))
     }

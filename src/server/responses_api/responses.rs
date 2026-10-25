@@ -62,7 +62,7 @@ pub async fn responses(
             }
         }
     };
-    let multimodal_model = matches!(executor.model(), boostr::model::LoadedModel::Multimodal(_));
+    let multimodal_model = executor.is_multimodal();
     let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
         Ok(route) => route,
         Err(message) => {
@@ -150,6 +150,9 @@ pub async fn responses(
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
     let placement = state.route(executor, &prompt_tokens);
+    if let Some(e) = placement.refusal(&gen_config) {
+        return error_response(StatusCode::BAD_REQUEST, &e, "invalid_request_error");
+    }
 
     let _slot = DecodeSlot::enter();
     let _permit = permit;

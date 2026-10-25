@@ -45,14 +45,15 @@ where
         // capture refuses to probe, so an unwarmed key would silently keep
         // the one-part fallback instead of this device's measured pick.
         // No-op on any backend but CUDA.
-        R::default_client(self.device()).warm_schedule_tuning(self.model().quant_formats());
+        let model = self.model()?;
+        R::default_client(self.device()).warm_schedule_tuning(model.quant_formats());
 
         // Create a single-token input
         let warmup_input = Tensor::from_slice(&[1i64], &[1, 1], self.device())?;
 
-        if self.model().needs_gdn_state() {
+        if model.needs_gdn_state() {
             self.warmup_qwen35(&warmup_input)?;
-        } else if self.model().needs_ssm_state() {
+        } else if model.needs_ssm_state() {
             self.warmup_mamba(&warmup_input)?;
         } else if self.config().inference.paged_attention {
             self.warmup_paged(&warmup_input)?;
@@ -61,7 +62,7 @@ where
         }
 
         // Warmup argmax + pipelined D2H copy
-        let vocab_size = self.model().vocab_size();
+        let vocab_size = model.vocab_size();
         let dummy_logits = Tensor::zeros(&[1, 1, vocab_size], DType::F32, self.device())?;
         let token_gpu = self.argmax_on_gpu(&dummy_logits)?;
         let event = token_gpu
@@ -76,43 +77,42 @@ where
     /// KV cache for the attention layers, GDN state for the rest. Sized
     /// through `qwen35_caches`, never by `num_layers()`.
     fn warmup_qwen35(&self, warmup_input: &Tensor<R>) -> Result<()> {
+        let model = self.model()?;
         let (mut kv_cache, mut gdn_state) = self.qwen35_caches(16, 16)?;
 
-        let _ = self
-            .model()
+        let _ = model
             .forward_qwen35(warmup_input, &mut kv_cache, &mut gdn_state, 0)
             .map_err(|e| anyhow!("Warmup prefill forward pass failed: {}", e))?;
 
         let position = kv_cache.seq_len();
-        let _ = self
-            .model()
+        let _ = model
             .forward_qwen35(warmup_input, &mut kv_cache, &mut gdn_state, position)
             .map_err(|e| anyhow!("Warmup decode forward pass failed: {}", e))?;
         Ok(())
     }
 
     fn warmup_mamba(&self, warmup_input: &Tensor<R>) -> Result<()> {
-        let mamba_config = self
-            .model()
+        let model = self.model()?;
+        let mamba_config = model
             .mamba_config()
             .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
-        let num_layers = self.model().num_layers();
+        let num_layers = model.num_layers();
         let warmup_dtype = self.config().compute_dtype()?;
 
         let mut ssm_state =
             LayeredSsmState::new(num_layers, 1, mamba_config, warmup_dtype, self.device())?;
 
-        let _ = self
-            .model()
+        let _ = model
             .forward_with_ssm_state(warmup_input, &mut ssm_state)
             .map_err(|e| anyhow!("Warmup forward pass failed: {}", e))?;
         Ok(())
     }
 
     fn warmup_paged(&self, warmup_input: &Tensor<R>) -> Result<()> {
-        let num_layers = self.model().num_layers();
-        let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
-        let head_dim = self.model().head_dim().unwrap_or(64);
+        let model = self.model()?;
+        let num_layers = model.num_layers();
+        let num_kv_heads = model.num_kv_heads().unwrap_or(8);
+        let head_dim = model.head_dim().unwrap_or(64);
         let block_size = self.config().inference.block_size;
         let kv_dtype = self.config().kv_cache_dtype()?;
 
@@ -143,8 +143,7 @@ where
         let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
         paged_cache.set_seq_len(1);
 
-        let _ = self
-            .model()
+        let _ = model
             .forward_with_paged_kv_cache(
                 warmup_input,
                 &paged_cache,
@@ -169,8 +168,7 @@ where
         let block_table = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], self.device())?;
         paged_cache.set_seq_len(2);
 
-        let _ = self
-            .model()
+        let _ = model
             .forward_with_paged_kv_cache(
                 warmup_input,
                 &paged_cache,
@@ -186,9 +184,10 @@ where
     }
 
     fn warmup_contiguous(&self, warmup_input: &Tensor<R>) -> Result<()> {
-        let num_layers = self.model().num_layers();
-        let num_kv_heads = self.model().num_kv_heads().unwrap_or(8);
-        let head_dim = self.model().head_dim().unwrap_or(64);
+        let model = self.model()?;
+        let num_layers = model.num_layers();
+        let num_kv_heads = model.num_kv_heads().unwrap_or(8);
+        let head_dim = model.head_dim().unwrap_or(64);
         let kv_dtype = self.config().kv_cache_dtype()?;
 
         let mut kv_cache = LayeredKvCache::new_positional(

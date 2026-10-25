@@ -107,6 +107,8 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     /// The registered LoRA adapter variants. Shared with the blocking
     /// thread of each variant build, which registers its variant.
     pub(crate) lora: Arc<LoraRegistry>,
+    /// Serve the registered models only: no load, unload or eviction.
+    pub(crate) pinned: bool,
 }
 
 impl<R: Runtime<DType = DType>> Scheduler<R>
@@ -141,7 +143,40 @@ where
             decision_config: DecisionConfig::default(),
             decisions: DecisionRegistry::default(),
             lora: Arc::new(LoraRegistry::new()),
+            pinned: false,
         }
+    }
+
+    /// Serve only the models registered with [`Self::register_base`].
+    ///
+    /// A request for any other name is [`crate::engine::ModelNotFound`].
+    /// No model loads, unloads or expires, so a front end with no weights,
+    /// such as the disaggregated router, never loads a model by accident.
+    pub fn pinned(mut self) -> Self {
+        self.pinned = true;
+        self
+    }
+
+    /// Register `executor` under `name`, loaded from `path`, with no
+    /// keep-alive. It replaces a model of the same name.
+    pub async fn register_base(
+        &self,
+        name: &str,
+        path: PathBuf,
+        executor: Executor<R>,
+    ) -> Arc<Executor<R>> {
+        let executor = Arc::new(executor);
+        self.models.write().await.insert(
+            name.to_string(),
+            ModelEntry {
+                executor: Arc::clone(&executor),
+                last_accessed: Instant::now(),
+                path,
+                keep_alive: None,
+                variant_of: None,
+            },
+        );
+        executor
     }
 
     /// Detect, batch and bound System One decision models with `config`.
@@ -221,6 +256,9 @@ where
         if let Some(executor) = self.touch(model_name).await {
             return Ok(executor);
         }
+        if self.pinned {
+            return Err(crate::engine::ModelNotFound::new(model_name).into());
+        }
         if let Some(info) = self.lora.get(model_name) {
             return Ok(self.load_variant(&info).await?);
         }
@@ -267,8 +305,12 @@ where
 
     /// Set the keep-alive duration for a model.
     /// `None` means forever. `Some(Duration::ZERO)` means unload immediately,
-    /// a base model's LoRA variants first.
+    /// a base model's LoRA variants first. A [`Self::pinned`] scheduler
+    /// keeps every model forever and ignores the call.
     pub async fn set_keep_alive(&self, model_name: &str, keep_alive: Option<Duration>) {
+        if self.pinned {
+            return;
+        }
         let mut models = self.models.write().await;
         if let Some(entry) = models.get_mut(model_name) {
             entry.keep_alive = keep_alive;
@@ -292,8 +334,12 @@ where
 
     /// Unload a specific model: a base model's LoRA variants first, then
     /// the model. A variant unloads alone and stays registered, so the next
-    /// request for it builds it again.
+    /// request for it builds it again. A [`Self::pinned`] scheduler unloads
+    /// nothing and returns `false`.
     pub async fn unload(&self, model_name: &str) -> bool {
+        if self.pinned {
+            return false;
+        }
         let mut models = self.models.write().await;
         remove_with_variants(&mut models, model_name)
     }

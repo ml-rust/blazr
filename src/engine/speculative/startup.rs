@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn each_section_state_reports_its_startup() -> Result<()> {
         let exec = seeded_executor(SEED, None)?;
-        let model = exec.model();
+        let model = exec.model()?;
         let off = SpeculativeDecodingConfig::default();
         let cases = [
             (with(None, false), SpeculativeStartup::Off),
@@ -151,7 +151,7 @@ mod tests {
                 num_draft_tokens: Some(0),
                 ..SpeculativeDecodingConfig::default()
             };
-            let err = report_speculative(exec.model(), &with(Some(bad), false))
+            let err = report_speculative(exec.model()?, &with(Some(bad), false))
                 .map_err(|e| e.to_string());
             assert!(
                 matches!(&err, Err(msg) if msg.contains("inference.speculative.num_draft_tokens")),
@@ -171,7 +171,7 @@ mod tests {
         let mut inference = exec.config().inference.clone();
         inference.speculative = Some(on());
         assert_eq!(
-            report_speculative(exec.model(), &inference)?,
+            report_speculative(exec.model()?, &inference)?,
             SpeculativeStartup::On
         );
         Ok(())

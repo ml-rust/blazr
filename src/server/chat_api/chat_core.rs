@@ -128,7 +128,7 @@ pub(in crate::server) async fn prepare_chat<'r>(
     let media = decode_request_media(&request.messages)
         .await
         .map_err(|message| bad_request(&message))?;
-    let multimodal_model = matches!(executor.model(), boostr::model::LoadedModel::Multimodal(_));
+    let multimodal_model = executor.is_multimodal();
     let route = image_route(executor.vision_tower().is_some(), multimodal_model, &media)
         .map_err(|message| bad_request(&message))?;
     if route == ImageRoute::Tower && request.raw.unwrap_or(false) {
@@ -230,6 +230,9 @@ pub(in crate::server) async fn prepare_chat<'r>(
     // The executor and scheduler this request runs on. With data
     // parallelism, the router picks a replica here.
     let placement = state.route(executor, &prompt_tokens);
+    if let Some(e) = placement.refusal(&gen_config) {
+        return Err(bad_request(&e));
+    }
 
     Ok(PreparedChat {
         placement,

@@ -12,7 +12,7 @@ use super::options::{check_dimensions, check_token_ids, finish_vector, EncodingF
 use super::request::{EmbedItem, EmbeddingRequest};
 use super::response::{EmbeddingData, EmbeddingResponse, EmbeddingUsage, EmbeddingValue};
 use crate::engine::pooling::{pool_cls, pool_last, pool_mean};
-use crate::engine::Executor;
+use crate::engine::{Executor, NoWeights};
 use crate::server::encoding::encode_f32_base64;
 use crate::server::generation::{error_response, policy_error_response};
 use crate::server::handlers::{lookup_error_response, AppState, ServerRuntime, VisionEmbedder};
@@ -69,8 +69,13 @@ pub(crate) async fn embed_tokens(
 ) -> Result<Vec<f32>, Box<Response>> {
     let num_tokens = token_ids.len();
     let hidden = hidden_states(executor, token_ids).await.map_err(|e| {
+        let status = if e.downcast_ref::<NoWeights>().is_some() {
+            StatusCode::NOT_IMPLEMENTED
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
         Box::new(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             &format!("Embedding generation failed: {e}"),
             "server_error",
         ))

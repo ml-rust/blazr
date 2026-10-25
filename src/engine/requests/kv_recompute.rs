@@ -88,7 +88,7 @@ where
         let slot_tensor = Tensor::from_slice(&slots, &[end - start], device)?;
         let input = executor.create_input_tensor(&tokens[start..end])?;
         executor
-            .model()
+            .model()?
             .forward_with_paged_kv_cache(
                 &input,
                 paged_cache,
@@ -139,7 +139,7 @@ mod tests {
         let bt: Vec<i32> = blocks.iter().map(|&b| b as i32).collect();
         let block_table = Tensor::from_slice(&bt, &[1, bt.len()], exec.device())?;
         let input = exec.create_input_tensor(&[token])?;
-        let logits = exec.model().forward_with_paged_kv_cache(
+        let logits = exec.model()?.forward_with_paged_kv_cache(
             &input,
             cache,
             &slot_tensor,
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn recomputed_blocks_decode_like_the_original_prefill() -> Result<()> {
         let exec = seeded_executor(3, None)?;
-        let model = exec.model();
+        let model = exec.model()?;
         let cache = LayeredPagedKvCache::<CpuRuntime>::new(
             model.num_layers(),
             8,

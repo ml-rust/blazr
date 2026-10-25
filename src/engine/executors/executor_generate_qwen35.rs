@@ -72,24 +72,20 @@ where
         initial_capacity: usize,
         max_seq_len: usize,
     ) -> Result<(LayeredKvCache<R>, LayeredGdnState<R>)> {
-        let num_attention = self
-            .model
+        let model = self.model()?;
+        let num_attention = model
             .num_attention_layers()
             .ok_or_else(|| anyhow!("qwen35 model missing attention layer count"))?;
-        let num_gdn = self
-            .model
+        let num_gdn = model
             .num_gdn_layers()
             .ok_or_else(|| anyhow!("qwen35 model missing GDN layer count"))?;
-        let gdn_config = self
-            .model
+        let gdn_config = model
             .gdn_config()
             .ok_or_else(|| anyhow!("qwen35 model missing GDN config"))?;
-        let num_kv_heads = self
-            .model
+        let num_kv_heads = model
             .num_kv_heads()
             .ok_or_else(|| anyhow!("qwen35 model missing KV head count"))?;
-        let head_dim = self
-            .model
+        let head_dim = model
             .head_dim()
             .ok_or_else(|| anyhow!("qwen35 model missing head dim"))?;
         let dtype = self.config.kv_cache_dtype()?;
@@ -119,7 +115,7 @@ where
     pub(in crate::engine) fn qwen35_backbone(
         &self,
     ) -> Result<&boostr::model::qwen35::Qwen35Model<R>> {
-        match self.model() {
+        match self.model()? {
             boostr::model::LoadedModel::Qwen35(m) => Ok(m),
             boostr::model::LoadedModel::Multimodal(m) => match m.llm() {
                 boostr::model::LoadedModel::Qwen35(inner) => Ok(inner),
@@ -146,7 +142,7 @@ where
     ) -> Result<Tensor<R>> {
         match plan {
             Some(plan) => self
-                .model
+                .model()?
                 .forward_qwen35_embeds(&plan.embeds, &plan.positions, kv_cache, gdn_state)
                 .map_err(|e| anyhow!("qwen35 image prefill failed: {}", e)),
             None => self.qwen35_prefill_at(input, 0, kv_cache, gdn_state),
@@ -171,7 +167,7 @@ where
         kv_cache: &mut LayeredKvCache<R>,
         gdn_state: &mut LayeredGdnState<R>,
     ) -> Result<Tensor<R>> {
-        self.model
+        self.model()?
             .forward_qwen35(input, kv_cache, gdn_state, rope_pos)
             .map_err(|e| {
                 anyhow!(
@@ -230,7 +226,7 @@ where
 
                 let next_input = pending.tensor.reshape(&[1, 1])?;
                 let rope_pos = kv_cache.seq_len() - rope_lag;
-                let next_logits = self.model.forward_qwen35(&next_input, &mut kv_cache, &mut gdn_state, rope_pos)
+                let next_logits = self.model()?.forward_qwen35(&next_input, &mut kv_cache, &mut gdn_state, rope_pos)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 let fwd_time = t1.elapsed();
 

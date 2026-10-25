@@ -236,8 +236,11 @@ async fn kev_variant_matches_peft_and_leaves_the_base_unchanged() {
         .get_executor(&name)
         .await
         .unwrap_or_else(|e| panic!("load {name}: {e:#}"));
-    let vocab = base.model().vocab_size();
-    let base_before = prefill_logits(base.model(), &device);
+    let base_model = base
+        .model()
+        .unwrap_or_else(|e| panic!("base model {name}: {e}"));
+    let vocab = base_model.vocab_size();
+    let base_before = prefill_logits(base_model, &device);
     check("base", &base_before, &reference(&base_ref, vocab), vocab);
 
     // The variant, derived from the loaded base through the registry.
@@ -262,23 +265,23 @@ async fn kev_variant_matches_peft_and_leaves_the_base_unchanged() {
         !Arc::ptr_eq(&variant, &base),
         "the variant is the base executor"
     );
-    assert_eq!(
-        variant.model().adapted_modules().len(),
-        info.adapted_modules
-    );
+    let variant_model = variant
+        .model()
+        .unwrap_or_else(|e| panic!("variant model {id}: {e}"));
+    assert_eq!(variant_model.adapted_modules().len(), info.adapted_modules);
     assert!(
-        base.model().adapted_modules().is_empty(),
+        base_model.adapted_modules().is_empty(),
         "the base was adapted"
     );
     check(
         "kev",
-        &prefill_logits(variant.model(), &device),
+        &prefill_logits(variant_model, &device),
         &reference(&kev_ref, vocab),
         vocab,
     );
 
     // The base is unchanged: bit-identical to its logits before the derive.
-    let base_after = prefill_logits(base.model(), &device);
+    let base_after = prefill_logits(base_model, &device);
     let moved = base_before
         .iter()
         .zip(&base_after)

@@ -135,7 +135,7 @@ async fn run_leader(
 
     // Pre-load model
     let executor = scheduler.get_executor(model_name).await?;
-    let total_layers = executor.model().num_layers();
+    let total_layers = executor.model()?.num_layers();
     tracing::info!(
         model = model_name,
         layers = total_layers,

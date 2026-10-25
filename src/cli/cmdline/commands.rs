@@ -407,8 +407,10 @@ pub enum Commands {
         #[arg(long, default_value = "router")]
         role: String,
 
-        /// Model to load (prefill and decode roles) [default: default_model]
-        #[arg(long, short)]
+        /// Model. Router: required, the tokenizer and chat template source
+        /// (no weights load). Prefill and decode: the model to load
+        /// [default: default_model]
+        #[arg(long, short, required_if_eq("role", "router"))]
         model: Option<String>,
 
         /// Address for this node to listen on

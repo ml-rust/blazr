@@ -12,6 +12,11 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### ⚠️ Breaking changes
+
+- **`blazr disagg --role router` requires `--model`** — the router loads that model's config, tokenizer and chat template, and no weights. It does not fall back to `default_model`. Name the model the workers load.
+- **Disaggregated wire protocol** — the workers and the router speak boostr's versioned protocol. Every rank of a cluster must run the same blazr release.
+
 ### Added
 
 - **Streaming logprobs** — completions and chat stream chunks now carry `choices[0].logprobs` when the request sets `logprobs`. Each chunk holds the entry of the token it carries. A token whose text a stop-sequence prefix or a reasoning tag holds back still sends its entry in its own chunk.
@@ -26,6 +31,7 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
+- **Disaggregated serving** — it was not functional. The router mapped prompt characters to fake token ids, sampled nothing, applied no stop and did not stream. A failed forward ended the request as a fake EOS. Now the router serves the full HTTP API of `blazr serve`: completions, chat, streaming, stop sequences, usage, auth, metrics, and the Anthropic and Ollama routes. Prompts tokenize with the model's tokenizer and chat template. The workers sample with the request's temperature, `top_k`, `top_p`, `min_p`, penalties, penalty window and seed, and stop at EOS or `max_tokens`. Greedy and seeded output equals one process's output. A worker error ends the request with that error. A client that leaves cancels the request on both workers. A request that sets a grammar or constraint, mirostat, DRY, typical-p, dynamic temperature, `logit_bias` or `logprobs` is a `400`. Embeddings are a `501`.
 - **`dry_sequence_breakers`** — the DRY penalty now applies the breakers. Before, requests and `generation.dry_sequence_breakers` parsed them, and the penalty ignored them. Each string encodes as plain text, and its first token is the breaker, as in llama.cpp. A DRY match never extends across a breaker. A request resolves its breakers once, before its first token. With `dry_multiplier` above 0, a breaker that encodes to no token is a `400`. Absent breakers set none. blazr has no default breakers.
 - **Negative `keep_alive`** — every negative value, such as `"-5m"`, now keeps the model loaded. Before, only `"-1"` was explicit and other negative forms kept it loaded only because they did not parse.
 - **`keep_alive` on streamed chat** — a streamed chat request now applies `keep_alive` once its last token is out. Before, only a non-streaming request applied it.

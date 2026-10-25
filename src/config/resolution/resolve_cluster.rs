@@ -2,8 +2,9 @@
 //! then the user config file, then the built-in default.
 //!
 //! The swarm leader and the disaggregated router serve HTTP from the
-//! `server` section. Every role loads its model from `model_dir` on the
-//! `device` key's CUDA index.
+//! `server` section. Every role finds its model in `model_dir`, on the
+//! `device` key's CUDA index. The disaggregated router reads the model's
+//! tokenizer and chat template only, and its `--model` is required.
 
 use std::path::PathBuf;
 
@@ -26,6 +27,8 @@ pub struct ClusterFlags {
 pub struct ClusterSettings {
     /// `--model`, then `default_model`.
     pub model: Option<String>,
+    /// Whether `model` came from `--model`.
+    pub model_flag: bool,
     /// `BLAZR_MODEL_DIR`, then `model_dir`, then `./models`.
     pub model_dir: PathBuf,
     /// GPU index from `device`, for the build's runtime. 0 on a CPU build.
@@ -51,8 +54,10 @@ pub fn resolve_cluster(
     server.port = pick(flags.port, None, None, server.port);
     server.host = pick(flags.host, None, None, server.host);
     check_tls_pair(&server)?;
+    let model_flag = flags.model.is_some();
     Ok(ClusterSettings {
         model: resolve_model(flags.model, file),
+        model_flag,
         model_dir: resolve_model_dir(None, env, file),
         gpu_index: DeviceChoice::build_gpu_index(file.device)?,
         server,

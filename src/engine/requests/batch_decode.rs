@@ -170,7 +170,7 @@ where
     // Single batched forward pass — model dispatches paged decode attention per (batch, head).
     seqs.count_forward();
     let batch_logits = executor
-        .model()
+        .model()?
         .forward_with_paged_kv_cache(
             &input,
             paged_cache,

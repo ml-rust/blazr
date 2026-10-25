@@ -148,7 +148,7 @@ where
         let input = self.exec.create_input_tensor(tokens)?;
         let logits = self
             .exec
-            .model()
+            .model()?
             .forward_with_paged_kv_cache(
                 &input,
                 self.pool,

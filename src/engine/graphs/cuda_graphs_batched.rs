@@ -50,13 +50,14 @@ impl Executor<boostr::CudaRuntime> {
         use boostr::CudaRuntime;
         use boostr::Runtime;
 
-        let head_dim = self.model().head_dim().unwrap_or(64);
+        let model = self.model()?;
+        let head_dim = model.head_dim().unwrap_or(64);
         let half_dim = head_dim / 2;
 
         let client = CudaRt::default_client(self.device());
 
         // ── Extract RoPE tables ──
-        let (rope_cos_var, rope_sin_var) = self.model().rope_caches().ok_or_else(|| {
+        let (rope_cos_var, rope_sin_var) = model.rope_caches().ok_or_else(|| {
             anyhow!("Model has no RoPE cache — cannot use batched CUDA graph mode")
         })?;
         let rope_cos_cache = rope_cos_var.tensor().clone();
@@ -127,8 +128,7 @@ impl Executor<boostr::CudaRuntime> {
             )
             .map_err(|e| anyhow!("BatchedGraph RoPE warmup failed: {}", e))?;
 
-        let warmup_logits = self
-            .model()
+        let warmup_logits = model
             .forward_graph_paged(
                 &client,
                 &token_buf,
@@ -157,8 +157,7 @@ impl Executor<boostr::CudaRuntime> {
 
         // ── CUDA graph capture ──
         let graph = CudaRt::capture_graph_into(&client, &[&token_buf], &[&next_token_buf], |c| {
-            let logits = self
-                .model()
+            let logits = model
                 .forward_graph_paged(
                     c,
                     &token_buf,

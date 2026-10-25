@@ -165,7 +165,16 @@ The five generation handlers call `state.route` for each request. Without a repl
 
 ### Prefill and decode disaggregation
 
-`blazr disagg` runs one of three roles: `router`, `prefill`, or `decode` (`src/cli/cluster/disaggregated.rs`). Prefill workers run prompt passes and send the KV cache. Decode workers receive it and run decode steps. The router accepts HTTP requests and dispatches them to the workers. The wire protocol lives in `crate::distributed::disaggregated`, which re-exports boostr. The command needs the `distributed` feature.
+`blazr disagg` runs one of three roles: `router`, `prefill`, or `decode` (`src/cli/cluster/disaggregated.rs`). The wire protocol lives in `crate::distributed::disaggregated`, which re-exports boostr. The command needs the `distributed` feature.
+
+- Router: loads the config, tokenizer and chat template of `--model`, and no weights (`Executor::tokenizer_only`). It serves the full HTTP API through the `blazr serve` startup path. Its model scheduler is pinned: it serves `--model` only and never loads, unloads or evicts a model.
+- `DisaggScheduler` (`src/cli/cluster/disaggregated_scheduler.rs`): the router's one `GenerationScheduler`. It turns a request's `GenerationConfig` into boostr's `GenerationParams`, streams the tokens, applies text, stop sequences and finish reasons, and cancels both workers when the request handle drops.
+- Prefill worker: runs the prompt, samples the first token and hands the KV cache to a decode worker.
+- Decode worker: opens the cache once per request and samples each next token.
+- Forward closures (`src/cli/cluster/disaggregated_forward.rs`): run the executor's contiguous-cache forward and return logits. The workers sample. Prefill and decode on two workers give the tokens of one process.
+- Refused fields (`src/cli/cluster/disaggregated_params.rs`): the protocol carries no grammar or `response_format` constraint, mirostat, DRY, typical-p, dynamic temperature, `logit_bias` or `logprobs`. A request that sets one is a `400`.
+- Refused models: GDN, SSM and tensor-parallel models fail at worker start. Their state does not cross the KV handoff.
+- Endpoints with no generation path: embeddings return `501`. Image inputs and LoRA variants are not served.
 
 ## Feature flags
 

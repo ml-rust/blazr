@@ -490,8 +490,22 @@ The `disagg` command runs three roles: `router`, `prefill`, and `decode`.
 Router:
 
 ```bash
-blazr disagg --role router --listen-addr 0.0.0.0:9190 --prefill <prefill-host>:9191 --decode <decode-host>:9192 --port 8080
+blazr disagg --role router --model <name> --listen-addr 0.0.0.0:9190 --prefill <prefill-host>:9191 --decode <decode-host>:9192 --port 8080
 ```
+
+The router loads the config, tokenizer and chat template of `--model`, and no weights. Name the model the workers load. The router serves the full HTTP API of `blazr serve`: OpenAI completions and chat, streaming, stop sequences, usage, the Anthropic and Ollama routes, auth through `BLAZR_API_KEY`, and `/metrics`. It serves `--model` only. A request for another model is a `404`.
+
+The workers sample with temperature, `top_k`, `top_p`, `min_p`, the repeat, frequency and presence penalties, the penalty window, and the seed. The router answers `400` to a request that sets any of these:
+
+- `grammar`, `response_format` or a tool constraint
+- `mirostat`
+- `dry_multiplier`
+- `typical_p`
+- `dynatemp_range`
+- `logit_bias`
+- `logprobs`
+
+Embeddings return `501`. Image inputs and LoRA variants are not served. GDN (`qwen35`), SSM and tensor-parallel models fail at worker start.
 
 Prefill worker:
 
@@ -508,7 +522,7 @@ blazr disagg --role decode --model <name> --router-addr <router-host>:9190 --lis
 | Flag            | Role     | Default        | Required for        | Purpose                                              |
 | --------------- | -------- | -------------- | ------------------- | ---------------------------------------------------- |
 | `--role`        | all      | `router`       | No                  | `router`, `prefill`, or `decode`. Other values fail. |
-| `--model`, `-m` | all      | `default_model` | `prefill`, `decode` | Model to load.                                       |
+| `--model`, `-m` | all      | `default_model` (workers) | All roles. The router takes `--model` only. | Workers: model to load. Router: tokenizer and chat template source. |
 | `--router-addr` | all      | none           | `prefill`, `decode` | Router address to connect to.                        |
 | `--listen-addr` | all      | `0.0.0.0:9190` | No                  | Address the node listens on.                         |
 | `--prefill`     | `router` | none           | No                  | One or more prefill worker addresses.                |
@@ -516,7 +530,7 @@ blazr disagg --role decode --model <name> --router-addr <router-host>:9190 --lis
 | `--port`        | `router` | `server.port`, else `8080` | No      | HTTP API port.                                       |
 | `--host`        | `router` | `server.host`, else `0.0.0.0` | No   | HTTP API address.                                    |
 
-All roles default to `0.0.0.0:9190`. Set a distinct `--listen-addr` on each node that shares a host. The router accepts empty `--prefill` and `--decode` lists. Pass at least one address of each kind.
+All roles default to `0.0.0.0:9190`. Set a distinct `--listen-addr` on each node that shares a host. The router refuses an empty `--prefill` or `--decode` list. Pass at least one address of each kind.
 
 ### Tensor parallelism
 

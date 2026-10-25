@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::config::GenerationConfig;
 use crate::engine::{
     route_through, DataParallelGroup, Executor, GenerationScheduler, ReplicaLease,
 };
@@ -125,5 +126,11 @@ impl Route {
             scheduler,
             _lease: None,
         }
+    }
+
+    /// Why this route's scheduler cannot run `gen_config`, or `None`. The
+    /// handler answers it with 400. See [`GenerationScheduler::refusal`].
+    pub fn refusal(&self, gen_config: &GenerationConfig) -> Option<String> {
+        self.scheduler.as_ref()?.refusal(gen_config)
     }
 }

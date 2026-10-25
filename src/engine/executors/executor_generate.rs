@@ -90,7 +90,9 @@ where
 
             let mut sampler = self.sampler_state(prompt_tokens, gen_config)?;
 
-            if self.model.needs_gdn_state() {
+            let model = self.model()?;
+
+            if model.needs_gdn_state() {
                 // ── qwen35 path: KV cache (attention layers) + GDN state ──
                 // Checked first: needs_kv_cache() is also true here, and the
                 // KV branches below size the cache by num_layers().
@@ -104,11 +106,11 @@ where
                 for await item in inner {
                     yield item;
                 }
-            } else if self.model.needs_ssm_state() {
+            } else if model.needs_ssm_state() {
                 // ── Mamba2 path: SSM state instead of KV cache ──
-                let mamba_config = self.model.mamba_config()
+                let mamba_config = model.mamba_config()
                     .ok_or_else(|| anyhow!("Mamba2 model missing mamba config"))?;
-                let num_layers = self.model.num_layers();
+                let num_layers = model.num_layers();
 
                 let state_dtype = self.config.compute_dtype()?;
 
@@ -118,7 +120,7 @@ where
 
                 // Prefill
                 tracing::info!(phase = "prefill_start", backend = "mamba2", prompt_tokens = prompt_tokens.len());
-                let mut logits = self.model.forward_with_ssm_state(&input, &mut ssm_state)
+                let mut logits = model.forward_with_ssm_state(&input, &mut ssm_state)
                     .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
                 tracing::info!(phase = "prefill_end", backend = "mamba2");
                 tracing::info!(phase = "decode_start", backend = "mamba2", max_tokens = max_tokens);
@@ -127,7 +129,7 @@ where
                     let pending = self.sample_begin(cur_logits, &mut sampler, gen_config, None)?;
 
                     let next_input = pending.tensor.reshape(&[1, 1])?;
-                    let next_logits = self.model.forward_with_ssm_state(&next_input, &mut ssm_state)
+                    let next_logits = model.forward_with_ssm_state(&next_input, &mut ssm_state)
                         .map_err(|e| anyhow!("Forward pass failed: {}", e))?;
 
                     let next_token = self.sample_finish(&pending, &mut sampler)?;
@@ -184,7 +186,7 @@ where
                     num_blocks = bt_vec.len(),
                 );
                 let t0 = std::time::Instant::now();
-                let mut logits = self.model.forward_with_paged_kv_cache(
+                let mut logits = model.forward_with_paged_kv_cache(
                     &prefill_input, paged_cache, &slot_mapping, &block_table_tensor,
                     seq_len_k, prefill_start, None, None,
                 ).map_err(|e| anyhow!("Paged prefill failed: {}", e))?;
@@ -208,7 +210,7 @@ where
                     let block_table_tensor = Tensor::from_slice(&bt_vec, &[1, bt_vec.len()], &self.device)?;
 
                     let next_input = pending.tensor.reshape(&[1, 1])?;
-                    let next_logits = self.model.forward_with_paged_kv_cache(
+                    let next_logits = model.forward_with_paged_kv_cache(
                         &next_input, paged_cache, &slot_mapping, &block_table_tensor,
                         new_seq_len_k, cur_seq_len, None, None,
                     ).map_err(|e| anyhow!("Paged decode failed: {}", e))?;

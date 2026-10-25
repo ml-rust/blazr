@@ -7,6 +7,7 @@ mod detect_arch;
 pub mod gptq;
 mod hf_qwen35;
 mod loaders;
+mod meta;
 mod offloading;
 mod regular;
 mod tensors;
@@ -19,5 +20,6 @@ pub use loaders::{
     load_safetensors, load_safetensors_tp, load_safetensors_with_config,
     load_safetensors_with_offloading,
 };
+pub use meta::read_safetensors_config;
 pub use offloading::{OffloadingInfo, OffloadingOptions};
 pub use regular::load_safetensors_with_report;

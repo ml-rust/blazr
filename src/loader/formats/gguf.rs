@@ -141,6 +141,14 @@ pub struct GgufBytesModel<R: Runtime> {
     pub chat_template: Option<ModelTemplate>,
 }
 
+/// The tokenizer a GGUF carries in its metadata.
+pub(super) fn gguf_tokenizer(gguf: &Gguf) -> Result<AnyTokenizer> {
+    let vocab = boostr::format::extract_gguf_vocab(gguf.metadata())
+        .map_err(|e| anyhow!("Failed to extract GGUF vocabulary: {}", e))?;
+    splintr::from_gguf_vocab(vocab)
+        .map_err(|e| anyhow!("Failed to build tokenizer from GGUF vocabulary: {}", e))
+}
+
 /// Config, embedded tokenizer and weights of an open GGUF.
 fn load_gguf_reader<R: Runtime<DType = DType>>(
     gguf: &mut Gguf,
@@ -150,10 +158,7 @@ where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R>,
 {
     let config = config_from_gguf_metadata(gguf)?;
-    let vocab = boostr::format::extract_gguf_vocab(gguf.metadata())
-        .map_err(|e| anyhow!("Failed to extract GGUF vocabulary: {}", e))?;
-    let tokenizer = splintr::from_gguf_vocab(vocab)
-        .map_err(|e| anyhow!("Failed to build tokenizer from GGUF vocabulary: {}", e))?;
+    let tokenizer = gguf_tokenizer(gguf)?;
 
     let mut var_map = VarMap::<R>::from_gguf_reader(gguf, device)
         .map_err(|e| anyhow!("Failed to load GGUF tensors: {}", e))?;

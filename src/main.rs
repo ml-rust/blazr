@@ -317,7 +317,7 @@ async fn run() -> Result<()> {
                         listen_addr,
                         prefill_addrs,
                         decode_addrs,
-                        settings.server,
+                        &settings,
                     )
                     .await?;
                 }

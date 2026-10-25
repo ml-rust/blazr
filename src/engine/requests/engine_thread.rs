@@ -131,6 +131,10 @@ impl GenerationScheduler for ThreadedScheduler {
     fn queue_depth(&self) -> usize {
         self.scheduler.queue_depth()
     }
+
+    fn refusal(&self, gen_config: &GenerationConfig) -> Option<String> {
+        self.scheduler.refusal(gen_config)
+    }
 }
 
 #[cfg(test)]

@@ -208,6 +208,7 @@ pub(crate) fn seeded_executor_pair(
 ///
 /// Text encodes into its vocab, so a server test can send a text prompt.
 /// Its logits depend on the prompt, and its hidden states are nonzero.
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 pub(crate) fn seeded_full_vocab_executor(seed: u64) -> Result<Executor<CpuRuntime>> {
     let tokenizer = crate::tokenizer::from_pretrained("llama3")?;
     let eos = tokenizer

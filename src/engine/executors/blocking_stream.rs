@@ -247,7 +247,7 @@ mod tests {
     use crate::engine::test_support::{
         free_pool_blocks as free_blocks, seeded_executor, ticker, wait_past, WAIT_LIMIT,
     };
-    use crate::engine::GeneratedToken;
+    use crate::engine::{GeneratedToken, WorkHold};
 
     /// Engine tokens tagged with the stream they came from.
     struct Tagged(usize);
@@ -395,6 +395,50 @@ mod tests {
             "the decode ran past the drop"
         );
         assert_eq!(free_blocks(&exec)?, POOL.blocks);
+        Ok(())
+    }
+
+    /// The caller's future drops after the first token, as a handler's does
+    /// when its client leaves. The decode thread keeps the caller's hold
+    /// until it exits, one step later.
+    #[tokio::test]
+    async fn the_decode_thread_keeps_the_hold_until_it_exits() -> Result<()> {
+        let exec = executor(false)?;
+        let left = Arc::new(AtomicUsize::new(0));
+        let hook: StepHook = {
+            let left = Arc::clone(&left);
+            Arc::new(move |step| {
+                if step == 1 {
+                    wait_past(&left, 0);
+                }
+            })
+        };
+        let probe = Arc::new(());
+        let hold = WorkHold::new(Arc::clone(&probe));
+        let job = DecodeJob::text(exec, vec![1, 2, 3], greedy(10)).with_step_hook(hook);
+        let (tx, mut rx) = mpsc::channel(DECODE_CHANNEL_CAPACITY);
+        let caller = tokio::spawn(WorkHold::within(
+            Some(hold),
+            stream_on_decode_thread(job, RawTokens, tx),
+        ));
+        rx.recv().await.ok_or_else(|| anyhow!("no first token"))??;
+
+        caller.abort();
+        let _ = caller.await;
+        drop(rx);
+        assert_eq!(
+            Arc::strong_count(&probe),
+            2,
+            "the hold dropped while the decode still ran"
+        );
+        left.fetch_add(1, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + WAIT_LIMIT;
+        while Arc::strong_count(&probe) > 1 {
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow!("the decode thread never dropped the hold"));
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         Ok(())
     }
 

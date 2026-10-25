@@ -1,5 +1,6 @@
 //! Generation plumbing shared by the endpoints: sampling fields, streaming, reasoning.
 
+pub(super) mod chat_choices;
 pub(super) mod chat_chunks;
 pub(super) mod chat_stream;
 pub(super) mod constraint_admission;

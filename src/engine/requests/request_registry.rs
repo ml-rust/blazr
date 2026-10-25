@@ -19,7 +19,7 @@ use boostr::inference::scheduler::SequenceId;
 
 use crate::config::GenerationConfig;
 use crate::engine::types::{FinishReason, GeneratedToken};
-use crate::engine::{StopCut, StopMatcher};
+use crate::engine::{StopCut, StopMatcher, WorkHold};
 use crate::tokenizer::{AnyTokenizer, TokenTextStream};
 
 /// Tokens a request buffers before the driver waits on its reader.
@@ -126,6 +126,9 @@ struct RequestMeta {
     text: Option<TokenTextStream>,
     /// Cuts the text at the request's first stop sequence.
     stop: StopMatcher,
+    /// The submitter's hold. It drops with this state, once the scheduler
+    /// has freed what the request held.
+    _hold: Option<WorkHold>,
 }
 
 /// The requests a scheduler is carrying, keyed by sequence id.
@@ -156,6 +159,10 @@ impl RequestRegistry {
 
     /// Store `seq_id`'s state and hand back the caller's handle.
     ///
+    /// The state takes the caller's [`WorkHold`], so a guard behind it
+    /// stays held until the request leaves the scheduler, even when the
+    /// handle drops first.
+    ///
     /// # Errors
     ///
     /// An error when the registry lock is poisoned.
@@ -175,6 +182,7 @@ impl RequestRegistry {
             prompt_tokens: prompt_tokens.clone(),
             token_history: prompt_tokens,
             text: None,
+            _hold: WorkHold::current(),
         };
         self.lock_meta()?.insert(seq_id, meta);
         Ok(RequestHandle {

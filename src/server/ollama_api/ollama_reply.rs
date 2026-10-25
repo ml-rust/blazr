@@ -135,7 +135,7 @@ fn stream_reply(
         render,
         clock,
     };
-    ndjson_response(ndjson_items(setup, Box::pin(tokens)))
+    ndjson_response(ndjson_items(setup, tokens))
 }
 
 /// The one-object reply of a request with `stream` false.

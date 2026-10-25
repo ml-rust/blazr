@@ -119,8 +119,8 @@ A forward pass blocks its thread. No forward pass runs on a Tokio worker, so `/h
 - A decode thread sends each item on a bounded channel of 32. It stops within one token after the reader drops the channel.
 - A reader that takes no item for `inference.decode_idle_timeout_secs` stops the generation, and the thread exits.
 - A panic on a decode thread reaches the client as an error item. The server keeps running.
-- The caller of a decode waits for the thread to exit, so its admission permit outlives the decode. A caller that leaves first frees its permit up to one decode step before the thread exits.
-- `server.max_concurrent_requests` bounds the decode threads. A streamed response holds its slot until its body drops.
+- The caller of a decode waits for the thread to exit, so its admission permit outlives the decode.
+- `server.max_concurrent_requests` bounds the decode threads. The slot is a `WorkHold` (`src/engine/requests/work_hold.rs`). A decode thread holds it until it exits, and a batched request until its scheduler drops the request's state. A caller that leaves first keeps the slot taken until then.
 - The scheduler `configure_batching` returns owns its engine thread. When the server state drops the scheduler, the thread gets its stop signal and is joined. The loop reads the signal between steps.
 - CUDA needs no setup per thread. cudarc makes its context current in every safe call. numr does the same before each raw driver call.
 - A WebAssembly target starts no threads. There a generation runs on the caller, with no idle timeout.
@@ -157,7 +157,7 @@ The five generation handlers call `state.route` for each request. Without a repl
 
 - `src/telemetry/slo.rs` checks TTFT, ITL, and end-to-end latency against `server.slo`. A breach adds to `blazr_slo_violations_total{metric,percentile}`.
 - `src/engine/requests/slo_policy.rs` holds batch growth while the rolling P95 TTFT or ITL exceeds its target. Running sequences keep decoding.
-- `src/engine/requests/queue_depth.rs` feeds `blazr_queue_depth`. `src/server/serving/concurrency.rs` limits HTTP requests with `server.max_concurrent_requests`. A streamed response holds its slot until its body drops. `/health` and `/metrics` skip that limit.
+- `src/engine/requests/queue_depth.rs` feeds `blazr_queue_depth`. `src/server/serving/concurrency.rs` limits HTTP requests with `server.max_concurrent_requests`. A streamed body holds its slot until it drops, and the work the request started holds it until that work ends. `/health` and `/metrics` skip that limit.
 
 ### Pipeline (swarm)
 

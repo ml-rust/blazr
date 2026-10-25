@@ -140,8 +140,7 @@ pub async fn messages(
         );
 
         let parser = ReasoningParser::for_output(reasoning_format, &prompt);
-        create_message_stream(id, model_name, input_tokens, Box::pin(rx_stream), parser)
-            .into_response()
+        create_message_stream(id, model_name, input_tokens, rx_stream, parser).into_response()
     } else {
         let _slot = DecodeSlot::enter();
         let _permit = permit;

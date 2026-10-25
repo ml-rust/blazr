@@ -26,6 +26,7 @@ use voxr::{
     SynthesizeOptions, TtsBundle, TtsError,
 };
 
+use crate::engine::WorkHold;
 use crate::server::gen_types::error_response;
 
 /// The native formats a stream can carry, with their per-chunk encoders.
@@ -101,7 +102,10 @@ pub(super) async fn stream_speech(
     };
 
     let (tx, mut rx) = mpsc::channel::<Chunk>(8);
+    // The blocking thread holds the request's slot until synthesis ends.
+    let hold = WorkHold::current();
     tokio::task::spawn_blocking(move || {
+        let _hold = hold;
         let sender = tx.clone();
         let mut sink = move |samples: &[f32]| -> voxr::Result<()> {
             sender

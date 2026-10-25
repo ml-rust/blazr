@@ -17,6 +17,7 @@ pub mod request_scheduler;
 mod seq_sampler;
 pub mod slo_policy;
 pub mod slots;
+mod work_hold;
 
 pub use batch_engine::BatchEngine;
 pub use engine_thread::{EngineThread, ThreadedScheduler};
@@ -25,3 +26,4 @@ pub use request_registry::{CancelRequest, GenerationScheduler, RequestHandle, Re
 pub use request_scheduler::RequestScheduler;
 pub use slo_policy::SloBatchPolicy;
 pub use slots::SlotManager;
+pub use work_hold::WorkHold;

@@ -4,8 +4,11 @@
 //! counts in `blazr_queue_depth`. `/health` and `/metrics` skip the limit,
 //! so probes and scrapes answer while the server is saturated.
 //!
-//! A streamed response holds its slot until its body drops, so the limit
-//! also bounds the decode threads behind open streams.
+//! A request's slot is a [`WorkHold`]. A streamed body holds it until the
+//! body drops. The work the request starts holds it too: a decode thread
+//! until it exits, and a batched request until its scheduler frees it. A
+//! client that leaves therefore frees its slot only once its decode stops,
+//! so the limit bounds the decodes in flight as well as the open responses.
 
 use std::sync::Arc;
 
@@ -14,9 +17,9 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use futures::StreamExt;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 
-use crate::engine::QueueDepth;
+use crate::engine::{QueueDepth, WorkHold};
 
 /// Paths that never wait for a slot.
 const EXEMPT_PATHS: [&str; 2] = ["/health", "/metrics"];
@@ -43,8 +46,8 @@ impl ConcurrencyLimit {
     }
 }
 
-/// Middleware: hold one slot for the whole request, a streamed body
-/// included.
+/// Middleware: hold one slot for the whole request, a streamed body and
+/// the work the request starts included.
 pub async fn limit_concurrency(
     State(limit): State<Arc<ConcurrencyLimit>>,
     request: Request,
@@ -59,23 +62,24 @@ pub async fn limit_concurrency(
         let _waiting = limit.waiting.enter();
         Arc::clone(&limit.slots).acquire_owned().await.ok()
     };
-    let response = next.run(request).await;
-    match permit {
-        Some(permit) => hold_for_body(response, permit),
+    let hold = permit.map(WorkHold::new);
+    let response = WorkHold::within(hold.clone(), next.run(request)).await;
+    match hold {
+        Some(hold) => hold_for_body(response, hold),
         None => response,
     }
 }
 
-/// A body of unknown length streams after the handler returns. Its slot
-/// drops with the body. A body of known length is complete, so its slot
-/// drops here.
-fn hold_for_body(response: Response, permit: OwnedSemaphorePermit) -> Response {
+/// A body of unknown length streams after the handler returns. The body
+/// keeps a clone of the slot's hold. A body of known length is complete,
+/// so its clone drops here. Work the request started keeps its own clones.
+fn hold_for_body(response: Response, hold: WorkHold) -> Response {
     if response.body().size_hint().exact().is_some() {
         return response;
     }
     response.map(|body| {
         Body::from_stream(body.into_data_stream().map(move |chunk| {
-            let _slot = &permit;
+            let _slot = &hold;
             chunk
         }))
     })
@@ -180,6 +184,102 @@ mod tests {
         );
         drop(streamed);
         assert_eq!(limit.slots.available_permits(), 1);
+        Ok(())
+    }
+
+    /// The client leaves while the request's work still runs, as a decode
+    /// runs to its next step. The slot stays taken until that work ends.
+    #[tokio::test]
+    async fn work_the_request_started_holds_its_slot_past_the_body() -> anyhow::Result<()> {
+        let limit = ConcurrencyLimit::new(1);
+        let release = Arc::new(Notify::new());
+        let gate = Arc::clone(&release);
+        let open = || futures::stream::pending::<Result<axum::body::Bytes, std::io::Error>>();
+        let app = Router::new()
+            .route(
+                "/stream",
+                get(move || {
+                    let gate = Arc::clone(&gate);
+                    async move {
+                        let hold = WorkHold::current();
+                        std::thread::spawn(move || {
+                            let _hold = hold;
+                            futures::executor::block_on(gate.notified());
+                        });
+                        Body::from_stream(open())
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&limit),
+                limit_concurrency,
+            ));
+
+        let request = Request::builder().uri("/stream").body(Body::empty())?;
+        let streamed = app.oneshot(request).await?;
+        drop(streamed);
+        assert_eq!(
+            limit.slots.available_permits(),
+            0,
+            "the running work holds the slot after the client left"
+        );
+
+        release.notify_one();
+        for _ in 0..200 {
+            if limit.slots.available_permits() == 1 {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        Err(anyhow::anyhow!(
+            "the slot stayed taken after the work ended"
+        ))
+    }
+
+    /// A finished reply and a finished stream each give their slot back:
+    /// the decode thread and the spawned stream task drop their holds.
+    #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+    #[tokio::test]
+    async fn a_finished_generation_gives_its_slot_back() -> anyhow::Result<()> {
+        use crate::server::ollama_api::e2e_rig::{Rig, MODEL};
+        use crate::server::routes::api_routes;
+        use serde_json::json;
+
+        {
+            let rig = Rig::new().await?;
+            let limit = ConcurrencyLimit::new(1);
+            let app = api_routes()
+                .layer(axum::middleware::from_fn_with_state(
+                    Arc::clone(&limit),
+                    limit_concurrency,
+                ))
+                .with_state(Arc::clone(&rig.state));
+            let chat = json!({"messages": [{"role": "user", "content": "Hi"}]});
+            let text = json!({"prompt": "Hi"});
+            for (path, fields) in [("/v1/chat/completions", chat), ("/v1/completions", text)] {
+                for stream in [false, true] {
+                    let mut body = json!({"model": MODEL, "max_tokens": 3, "stream": stream});
+                    if let (Some(body), Some(fields)) = (body.as_object_mut(), fields.as_object()) {
+                        body.extend(fields.clone());
+                    }
+                    let request = Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))?;
+                    let response = app.clone().oneshot(request).await?;
+                    assert_eq!(response.status(), axum::http::StatusCode::OK, "{path}");
+                    axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+                    let mut freed = false;
+                    for _ in 0..1000 {
+                        if limit.slots.available_permits() == 1 {
+                            freed = true;
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    assert!(freed, "{path} stream={stream} kept its slot");
+                }
+            }
+        }
         Ok(())
     }
 }

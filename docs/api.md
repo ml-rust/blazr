@@ -317,7 +317,7 @@ Generates an assistant reply from a message list.
 | `reasoning_format`                                                  | string            | server default | `deepseek` or `none`. See [Reasoning output](#reasoning-output).                             |
 | `stream`                                                            | boolean           | `false`        | Stream the response as SSE.                                                                  |
 | `stream_options`                                                    | object            | none           | `include_usage: true` adds a usage chunk before `[DONE]`. See [Streaming usage](#streaming-usage). |
-| `n`                                                                 | integer           | `1`            | Number of choices. Streaming with `n` above `1` returns `400`.                               |
+| `n`                                                                 | integer           | `1`            | Number of choices. See [Streaming several choices](#streaming-several-choices).              |
 | `context`                                                           | array of integers | none           | Token IDs decoded and prepended to the prompt.                                               |
 | `lora_adapter`                                                      | string            | none           | Registered adapter of `model`. See [LoRA adapters](#lora-adapters).                          |
 | `grammar`, `response_format`, `keep_alive`, `user`, sampling fields |                   |                | See [Shared request fields](#shared-request-fields).                                         |
@@ -392,7 +392,7 @@ Example values are illustrative.
 
 ### Streaming chunk
 
-Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`, `content`, or `reasoning_content`, and only the fields with a value appear. `finish_reason` appears only on the final chunk. See [Streaming logprobs](#streaming-logprobs) for `logprobs` and [Streaming usage](#streaming-usage) for `stream_options`.
+Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`, `content`, or `reasoning_content`, and only the fields with a value appear. `finish_reason` appears only on the final chunk of each choice. See [Streaming logprobs](#streaming-logprobs) for `logprobs` and [Streaming usage](#streaming-usage) for `stream_options`.
 
 ```json
 {
@@ -403,6 +403,18 @@ Each chunk has `object` set to `chat.completion.chunk`. The `delta` holds `role`
   "choices": [{ "index": 0, "delta": { "content": "Blue" } }]
 }
 ```
+
+### Streaming several choices
+
+A streamed request with `n` above `1` sends `n` choices in one stream.
+
+- Each chunk holds one choice. Its `index` names the choice, from `0` to `n - 1`.
+- The choices stream in order: choice `i + 1` starts after choice `i` finishes. The server decodes one choice at a time, as the non-streaming request does.
+- Each choice opens with its own `role` chunk and ends with its own `finish_reason` chunk.
+- Each choice parses its own reasoning and tool calls. A tool call's `index` counts within its choice.
+- With `seed` set, choice `i` samples with `seed + i`. A streamed choice equals the same choice of the non-streaming response.
+- With `stream_options.include_usage`, one usage chunk follows the last choice. `prompt_tokens` counts the prompt once. `completion_tokens` sums every choice.
+- A generation error in any choice sends one error event and `[DONE]`. No later choice starts.
 
 ### Chat templates
 
@@ -1591,6 +1603,8 @@ Completions, chat, and infill return this `usage` object. Responses and Anthropi
 | `max_inflight_tokens`     | `0`     | In-flight token budget. `0` disables the budget.                       |
 
 `max_inflight_tokens` counts each request as its prompt tokens plus `max_tokens`. A request that exceeds the budget returns `503` with a `Retry-After: 5` header.
+
+A request holds its `max_concurrent_requests` slot until its work ends: a streamed body until it closes, and a generation until its decode stops. A client that leaves mid-decode frees its slot once the decode stops at its next token, or once the batching engine drops the sequence. Embedding, speech and transcription work holds the slot until its forward pass ends.
 
 `GET /health` and `GET /metrics` skip the `max_concurrent_requests` limit. Probes and scrapes answer while the server is saturated.
 

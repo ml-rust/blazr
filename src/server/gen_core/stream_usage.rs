@@ -25,6 +25,15 @@ impl StreamUsage {
             total_tokens: prompt_tokens + completion_tokens,
         }
     }
+
+    /// These counts with one more choice of the same prompt: the prompt
+    /// counts once, and `next`'s completion adds to the sum.
+    pub fn with_choice(self, next: StreamUsage) -> Self {
+        Self::new(
+            self.prompt_tokens,
+            self.completion_tokens + next.completion_tokens,
+        )
+    }
 }
 
 /// The `usage` member of a content chunk.
@@ -104,6 +113,12 @@ mod tests {
             value,
             json!({"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11})
         );
+    }
+
+    #[test]
+    fn a_second_choice_adds_its_completion_and_not_its_prompt() {
+        let both = StreamUsage::new(7, 4).with_choice(StreamUsage::new(7, 3));
+        assert_eq!(both, StreamUsage::new(7, 7));
     }
 
     #[derive(Serialize)]

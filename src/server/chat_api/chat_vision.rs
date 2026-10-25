@@ -8,7 +8,7 @@ use super::tools::ChatRequestMessage;
 use crate::engine::vision_tower::{IMAGE_MARKER_TEXT, MARKER_NAMES, NO_TOWER_ERROR};
 
 /// Decoded media of one request, in message order.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::server) struct RequestMedia {
     /// Encoded image bytes, one entry per image part.
     pub images: Vec<Vec<u8>>,

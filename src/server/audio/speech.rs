@@ -26,6 +26,7 @@ use axum::{
     Json,
 };
 
+use crate::engine::WorkHold;
 use crate::server::gen_types::error_response;
 use crate::server::handlers::{AppState, TtsBundle};
 use voxr::{SynthesizeOptions, TtsError};
@@ -54,7 +55,10 @@ pub async fn speech(
     let input = request.input.clone();
     let speed = request.speed;
     let synth_bundle = Arc::clone(&bundle);
+    // The blocking thread holds the request's slot until synthesis ends.
+    let hold = WorkHold::current();
     let samples = tokio::task::spawn_blocking(move || {
+        let _hold = hold;
         synth_bundle.synthesize(&input, &voice_id, &SynthesizeOptions { speed })
     })
     .await;
@@ -172,7 +176,7 @@ async fn prologue(
 }
 
 /// The HTTP status and message for every [`TtsError`]. Shared by the
-/// buffered path and the streamed path's pre-first-byte failure, so the two
+/// buffered path and the streamed path's pre-first-byte error, so the two
 /// answer the same request the same way.
 pub(super) fn tts_error_response(err: TtsError) -> Response {
     match err {

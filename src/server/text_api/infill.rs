@@ -17,6 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::fim_prompt::{build_fim_prompt, FIM_MARKERS};
+use crate::engine::WorkHold;
 use crate::server::generation::{
     admit_generation, apply_keep_alive, error_response, overloaded_response, policy_error_response,
     record_generation_metrics, validate_generation_params, HasSamplingFields, SamplingParams,
@@ -101,11 +102,13 @@ pub async fn infill(
         let keep_alive_model = model_name.clone();
         let keep_alive = request.keep_alive.clone();
         let slot = DecodeSlot::enter();
-        tokio::spawn(async move {
+        // The task carries the request's slot, so a client that leaves
+        // frees it only once the decode stops.
+        tokio::spawn(WorkHold::carry(async move {
             let _guards = (permit, slot);
             stream_routed(&placement, prompt_tokens, gen_config, tx).await;
             apply_keep_alive(&keep_alive_state, &keep_alive_model, &keep_alive).await;
-        });
+        }));
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         create_completion_stream(id, model_name, Box::pin(rx_stream), false).into_response()

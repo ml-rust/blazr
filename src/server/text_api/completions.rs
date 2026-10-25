@@ -12,6 +12,7 @@ use axum::{
 use super::completion_choices::generate_choices;
 use super::completion_prompt::{resolve_prompt, PromptContext, ResolvedPrompt};
 use super::completion_types::{CompletionRequest, CompletionResponse};
+use crate::engine::WorkHold;
 use crate::server::generation::{
     admit_generation, apply_keep_alive, decode_context_prefix, error_response, overloaded_response,
     record_generation_metrics, resolve_constraint, HasSamplingFields, Usage,
@@ -123,11 +124,13 @@ pub async fn completions(
         let keep_alive_model = model_name.clone();
         let keep_alive = request.keep_alive.clone();
         let slot = DecodeSlot::enter();
-        tokio::spawn(async move {
+        // The task carries the request's slot, so a client that leaves
+        // frees it only once the decode stops.
+        tokio::spawn(WorkHold::carry(async move {
             let _guards = (permit, slot);
             stream_routed(&placement, prompt.tokens, gen_config, tx).await;
             apply_keep_alive(&keep_alive_state, &keep_alive_model, &keep_alive).await;
-        });
+        }));
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let include_usage = request.include_usage();

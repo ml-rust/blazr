@@ -1,19 +1,10 @@
 //! The chat completions SSE stream, with reasoning split, tool calls, and logprobs.
 
-use axum::response::sse::{Event, Sse};
-use futures::stream::Stream;
-use futures::StreamExt;
 use serde::Serialize;
-use std::convert::Infallible;
-use std::pin::Pin;
 
-use super::chat_chunks::ChatChunker;
 use super::gen_types::LogprobResult;
-use super::reasoning::ReasoningParser;
-use super::stream_usage::{usage_event, ChunkUsage};
-use super::streaming::{error_event, StreamToken};
+use super::stream_usage::ChunkUsage;
 use super::tool_call_delta::ToolCallDelta;
-use crate::server::tool_parser::ToolCallParser;
 
 /// Chat completion streaming delta
 #[derive(Serialize, Default)]
@@ -68,101 +59,38 @@ pub struct ChatStreamChunk {
 /// The `object` of a chat stream chunk.
 pub(in crate::server) const CHAT_CHUNK_OBJECT: &str = "chat.completion.chunk";
 
-/// Create SSE stream for chat completions (true streaming, no buffering).
-///
-/// With `reasoning` set, each token is split into `delta.reasoning_content`
-/// and `delta.content`; without it, every token is `delta.content`.
-///
-/// With `tool_parser` set, the content half goes through it. Content streams
-/// live. A tool call is held until its boundary arrives, then streams as
-/// `delta.tool_calls`: one entry with `id`, `type`, `function.name` and
-/// empty `arguments`, then entries with fragments of `arguments`. A stream
-/// that sent a call finishes with `tool_calls`, whatever the upstream finish
-/// reason. A call still open when the output ends goes out as content.
-///
-/// An item with logprobs puts one entry in `choices[0].logprobs.content`.
-/// The stop-sequence matcher, the reasoning parser and the tool-call parser
-/// can hold text back behind a token. That token's entry still goes in the
-/// chunk sent when the token arrives, with an empty or partial `delta`. The
-/// held text follows in a later chunk. No entry is dropped or sent twice.
-/// The final token's entry goes out in the first chunk that token sends.
-///
-/// With `include_usage` set, every chunk carries `"usage": null`. After the
-/// final chunk, one more chunk with empty `choices` carries the token counts.
-/// A stream that ends on an error sends no usage chunk and drops held calls.
-pub(in crate::server) fn create_chat_stream(
-    id: String,
-    model: String,
-    tokens: Pin<Box<dyn Stream<Item = StreamToken> + Send>>,
-    reasoning: Option<ReasoningParser>,
-    tool_parser: Option<ToolCallParser>,
-    include_usage: bool,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = async_stream::stream! {
-        let created = chrono::Utc::now().timestamp();
-        let mut tokens = tokens;
-        let mut chunker = ChatChunker::new(reasoning, tool_parser);
-        let usage = ChunkUsage::for_request(include_usage);
-        let chunk = |choice| ChatStreamChunk {
-            id: id.clone(),
-            object: CHAT_CHUNK_OBJECT.to_string(),
-            created,
-            model: model.clone(),
-            choices: vec![choice],
-            usage,
-        };
-
-        // First chunk with role
-        let role = ChatStreamDelta {
-            role: Some("assistant".to_string()),
-            ..ChatStreamDelta::default()
-        };
-        if let Ok(data) = serde_json::to_string(&chunk(ChatStreamChoice::new(role, None, None))) {
-            yield Ok(Event::default().data(data));
-        }
-
-        while let Some(token) = tokens.next().await {
-            if let Some(ref err) = token.error {
-                if let Some(evt) = error_event(err) {
-                    yield Ok(evt);
-                }
-                break;
-            }
-
-            let is_final = token.finish_reason.is_some();
-            let final_usage = token.usage;
-            for choice in chunker.token(token) {
-                if let Ok(data) = serde_json::to_string(&chunk(choice)) {
-                    yield Ok(Event::default().data(data));
-                }
-            }
-
-            if is_final {
-                if include_usage {
-                    let evt = usage_event(&id, CHAT_CHUNK_OBJECT, created, &model, final_usage);
-                    if let Some(evt) = evt {
-                        yield Ok(evt);
-                    }
-                }
-                break;
-            }
-        }
-
-        yield Ok(Event::default().data("[DONE]"));
-    };
-
-    Sse::new(stream)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::server::gen_core::chat_choices::{create_choices_stream, ChoiceStream, TokenStream};
+    use crate::server::gen_core::reasoning::ReasoningParser;
+    use crate::server::tool_parser::ToolCallParser;
+    use axum::response::sse::{Event, Sse};
+    use futures::stream::Stream;
+    use std::convert::Infallible;
+
+    /// The one-choice case of [`create_choices_stream`].
+    fn create_chat_stream(
+        id: String,
+        model: String,
+        tokens: TokenStream,
+        reasoning: Option<ReasoningParser>,
+        tool_parser: Option<ToolCallParser>,
+        include_usage: bool,
+    ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+        let choice = ChoiceStream {
+            tokens,
+            reasoning,
+            tools: tool_parser,
+        };
+        create_choices_stream(id, model, vec![choice], include_usage)
+    }
     use crate::engine::FinishReason;
     use crate::server::reasoning::ReasoningTags;
     use crate::server::stream_usage::StreamUsage;
     use crate::server::streaming::sse_test::{
         assert_usage_tail, body, entry, events, expected_entry, feed, token,
     };
+    use crate::server::streaming::StreamToken;
     use crate::server::tools::{Tool, ToolFunction};
     use serde_json::json;
 

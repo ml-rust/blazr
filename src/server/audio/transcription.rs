@@ -16,6 +16,7 @@ use axum::{
     Json,
 };
 
+use crate::engine::WorkHold;
 use crate::server::audio_decode::{decode_to_whisper_input, extension_hint};
 use crate::server::gen_types::error_response;
 use crate::server::handlers::AppState;
@@ -214,7 +215,10 @@ async fn run_audio_pipeline(
     let language_for_pipeline = language.clone();
     let device = state.scheduler.device().clone();
     let want_words = granularities.want_words;
+    // The blocking thread holds the request's slot until the model ends.
+    let hold = WorkHold::current();
     let chunks: Vec<ChunkTranscript> = match tokio::task::spawn_blocking(move || {
+        let _hold = hold;
         transcribe_chunks(
             bundle.as_ref(),
             &device,

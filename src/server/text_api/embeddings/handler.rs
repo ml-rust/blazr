@@ -12,7 +12,7 @@ use super::options::{check_dimensions, check_token_ids, finish_vector, EncodingF
 use super::request::{EmbedItem, EmbeddingRequest};
 use super::response::{EmbeddingData, EmbeddingResponse, EmbeddingUsage, EmbeddingValue};
 use crate::engine::pooling::{pool_cls, pool_last, pool_mean};
-use crate::engine::{Executor, NoWeights};
+use crate::engine::{Executor, NoWeights, WorkHold};
 use crate::server::encoding::encode_f32_base64;
 use crate::server::generation::{error_response, policy_error_response};
 use crate::server::handlers::{lookup_error_response, AppState, ServerRuntime, VisionEmbedder};
@@ -29,9 +29,14 @@ pub(crate) async fn hidden_states(
     ids: Vec<u32>,
 ) -> anyhow::Result<Vec<f32>> {
     let executor = Arc::clone(executor);
-    tokio::task::spawn_blocking(move || executor.get_embeddings(&ids))
-        .await
-        .map_err(|e| anyhow::anyhow!("the embedding task stopped: {e}"))?
+    // The blocking thread holds the request's slot until the forward ends.
+    let hold = WorkHold::current();
+    tokio::task::spawn_blocking(move || {
+        let _hold = hold;
+        executor.get_embeddings(&ids)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("the embedding task stopped: {e}"))?
 }
 
 /// The embedding of one encoded image, computed on a blocking thread so the
@@ -44,7 +49,9 @@ async fn image_embedding(
     embedder: Arc<VisionEmbedder>,
     image: Vec<u8>,
 ) -> anyhow::Result<Vec<f32>> {
+    let hold = WorkHold::current();
     tokio::task::spawn_blocking(move || {
+        let _hold = hold;
         let device = <ServerRuntime as boostr::Runtime>::default_device();
         embedder.embed_bytes_default(&image, &device)
     })
@@ -89,7 +96,7 @@ pub(crate) async fn embed_tokens(
     })
 }
 
-/// The token count a text may encode to before it embeds.
+/// The token count a text can encode to before it embeds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TokenLimit {
     /// The most tokens that embed.

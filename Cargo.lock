@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "blazr"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -471,19 +471,21 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9fd7357da5018800038abaaa115c3f579b66998a5cdc349ab8e578ea6a77726"
+checksum = "66e51ee3e29c054217a9213db711960e2bf2bbbc7be269e951e62e970a73ab8f"
 dependencies = [
  "anyhow",
  "blake3",
  "bytemuck",
+ "chacha20",
  "cudarc",
  "half",
  "image",
  "memmap2",
  "nexar",
  "numr",
+ "rand 0.10.3",
  "rayon",
  "regexr",
  "serde",
@@ -491,6 +493,7 @@ dependencies = [
  "serde_json",
  "splintr",
  "thiserror",
+ "tokio",
  "tracing",
  "wgpu",
  "zip",
@@ -673,9 +676,9 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clipboard-win"
-version = "5.4.1"
+version = "5.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+checksum = "052af7878466feccda12ba7a6a67d019d712f296809559b47c12c8cc196d3a9a"
 dependencies = [
  "error-code",
 ]
@@ -712,7 +715,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1128,7 +1131,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2442,9 +2445,9 @@ dependencies = [
 
 [[package]]
 name = "nexar"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dac038912d8e0f36309f3368c0980377730edd4ad5d082627227277cdd870c3a"
+checksum = "53627a1f76e05d05513598b28e102a3a93ef0ff927560c7c2dbec02dd1c130c4"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -2572,9 +2575,9 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae7051738770b875a102b10275d9c96b7866cd2a741298707fba15a957ab27ca"
+checksum = "539990e81dc7946f5bcf60f13d273f180c46bce497f8f487869adc93fb1819fb"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -3098,7 +3101,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3568,14 +3571,14 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -3627,7 +3630,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3638,9 +3641,9 @@ checksum = "eec689c0bc40ff2458a5977b6619cb718087084a18e02a131c599b62d05e1a5f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -4391,10 +4394,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4483,9 +4486,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.2"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -4923,9 +4926,9 @@ dependencies = [
 
 [[package]]
 name = "voxr"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1b3e426318b5a4077678c794fbe78c0d3d2c7b8e7bee1c33b861f96d379f4fe"
+checksum = "955e830408f859b65a1d5bb4938f096388a189462c3c3aa4279ff9d6f8825e72"
 dependencies = [
  "biquad",
  "boostr",
@@ -4948,9 +4951,9 @@ dependencies = [
 
 [[package]]
 name = "voxr-narrate"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bae244880f6c0110093eb02155327de970031c3b68bb5b7139d17d02eb7838d"
+checksum = "f4880c0ed9ab5746a4466c99c45bd2030793597bef4aef6b7c184a21ef106c25"
 dependencies = [
  "biquad",
  "boostr",
@@ -5334,7 +5337,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

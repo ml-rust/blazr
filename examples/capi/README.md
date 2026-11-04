@@ -38,6 +38,18 @@ cargo build --release --lib --no-default-features --features capi,f16
 
 The build writes `target/release/libblazr.a` (static) and `target/release/libblazr.so` (shared). Add `wgpu` to the features for Vulkan or Metal. Add `cuda` for NVIDIA.
 
+## Compile checks
+
+CI runs these `cargo check` commands. No CI job links or runs the library.
+
+| Target | Command |
+| --- | --- |
+| Android `aarch64-linux-android` | `cargo check --lib --no-default-features --features capi --target aarch64-linux-android` |
+| iOS `aarch64-apple-ios` and `aarch64-apple-ios-sim` | `cargo check --lib --no-default-features --features capi --target <target>` |
+| WebAssembly `wasm32-unknown-unknown` | `cargo check --lib --no-default-features --features wgpu --target wasm32-unknown-unknown` |
+
+The Android check needs the NDK variables in [arm64 app integration](#arm64-app-integration-compile-check-only). The wasm32 target has no browser run on record.
+
 ## Linux
 
 Tested on x86-64 Linux. `tests/capi_smoke_c.rs` runs these steps.
@@ -154,7 +166,7 @@ The aarch64 NEON kernels ran only under qemu-user. No aarch64 Android run has ha
 
 ## iOS
 
-Untested. The check host runs Linux and has no Apple SDK. These steps follow the standard Rust `staticlib` flow.
+Untested. The check host runs Linux and has no Apple SDK. CI compile-checks both targets on macOS, and no run is recorded. These steps follow the standard Rust `staticlib` flow.
 
 1. Install the Rust targets on macOS:
 

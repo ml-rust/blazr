@@ -129,6 +129,8 @@ The `--mmproj` flag documents `qwen35` models only.
 
 Speech endpoints and commands need the `audio` feature. A missing model downloads on first use into the Hugging Face hub layout.
 
+The `motion-video` skill calls these commands. When blazr is missing or `speak` exits 3, the skill uses its own path.
+
 | Model                                                   | Task                                                     | Required files                                                                                                                             | Evidence | Notes                                                                                             |
 | ------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------- | ------------------------------------------------------------------------------------------------- |
 | Whisper (`openai/whisper-base`, `openai/whisper-small`) | ASR: `POST /v1/audio/transcriptions`, `blazr transcribe` | `config.json`, `tokenizer.json`, `model.safetensors`, `generation_config.json`                                                             | `Tested` | Test: `tests/audio_transcription_words.rs`, uses `whisper-tiny`. F16 weights cast to F32 at load. |

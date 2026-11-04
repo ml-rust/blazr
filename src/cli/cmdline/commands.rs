@@ -16,7 +16,7 @@ pub struct Cli {
 pub enum Commands {
     /// Run interactive generation with a model
     Run {
-        /// Model name or path [default: default_model]
+        /// Model path [default: default_model]
         model: Option<String>,
 
         /// Optional initial prompt
@@ -213,7 +213,7 @@ pub enum Commands {
 
     /// Generate text (non-interactive)
     Generate {
-        /// Model name or path [default: default_model]
+        /// Model path [default: default_model]
         #[arg(long, short)]
         model: Option<String>,
 
@@ -238,7 +238,7 @@ pub enum Commands {
 
     /// Interactive multi-turn chat with a model
     Chat {
-        /// Model name or path [default: default_model]
+        /// Model path [default: default_model]
         model: Option<String>,
 
         /// System prompt
@@ -280,7 +280,7 @@ pub enum Commands {
 
     /// Benchmark model performance (tok/s, TTFT, ITL)
     Bench {
-        /// Model name or path [default: default_model]
+        /// Model path [default: default_model]
         model: Option<String>,
 
         /// Initial KV cache size [default: num_ctx, else 2048]

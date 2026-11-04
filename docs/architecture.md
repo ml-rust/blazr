@@ -222,3 +222,15 @@ There is no `cpu` feature. The CPU runtime runs when neither `cuda` nor `wgpu` i
 | `nccl`        | No      | `boostr/nccl`. Tensor-parallel loading also needs `cuda`.                                                                                                         |
 | `distributed` | No      | `boostr/distributed`, the `nexar` dependency, and the `swarm` and `disagg` commands                                                                               |
 | `audio`       | No      | Implies `server` and `cli`. Adds `voxr` and `voxr-narrate`, Kokoro, VoxCPM2, VITS, Whisper, and CLAP support, the `/v1/audio/*` routes, and the `speak`, `transcribe`, and `sound-review` commands |
+| `capi`        | No      | The C library: `libblazr.a` and `libblazr.so`. See [examples/capi/README.md](../examples/capi/README.md).                                                         |
+
+### Commands by feature
+
+The `blazr` binary needs `cli` and `server` together. A library build with `--no-default-features` needs neither.
+
+| Feature       | Commands                                                                   |
+| ------------- | -------------------------------------------------------------------------- |
+| `cli`         | `info`, `list`, `pull`, `run`, `generate`, `chat`, `bench`, and `convert`  |
+| `server`      | `serve` and `ps`                                                           |
+| `distributed` | `swarm` and `disagg`, which also need `server`                             |
+| `audio`       | `speak`, `transcribe`, and `sound-review`                                  |

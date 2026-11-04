@@ -4,9 +4,27 @@
 
 Open an issue before you start anything non-trivial. Discuss design on [Discord](https://discord.gg/jBhFk9kHPg).
 
+Install these first:
+
+| Need | For |
+| --- | --- |
+| Rust 1.95 or newer | Every build |
+| `cargo-deny` | The dependency audit |
+| CUDA toolkit 12.8 or newer, `nvcc` on `PATH` | `--features cuda` |
+
+## Set up
+
+```bash
+cp .cargo/config.toml.example .cargo/config.toml
+```
+
+- Sibling checkouts: the file points numr, boostr, splintr, regexr, nexar, containr, voxr, and voxr-narrate at `../`. Without it, cargo resolves them from crates.io, and the build fails on APIs the published versions lack.
+- Models: set `BOOSTR_MODELS_DIR` in that file to your checkpoint directory.
+- Skipped tests: a test that needs a model skips with a notice when its variable is unset. Such a run reports success without testing the model.
+
 ## Build and test
 
-Run these commands from the repository root. They match the CI jobs in `.github/workflows/ci.yml`.
+Run these commands from the repository root. Each one is a command that a CI job in `.github/workflows/ci.yml` runs.
 
 ```bash
 cargo fmt --all --check
@@ -14,11 +32,16 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features audio -- -D warnings
 cargo test --features audio --no-fail-fast
 cargo test --lib --no-default-features --no-fail-fast
+cargo deny --exclude-dev check
 ```
 
-Tests that need a model directory skip with a notice when their environment variable is unset.
+CI also runs these jobs:
 
-CI runs `cargo check` for the `wgpu`, `capi`, `wasm32-unknown-unknown`, Android, and iOS targets. CI does not build the `cuda` feature. Build it locally when you change CUDA code:
+- MSRV: `cargo check --features audio` on the `rust-version` toolchain from `Cargo.toml`.
+- Check: `cargo check --all-targets` on Linux, macOS, and Windows, plus `--features audio` on Linux.
+- Target checks: `cargo check` for `wgpu`, `capi`, `wasm32-unknown-unknown`, Android, and iOS.
+
+CI does not build the `cuda` feature. Build it locally when you change CUDA code:
 
 ```bash
 cargo build --release --features cuda
@@ -32,7 +55,7 @@ cargo build --release --features cuda
 - Do not call `.unwrap()` in library code. `src/main.rs` can use it.
 - Do not copy tensors from GPU to CPU for computation.
 - Return OpenAI-route errors as `{ error: { message, type, code } }`.
-- Send streaming responses as SSE and end them with `data: [DONE]`.
+- Send OpenAI streams as SSE ending with `data: [DONE]`. Anthropic streams send named `event:` lines and have no `[DONE]`. Ollama streams send NDJSON.
 
 ## Pull requests
 

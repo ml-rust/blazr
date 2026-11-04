@@ -8,6 +8,7 @@ boostr = { path = "../boostr" }
 splintr = { path = "../splintr" }
 regexr = { path = "../regexr" }
 nexar = { path = "../nexar/nexar" }
+containr = { path = "../containr" }
 voxr = { path = "../voxr/crates/voxr" }
 voxr-narrate = { path = "../voxr/crates/voxr-narrate" }
 

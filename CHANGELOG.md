@@ -12,6 +12,17 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-05
+
+### Changed
+
+- `boostr`, `voxr`, `voxr-narrate`: blazr requires boostr 0.11, voxr 0.9 and voxr-narrate 0.9. A library user moves to these versions.
+- `--model` help: names a path. It never took a model name, so pass a path.
+
+### Fixed
+
+- Audio decode of live WebM: padding counts in every Cluster of unknown size, so `transcribe` drops what ffmpeg drops.
+
 ## [0.5.0] - 2026-11-01
 
 Hybrid and MLA models batch, swarm and disagg run as real clusters, and constrained output and the Ollama API work.

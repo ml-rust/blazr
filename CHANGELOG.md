@@ -12,6 +12,16 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-06
+
+### Changed
+
+- `README`, crate description: state what the crate does.
+
+### Fixed
+
+- `--no-default-features`: the engine-only build has no unused items.
+
 ## [0.7.0] - 2026-11-06
 
 Requests name models and voices by id only, every listed model loads, and generation stops on every stated end-of-sequence id.

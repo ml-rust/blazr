@@ -22,6 +22,7 @@ use crate::tokenizer::vocab_name_for_size;
 const MAX_GGUF_KEY: usize = 4096;
 
 /// Weight files the speech and vision bundles ship, beyond the text formats.
+#[cfg(any(test, feature = "cli"))]
 const WEIGHT_EXTENSIONS: &[&str] = &["safetensors", "gguf", "pth", "pt", "bin", "jit", "onnx"];
 
 /// `model_type` values boostr routes to a load that has no tensor name map.
@@ -421,6 +422,7 @@ pub(crate) fn safetensors_file_is_model(path: &Path) -> Result<()> {
 }
 
 /// Whether the directory `dir` holds a weight file of any format.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn holds_weight_file(dir: &Path) -> bool {
     std::fs::read_dir(dir).into_iter().flatten().any(|entry| {
         entry.ok().is_some_and(|e| {

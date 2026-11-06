@@ -26,8 +26,10 @@ pub use api::{
 };
 pub use detect::{detect_model_source, gguf_models_in_dir, same_weights, ModelFormat, ModelSource};
 pub use formats::*;
+#[cfg(any(test, feature = "cli"))]
+pub(crate) use kind::holds_weight_file;
 pub use kind::{check_loadable, detect_model_kind, model_kind_at, ModelKind, NotLoadable};
-pub(crate) use kind::{gguf_file_is_model, holds_weight_file, safetensors_file_is_model};
+pub(crate) use kind::{gguf_file_is_model, safetensors_file_is_model};
 #[cfg(feature = "audio")]
 pub use speech_load::*;
 pub use vision_load::*;

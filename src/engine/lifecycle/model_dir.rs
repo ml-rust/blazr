@@ -9,8 +9,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::loader::decision::is_kev_dir;
+#[cfg(any(test, feature = "cli"))]
+use crate::loader::holds_weight_file;
 use crate::loader::{
-    detect_model_source, gguf_file_is_model, gguf_models_in_dir, holds_weight_file, model_kind_at,
+    detect_model_source, gguf_file_is_model, gguf_models_in_dir, model_kind_at,
     safetensors_file_is_model, same_weights, ModelFormat, ModelKind,
 };
 
@@ -23,6 +25,7 @@ pub struct AvailableModelInfo {
 }
 
 /// A model of the directory that the text routes do not run, for `blazr list`.
+#[cfg(any(test, feature = "cli"))]
 #[derive(Debug, Clone)]
 pub struct AuxiliaryModelInfo {
     pub name: String,
@@ -239,6 +242,7 @@ fn text_model_file(path: &Path) -> bool {
 /// # Errors
 ///
 /// An error when the directory or one of its entries does not read.
+#[cfg(any(test, feature = "cli"))]
 pub fn list_auxiliary(model_dir: &Path) -> std::io::Result<Vec<AuxiliaryModelInfo>> {
     let mut models = Vec::new();
     if !model_dir.exists() {

@@ -3,11 +3,11 @@
 //! Manages loading, unloading, and eviction of models.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 
 use crate::config::{DtypeRequest, InferenceOverlay, VisionOverrides, DEFAULT_NUM_CTX};
 use tokio::sync::RwLock;
@@ -19,14 +19,17 @@ use boostr::{
 };
 
 pub use super::model_dir::AvailableModelInfo;
+use super::model_dir::OperatorNames;
 use crate::config::DecisionConfig;
 use crate::engine::decision::DecisionRegistry;
+use crate::engine::load::blocking::run_blocking;
 use crate::engine::load::gate::LoadGates;
 use crate::engine::load::job::LoadJob;
-use crate::engine::load::registered::Models;
+use crate::engine::load::registered::{release, Models};
 use crate::engine::lora::eviction::{self, Resident};
 use crate::engine::lora::LoraRegistry;
-use crate::engine::Executor;
+use crate::engine::{Executor, GenerationScheduler, ModelNotFound, ModelNotLoadable};
+use crate::loader::NotLoadable;
 
 /// Model entry in the scheduler
 pub(crate) struct ModelEntry<R: Runtime<DType = DType>> {
@@ -40,12 +43,19 @@ pub(crate) struct ModelEntry<R: Runtime<DType = DType>> {
     pub(crate) keep_alive: Option<Duration>,
     /// The base model of a LoRA variant. `None` for a base model.
     pub(crate) variant_of: Option<String>,
+    /// The batching scheduler of the start model. Its engine thread holds the
+    /// executor, so this entry owns it and an eviction stops the thread.
+    pub(crate) batching: Option<Arc<dyn GenerationScheduler>>,
+    /// Data-parallel replicas hold this executor for the server's life, so no
+    /// eviction can free it, and eviction skips it.
+    pub(crate) held: bool,
 }
 
-/// Every loaded model, as eviction sees it.
+/// Every loaded model eviction can free.
 pub(crate) fn residents<R: Runtime<DType = DType>>(models: &Models<R>) -> Vec<Resident<'_>> {
     models
         .iter()
+        .filter(|(_, entry)| !entry.held)
         .map(|(name, entry)| Resident {
             name: name.as_str(),
             variant_of: entry.variant_of.as_deref(),
@@ -55,14 +65,18 @@ pub(crate) fn residents<R: Runtime<DType = DType>>(models: &Models<R>) -> Vec<Re
         .collect()
 }
 
-/// Drop `name` and, for a base model, each of its variants first.
-/// Returns whether `name` was loaded.
-fn remove_with_variants<R: Runtime<DType = DType>>(models: &mut Models<R>, name: &str) -> bool {
+/// Take `name` and, for a base model, each of its variants first out of
+/// `models`. The caller releases the lock, then [`release`]s the entries. Empty
+/// when `name` was not loaded.
+fn remove_with_variants<R: Runtime<DType = DType>>(
+    models: &mut Models<R>,
+    name: &str,
+) -> Vec<ModelEntry<R>> {
     let order = eviction::unload_order(&residents(models), name);
-    for victim in &order {
-        models.remove(victim);
-    }
-    !order.is_empty()
+    order
+        .iter()
+        .filter_map(|victim| models.remove(victim))
+        .collect()
 }
 
 /// Model scheduler
@@ -81,6 +95,8 @@ pub struct Scheduler<R: Runtime<DType = DType>> {
     pub(crate) max_loaded: usize,
     /// Model directory for discovery
     pub(crate) model_dir: PathBuf,
+    /// The names an operator stated. Each can be a path.
+    pub(crate) operator_names: OperatorNames,
     /// Device for loading
     device: R::Device,
     /// Default context size for KV cache
@@ -133,6 +149,7 @@ where
             gates: LoadGates::default(),
             max_loaded: 1, // Default to single model
             model_dir,
+            operator_names: OperatorNames::default(),
             device,
             num_ctx: DEFAULT_NUM_CTX,
             chat_template: None,
@@ -174,14 +191,41 @@ where
                 path,
                 keep_alive: None,
                 variant_of: None,
+                batching: None,
+                held: false,
             },
         );
         executor
     }
 
-    /// Detect, batch and bound System One decision models with `config`.
+    /// Give the loaded `name` its batching scheduler to own. An eviction of
+    /// `name` then stops the scheduler's engine thread with it.
+    pub async fn attach_batching(&self, name: &str, batching: Arc<dyn GenerationScheduler>) {
+        if let Some(entry) = self.models.write().await.get_mut(name) {
+            entry.batching = Some(batching);
+        }
+    }
+
+    /// Keep the loaded `name` out of every eviction and unload, for a model
+    /// that another owner holds for the server's life.
+    pub async fn hold(&self, name: &str) {
+        if let Some(entry) = self.models.write().await.get_mut(name) {
+            entry.held = true;
+        }
+    }
+
+    /// Detect, batch and bound System One decision models with `config`. Its
+    /// `base` can be a path, because an operator states it.
     pub fn with_decision(mut self, config: DecisionConfig) -> Self {
+        self.operator_names.set_decision_base(config.base.clone());
         self.decision_config = config;
+        self
+    }
+
+    /// Accept `model` as a path: the `--model` of an operator. Every other name
+    /// resolves inside the model directory, so no request reaches a path.
+    pub fn with_operator_model(mut self, model: Option<String>) -> Self {
+        self.operator_names.set_start(model);
         self
     }
 
@@ -275,11 +319,28 @@ where
     /// request that races a load of the same model waits for it and gets
     /// its executor. See [`Self::load_base`].
     ///
+    /// A name for the weights of a loaded model returns that model. The name is
+    /// checked before any eviction: its kind, its files, its config and its
+    /// tokenizer. A refused name leaves every loaded model in place. A load that
+    /// passes these checks and then fails has already evicted the models it made
+    /// room for: bad tensor bytes, or a device that holds too little.
+    ///
     /// # Errors
     ///
-    /// No such model, a load that fails, or a load that panics. A failed
-    /// load registers nothing.
+    /// [`ModelNotFound`](crate::engine::ModelNotFound) for no such model or no
+    /// weights, [`ModelNotLoadable`](crate::engine::ModelNotLoadable) for another
+    /// kind of model, a config or tokenizer that does not read, a load that
+    /// fails, or a load that panics. A failed load registers nothing.
     pub(crate) async fn load_model(&self, model_name: &str) -> Result<Arc<Executor<R>>> {
+        if let Some(executor) = self.served_copy(model_name).await {
+            return Ok(executor);
+        }
+        let names = self.operator_names.clone();
+        let model_dir = self.model_dir.clone();
+        let target = model_name.to_string();
+        run_blocking(move || check_before_load::<R>(&names, &model_dir, &target))
+            .await
+            .map_err(|e| anyhow!("model '{model_name}': the load check stopped: {e}"))??;
         let job = self.load_job();
         self.load_base(model_name, move |path| job.run(path)).await
     }
@@ -300,7 +361,7 @@ where
     /// The path the model name `model_name` resolves to, as a load resolves
     /// it. `None` when no such model exists.
     pub fn model_path(&self, model_name: &str) -> Option<PathBuf> {
-        super::model_dir::find_model_path(&self.model_dir, model_name)
+        self.operator_names.resolve(&self.model_dir, model_name)
     }
 
     /// Set the keep-alive duration for a model.
@@ -311,25 +372,42 @@ where
         if self.pinned {
             return;
         }
-        let mut models = self.models.write().await;
-        if let Some(entry) = models.get_mut(model_name) {
-            entry.keep_alive = keep_alive;
-        }
-        if keep_alive == Some(Duration::ZERO) && remove_with_variants(&mut models, model_name) {
+        let Some(key) = self.loaded_key(model_name).await else {
+            return;
+        };
+        let removed = {
+            let mut models = self.models.write().await;
+            if let Some(entry) = models.get_mut(&key) {
+                entry.keep_alive = keep_alive;
+            }
+            if keep_alive == Some(Duration::ZERO) {
+                remove_with_variants(&mut models, &key)
+            } else {
+                Vec::new()
+            }
+        };
+        if !removed.is_empty() {
             tracing::info!("Unloaded model '{}' (keep_alive=0)", model_name);
         }
+        release(removed).await;
     }
 
     /// Evict models that have exceeded their keep-alive duration, with the
     /// LoRA variants of each evicted base. Called periodically by the
     /// reaper task.
     pub async fn evict_expired(&self) {
-        let mut models = self.models.write().await;
-        let order = eviction::expired(&residents(&models), Instant::now());
-        for name in order {
-            models.remove(&name);
-            tracing::info!("Auto-unloaded model '{}' (keep_alive expired)", name);
-        }
+        let removed: Vec<ModelEntry<R>> = {
+            let mut models = self.models.write().await;
+            let order = eviction::expired(&residents(&models), Instant::now());
+            order
+                .iter()
+                .filter_map(|name| {
+                    tracing::info!("Auto-unloaded model '{}' (keep_alive expired)", name);
+                    models.remove(name)
+                })
+                .collect()
+        };
+        release(removed).await;
     }
 
     /// Unload a specific model: a base model's LoRA variants first, then
@@ -340,17 +418,22 @@ where
         if self.pinned {
             return false;
         }
-        let mut models = self.models.write().await;
-        remove_with_variants(&mut models, model_name)
+        let Some(key) = self.loaded_key(model_name).await else {
+            return false;
+        };
+        let removed = remove_with_variants(&mut *self.models.write().await, &key);
+        let unloaded = !removed.is_empty();
+        release(removed).await;
+        unloaded
     }
 
-    /// List loaded models
+    /// List loaded models, each under a name a client sends.
     pub async fn list_loaded(&self) -> Vec<LoadedModelInfo> {
         let models = self.models.read().await;
         models
             .iter()
             .map(|(name, entry)| LoadedModelInfo {
-                name: name.clone(),
+                name: self.operator_names.public_name(name),
                 path: entry.path.clone(),
                 last_accessed: entry.last_accessed,
             })
@@ -361,6 +444,46 @@ where
     pub fn list_available(&self) -> Result<Vec<AvailableModelInfo>> {
         Ok(super::model_dir::list_available(&self.model_dir)?)
     }
+
+    /// The models a client can request: [`Self::list_available`] with the start
+    /// model, when it sits outside the model directory.
+    pub fn list_served(&self) -> Result<Vec<AvailableModelInfo>> {
+        let mut models = self.list_available()?;
+        if let Some(start) = self.operator_names.unlisted_start(&self.model_dir, &models) {
+            models.push(start);
+        }
+        Ok(models)
+    }
+}
+
+/// Refuse `name` before any eviction.
+///
+/// # Errors
+///
+/// As [`Scheduler::load_model`]. A config or tokenizer that does not read keeps
+/// its loader's error.
+fn check_before_load<R: Runtime<DType = DType>>(
+    names: &OperatorNames,
+    model_dir: &Path,
+    name: &str,
+) -> Result<()> {
+    let path = names
+        .resolve(model_dir, name)
+        .ok_or_else(|| ModelNotFound::new(name))?;
+    match crate::loader::check_loadable(&path) {
+        Ok(()) => {}
+        Err(NotLoadable::NoWeights(_)) => return Err(ModelNotFound::new(name).into()),
+        Err(refused) => {
+            return Err(ModelNotLoadable {
+                name: name.to_string(),
+                reason: refused.to_string(),
+            }
+            .into())
+        }
+    }
+    crate::loader::load_model_meta::<R>(&path)
+        .map(|_| ())
+        .with_context(|| format!("model '{name}' does not load"))
 }
 
 /// Information about a loaded model

@@ -58,7 +58,7 @@ async fn text_models(state: &AppState) -> anyhow::Result<Vec<(String, Option<Dec
     let scheduler = Arc::clone(&state.scheduler);
     tokio::task::spawn_blocking(
         move || -> anyhow::Result<Vec<(String, Option<DecisionInfo>)>> {
-            let models = scheduler.list_available()?;
+            let models = scheduler.list_served()?;
             Ok(models
                 .into_iter()
                 .map(|m| {
@@ -103,11 +103,12 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
                     .map(
                         |id| match variants.iter().find(|(entry, _)| entry.id == id) {
                             Some((entry, decision)) => {
-                                to_model_info(id, decision.clone(), Some(entry.clone()))
+                                to_model_info(id, decision.clone(), Some(entry.clone()), None)
                             }
                             None => {
                                 let decision = decision_of(&text_models, &id);
-                                to_model_info(id, decision, None)
+                                let kind = auxiliary_kind(&text_models, &auxiliary, &id);
+                                to_model_info(id, decision, None, kind)
                             }
                         },
                     )
@@ -128,7 +129,7 @@ pub async fn get_model(
         Ok(text_models) => {
             if text_models.iter().any(|(name, _)| *name == model_id) {
                 let decision = decision_of(&text_models, &model_id);
-                let info = to_model_info(model_id, decision, None);
+                let info = to_model_info(model_id, decision, None, None);
                 return (StatusCode::OK, Json(info)).into_response();
             }
             if state.scheduler.variant(&model_id).is_some() {
@@ -146,13 +147,14 @@ pub async fn get_model(
                 if let Some((entry, decision)) =
                     variants.into_iter().find(|(e, _)| e.id == model_id)
                 {
-                    let info = to_model_info(model_id, decision, Some(entry));
+                    let info = to_model_info(model_id, decision, Some(entry), None);
                     return (StatusCode::OK, Json(info)).into_response();
                 }
             }
             let auxiliary = state.auxiliary_models().await;
-            if auxiliary.iter().any(|m| m.name == model_id) {
-                return (StatusCode::OK, Json(to_model_info(model_id, None, None))).into_response();
+            if let Some(kind) = auxiliary_kind(&text_models, &auxiliary, &model_id) {
+                let info = to_model_info(model_id, None, None, Some(kind));
+                return (StatusCode::OK, Json(info)).into_response();
             }
             error_response(
                 StatusCode::NOT_FOUND,
@@ -176,6 +178,22 @@ fn decision_of(text_models: &[(String, Option<DecisionInfo>)], id: &str) -> Opti
         .and_then(|(_, decision)| decision.clone())
 }
 
+/// The kind of the auxiliary model `id`. `None` for a text model, which wins a
+/// name collision.
+fn auxiliary_kind(
+    text_models: &[(String, Option<DecisionInfo>)],
+    auxiliary: &[AuxiliaryModel],
+    id: &str,
+) -> Option<&'static str> {
+    if text_models.iter().any(|(name, _)| name == id) {
+        return None;
+    }
+    auxiliary
+        .iter()
+        .find(|m| m.name == id)
+        .map(|m| m.kind.as_str())
+}
+
 /// Build the merged id list: every text model, then every auxiliary model
 /// whose name is not already a text model (or an earlier auxiliary entry).
 /// Text models always win a name collision.
@@ -193,6 +211,7 @@ fn to_model_info(
     id: String,
     decision: Option<DecisionInfo>,
     lora: Option<LoraAdapterEntry>,
+    kind: Option<&'static str>,
 ) -> ModelInfo {
     ModelInfo {
         id,
@@ -201,6 +220,7 @@ fn to_model_info(
         owned_by: "local".to_string(),
         decision,
         lora,
+        kind,
     }
 }
 
@@ -224,6 +244,10 @@ pub struct ModelInfo {
     /// adapted module count.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraAdapterEntry>,
+    /// `tts`, `asr` or `vision` for an auxiliary model, which the text routes
+    /// do not run. Absent on a text model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
 }
 
 #[cfg(test)]
@@ -237,6 +261,15 @@ mod tests {
             kind,
             path: None,
         }
+    }
+
+    #[test]
+    fn an_auxiliary_entry_states_its_kind_and_a_text_model_wins_the_name() {
+        let auxiliary = [aux("vox", AuxiliaryKind::Tts), aux("m", AuxiliaryKind::Asr)];
+        let text = [("m".to_string(), None)];
+        assert_eq!(auxiliary_kind(&text, &auxiliary, "vox"), Some("tts"));
+        assert_eq!(auxiliary_kind(&text, &auxiliary, "m"), None);
+        assert_eq!(auxiliary_kind(&text, &auxiliary, "absent"), None);
     }
 
     #[test]

@@ -12,6 +12,34 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### Changed
+
+- `boostr`, `splintr`: blazr requires boostr 0.11.1 and splintr 0.22.1. A library user moves to these versions.
+- `CheckpointTokenizerFiles`, `Serving`: gain `generation_config` and `Start`. A library user who builds or matches them adds these.
+- `Scheduler`: a path as a model name needs `with_operator_model`. A library user who loads by path calls it.
+- `model`, `voice`: a request sends an id, never a path out of the model directory. Send a listed id, or start the server with `--model` or `--voice-dir`.
+- `POST /v1/lora`, `POST /api/copy`: `path` stays in the model directory, and `destination` is one plain name. Move the adapter there, or start the server with `--lora`.
+- `/v1/models`, `blazr list`: list text models the server can load, with each file of a several-GGUF directory as `<directory>/<file>`. Request those ids, and read `blazr list` for speech and other models.
+- `/health`, `/api/ps`, `/v1/models`: a start model named by path shows its file name. Send that name as `model`.
+
+### Added
+
+- `/metrics`: `blazr_gpu_free_list_bytes`, `blazr_gpu_pool_used_bytes` and `blazr_gpu_pool_reserved_bytes` on CUDA builds. Subtract the free list from pool used for live tensor bytes.
+
+### Fixed
+
+- `eos_token_id`: generation stops on every id the config files state and on the turn marker, as `transformers` does. On Falcon-RW 1B that id is `#`, so edit its config files to keep such text.
+- `generation_config.json`: a file that does not parse logs a warning, and the model loads. Fix the file to apply its stop ids.
+- `/v1/chat/completions`: Gemma 2 accepts `\n` in content, and Qwen3 assistant history accepts `<think>`.
+- `blazr serve --model`: a request for another model frees the start model and its engine. Restart the server to batch it again.
+- `blazr serve --model`: a name that does not load answers `4xx` and frees nothing, and a listed id of the start file stays on the start model.
+- `/metrics`: `blazr_vram_used_bytes` updates with no model loaded and reads the device of `--gpu`.
+- `POST /api/pull`: a repo name that leaves the model directory is refused. Send a Hugging Face repo id.
+- `Phi-3.5`: fused tensors leave the device after the split.
+- `qwen35`: a prefill keeps logits for its last token only.
+- `--model`, `blazr info`, `blazr disagg --role router`: a directory with one GGUF file loads that file, and `mmproj*` does not count.
+- `/v1/models/{id}`: accepts an id with a slash.
+
 ## [0.6.0] - 2026-11-05
 
 ### Changed

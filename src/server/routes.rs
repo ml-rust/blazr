@@ -34,7 +34,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
     let router = Router::new()
         // OpenAI-compatible endpoints
         .route("/v1/models", get(list_models))
-        .route("/v1/models/{model_id}", get(get_model))
+        .route("/v1/models/{*model_id}", get(get_model))
         .route("/v1/completions", post(completions))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
@@ -115,6 +115,45 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    /// The id of a file in a directory of GGUF models holds a slash, and the
+    /// route takes it whole.
+    #[tokio::test]
+    async fn a_model_id_with_a_slash_reaches_its_route() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join("x")).expect("mkdir");
+        std::fs::write(dir.path().join("x/a.gguf"), b"").expect("write");
+        std::fs::write(dir.path().join("x/b.gguf"), b"").expect("write");
+        let state = Arc::new(super::super::handlers::test_state(dir.path()));
+        let app = super::api_routes().with_state(state);
+
+        let request = |uri: &str| {
+            Request::get(uri)
+                .body(Body::empty())
+                .expect("request builds")
+        };
+        let response = app
+            .clone()
+            .oneshot(request("/v1/models"))
+            .await
+            .expect("router answers");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let listed: Value = serde_json::from_slice(&bytes).expect("listing parses");
+        let ids: Vec<&str> = listed["data"]
+            .as_array()
+            .expect("data is a list")
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["x/a.gguf", "x/b.gguf"]);
+
+        for (uri, status) in [("/v1/models/x/a.gguf", 200), ("/v1/models/x", 404)] {
+            let response = app.clone().oneshot(request(uri)).await.expect("answers");
+            assert_eq!(response.status().as_u16(), status, "{uri}");
+        }
     }
 
     #[tokio::test]

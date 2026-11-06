@@ -40,6 +40,21 @@ pub(crate) fn tiny_executor() -> Result<Executor<CpuRuntime>> {
     )
 }
 
+/// A [`tiny_executor`] whose tokenizer stops on `ids`.
+pub(crate) fn executor_with_eos(ids: &[u32]) -> Result<Executor<CpuRuntime>> {
+    let device = CpuDevice::new();
+    let config: boostr::model::UniversalConfig = serde_saphyr::from_str(TINY_LLAMA_YAML)?;
+    let model = boostr::model::llama::Llama::<CpuRuntime>::from_config(&config, &device)?;
+    let tokenizer = crate::tokenizer::from_pretrained("llama3")?.with_eos_ids(ids.to_vec());
+    Executor::new(
+        LoadedModel::Llama(Box::new(model)),
+        BlazrConfig::from_universal_with_dtype(config, "f32"),
+        tokenizer,
+        device,
+        16,
+    )
+}
+
 /// Context length of a [`full_vocab_executor`]: room for a short JSON object.
 pub(crate) const FULL_VOCAB_CTX: usize = 64;
 

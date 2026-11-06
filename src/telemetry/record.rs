@@ -51,6 +51,12 @@ pub fn update_vram_used(device: &boostr::CudaDevice) {
         let used = total.saturating_sub(free);
         metrics::gauge!(names::VRAM_USED_BYTES).set(used as f64);
     }
+    use boostr::{Runtime, RuntimeClient};
+    let client = boostr::CudaRuntime::default_client(device);
+    let stats = client.allocator().memory_stats();
+    metrics::gauge!(names::GPU_FREE_LIST_BYTES).set(stats.free_list_bytes as f64);
+    metrics::gauge!(names::GPU_POOL_USED_BYTES).set(stats.pool_used as f64);
+    metrics::gauge!(names::GPU_POOL_RESERVED_BYTES).set(stats.pool_reserved as f64);
 }
 
 /// Update KV cache block utilization ratio

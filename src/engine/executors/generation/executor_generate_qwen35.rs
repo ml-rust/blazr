@@ -25,6 +25,14 @@ use super::super::executor::Executor;
 use super::super::sampler::sampler_state::SamplerState;
 use super::super::types::{FinishReason, GeneratedToken, PrefillCancel};
 
+/// What a caller does after a token prefill fails, which is most often device
+/// memory.
+const PREFILL_NEXT_ACTION: &str = "Shorten the prompt, or lower inference.max_batch_size or \
+                                   inference.max_context_len to free device memory";
+/// What a caller does after an image prefill fails.
+const IMAGE_NEXT_ACTION: &str = "Send fewer or smaller images, or lower --image-max-tokens to \
+                                 free device memory";
+
 /// Per-request state `generate` builds before it picks a decode arm.
 pub(in crate::engine) struct DecodeSetup<R: Runtime<DType = DType>> {
     /// Prompt ids as a `[1, prompt_len]` tensor on the executor device.
@@ -132,7 +140,8 @@ where
     }
 
     /// Prefill at rope position 0: `plan` through the embeddings forward,
-    /// else `input` through the token forward. Returns the prefill logits.
+    /// else `input` through the token forward. Returns the logits of the
+    /// last row, `[1, 1, vocab]`.
     pub(in crate::engine) fn qwen35_prefill(
         &self,
         input: &Tensor<R>,
@@ -143,8 +152,13 @@ where
         match plan {
             Some(plan) => self
                 .model()?
-                .forward_qwen35_embeds(&plan.embeds, &plan.positions, kv_cache, gdn_state)
-                .map_err(|e| anyhow!("qwen35 image prefill failed: {}", e)),
+                .forward_qwen35_embeds_last(&plan.embeds, &plan.positions, kv_cache, gdn_state)
+                .map_err(|e| {
+                    anyhow!(
+                        "qwen35 image prefill of {} rows failed: {e}. {IMAGE_NEXT_ACTION}",
+                        plan.seq_len()
+                    )
+                }),
             None => self.qwen35_prefill_at(input, 0, kv_cache, gdn_state),
         }
     }
@@ -159,7 +173,7 @@ where
     /// forward, so feeding a prompt as successive slices leaves the same
     /// state as feeding all of it in one call.
     ///
-    /// Returns the logits of the tokens in `input`.
+    /// Returns the logits of the last token in `input`, `[1, 1, vocab]`.
     pub(in crate::engine) fn qwen35_prefill_at(
         &self,
         input: &Tensor<R>,
@@ -168,10 +182,31 @@ where
         gdn_state: &mut LayeredGdnState<R>,
     ) -> Result<Tensor<R>> {
         self.model()?
-            .forward_qwen35(input, kv_cache, gdn_state, rope_pos)
+            .forward_qwen35_last(input, kv_cache, gdn_state, rope_pos)
             .map_err(|e| {
                 anyhow!(
-                    "qwen35 prefill of {} tokens at rope position {rope_pos} failed: {e}",
+                    "qwen35 prefill of {} tokens at rope position {rope_pos} failed: {e}. \
+                     {PREFILL_NEXT_ACTION}",
+                    input.shape().last().copied().unwrap_or(0)
+                )
+            })
+    }
+
+    /// [`Self::qwen35_prefill_at`] for a chunk that is not the last one: it
+    /// advances `kv_cache` and `gdn_state` and computes no logits.
+    pub(in crate::engine) fn qwen35_advance_at(
+        &self,
+        input: &Tensor<R>,
+        rope_pos: usize,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+    ) -> Result<()> {
+        self.model()?
+            .advance_qwen35(input, kv_cache, gdn_state, rope_pos)
+            .map_err(|e| {
+                anyhow!(
+                    "qwen35 prefill of {} tokens at rope position {rope_pos} failed: {e}. \
+                     {PREFILL_NEXT_ACTION}",
                     input.shape().last().copied().unwrap_or(0)
                 )
             })
@@ -182,8 +217,8 @@ where
     ///
     /// Each chunk continues the KV cache and the GDN state the chunks
     /// before it left. An image plan's chunk takes its rows of the plan's
-    /// embeddings and positions. Returns the last chunk's logits, or `None`
-    /// when `cancel` stopped the prefill.
+    /// embeddings and positions. Only the last chunk computes logits, of its
+    /// last row. Returns them, or `None` when `cancel` stopped the prefill.
     ///
     /// # Errors
     ///
@@ -201,24 +236,46 @@ where
             || input.shape().last().copied().unwrap_or(0),
             Qwen35PromptPlan::seq_len,
         );
-        cancel.run(0..rows, chunk, |r| {
+        let last = cancel.run(0..rows, chunk, |r| {
             if r == (0..rows) {
-                return self.qwen35_prefill(input, plan, kv_cache, gdn_state);
+                return self
+                    .qwen35_prefill(input, plan, kv_cache, gdn_state)
+                    .map(Some);
             }
+            let is_last = r.end == rows;
             match plan {
                 Some(plan) => {
                     let embeds = plan.embeds.narrow(1, r.start, r.len())?.contiguous()?;
                     let positions = plan.positions.narrow(1, r.start, r.len())?.contiguous()?;
-                    self.model()?
-                        .forward_qwen35_embeds(&embeds, &positions, kv_cache, gdn_state)
-                        .map_err(|e| anyhow!("qwen35 image prefill of rows {r:?} failed: {e}"))
+                    let model = self.model()?;
+                    let logits = if is_last {
+                        model
+                            .forward_qwen35_embeds_last(&embeds, &positions, kv_cache, gdn_state)
+                            .map(Some)
+                    } else {
+                        model
+                            .advance_qwen35_embeds(&embeds, &positions, kv_cache, gdn_state)
+                            .map(|()| None)
+                    };
+                    logits.map_err(|e| {
+                        anyhow!(
+                            "qwen35 image prefill of rows {r:?} failed: {e}. {IMAGE_NEXT_ACTION}"
+                        )
+                    })
                 }
                 None => {
                     let piece = input.narrow(1, r.start, r.len())?.contiguous()?;
-                    self.qwen35_prefill_at(&piece, r.start, kv_cache, gdn_state)
+                    if is_last {
+                        self.qwen35_prefill_at(&piece, r.start, kv_cache, gdn_state)
+                            .map(Some)
+                    } else {
+                        self.qwen35_advance_at(&piece, r.start, kv_cache, gdn_state)
+                            .map(|()| None)
+                    }
                 }
             }
-        })
+        })?;
+        Ok(last.flatten())
     }
 
     /// Rope position of the first decode token after a prefill: the plan's
@@ -291,5 +348,59 @@ where
             }
             tracing::info!(phase = "decode_end", backend = "qwen35");
         }
+    }
+}
+
+/// Reads `$BOOSTR_MODELS_DIR/Qwen3.5-4B-Q8_0.gguf`, and skips when it is absent
+/// or no CUDA device answers.
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use std::path::PathBuf;
+
+    use boostr::runtime::cuda::{is_cuda_available, CudaDevice, CudaRuntime};
+    use boostr::Tensor;
+
+    use crate::engine::Executor;
+    use crate::loader::load_gguf_with_tokenizer_as;
+
+    const PROMPT_ROWS: usize = 600;
+    const NUM_CTX: usize = 640;
+
+    fn real_executor() -> Option<Executor<CudaRuntime>> {
+        let dir = std::env::var("BOOSTR_MODELS_DIR").ok()?;
+        let file = PathBuf::from(dir).join("Qwen3.5-4B-Q8_0.gguf");
+        if !file.is_file() || !is_cuda_available() {
+            eprintln!("skip: {} or a CUDA device is absent", file.display());
+            return None;
+        }
+        let device = CudaDevice::new(0);
+        let (model, config, tokenizer) =
+            load_gguf_with_tokenizer_as::<CudaRuntime, _>(&file, &device, None)
+                .expect("model loads");
+        Some(Executor::new(model, config, tokenizer, device, NUM_CTX).expect("executor starts"))
+    }
+
+    /// A prefill keeps logits for its last token only: every row of a 600 row
+    /// prompt costs `vocab` floats of device memory otherwise.
+    #[test]
+    fn a_prefill_returns_the_logits_of_its_last_token_only() {
+        let Some(executor) = real_executor() else {
+            return;
+        };
+        let ids: Vec<i64> = (0..PROMPT_ROWS as i64)
+            .map(|i| 1000 + (i * 37) % 5000)
+            .collect();
+        let device = executor.device().clone();
+        let input =
+            Tensor::<CudaRuntime>::from_slice(&ids, &[1, PROMPT_ROWS], &device).expect("ids");
+        let vocab = executor.vocab_size();
+
+        let (mut kv, mut gdn) = executor
+            .qwen35_caches(PROMPT_ROWS + 1, NUM_CTX)
+            .expect("caches");
+        let logits = executor
+            .qwen35_prefill_at(&input, 0, &mut kv, &mut gdn)
+            .expect("prefill");
+        assert_eq!(logits.shape(), [1, 1, vocab]);
     }
 }

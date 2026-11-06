@@ -47,7 +47,7 @@ where
         ModelFormat::SafeTensors => safetensors::load_safetensors(path, device, request),
         ModelFormat::Gguf => {
             fixed_format_dtype("GGUF", DType::F32, request);
-            gguf::load_gguf(path, device)
+            gguf::load_gguf(&source.weights_path, device)
         }
     }
 }
@@ -74,13 +74,14 @@ where
     R::Client: TensorOps<R> + boostr::quant::DequantOps<R> + boostr::quant::QuantMatmulOps<R>,
 {
     let path = path.as_ref();
-    match detect_model_source(path)?.format {
+    let source = detect_model_source(path)?;
+    match source.format {
         ModelFormat::SafeTensors => {
             let (model, config, _) =
                 safetensors::load_safetensors_layers(path, device, None, layers)?;
             Ok((model, config))
         }
-        ModelFormat::Gguf => gguf::load_gguf_layers(path, device, layers),
+        ModelFormat::Gguf => gguf::load_gguf_layers(&source.weights_path, device, layers),
     }
 }
 
@@ -125,7 +126,7 @@ where
         ModelFormat::SafeTensors => {
             safetensors::load_safetensors_with_config(weights_path, config, device)
         }
-        ModelFormat::Gguf => gguf::load_gguf_with_config(weights_path, config, device),
+        ModelFormat::Gguf => gguf::load_gguf_with_config(&source.weights_path, config, device),
     }
 }
 
@@ -151,7 +152,7 @@ where
         }
         ModelFormat::Gguf => {
             fixed_format_dtype("GGUF", DType::F32, request);
-            let (model, config) = gguf::load_gguf(path, device)?;
+            let (model, config) = gguf::load_gguf(&source.weights_path, device)?;
             Ok((
                 model,
                 config,

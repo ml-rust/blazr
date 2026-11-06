@@ -197,8 +197,8 @@ where
             .variant(name)
             .map_or_else(|| name.to_string(), |v| v.base);
         DecisionFailure::ModelNotFound(format!(
-            "model '{weights}' not found: it is neither a path nor an entry of {}",
-            self.model_dir().display()
+            "model '{weights}' not found: no entry of the model directory holds that name. \
+             Request an id from /v1/models"
         ))
     }
 
@@ -234,8 +234,16 @@ where
             let variant = variant.clone();
             let target = name.to_string();
             let headers = Arc::clone(&self.decisions.headers);
+            let names = self.operator_names.clone();
             blocking(name, move || {
-                locate_decision(&model_dir, &cfg, variant.as_ref(), &target, &headers)
+                locate_decision(
+                    &model_dir,
+                    &names,
+                    &cfg,
+                    variant.as_ref(),
+                    &target,
+                    &headers,
+                )
             })
             .await?
         };
@@ -265,9 +273,17 @@ where
             let target = name.to_string();
             let model = Arc::clone(model);
             let device = executor.device().clone();
+            let names = self.operator_names.clone();
             blocking(name, move || {
-                let loaded =
-                    renderer_of(&model_dir, &cfg, variant.as_ref(), &target, &path, &source)?;
+                let loaded = renderer_of(
+                    &model_dir,
+                    &names,
+                    &cfg,
+                    variant.as_ref(),
+                    &target,
+                    &path,
+                    &source,
+                )?;
                 let pointer_head = loaded.pointer_head.as_deref();
                 let joint_head = loaded.joint_head.as_deref();
                 let head = ReadoutHead::load(pointer_head, joint_head, &model, &device)?;

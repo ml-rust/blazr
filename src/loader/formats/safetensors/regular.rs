@@ -34,7 +34,7 @@ where
     Ok((model, config))
 }
 
-/// [`load_safetensors_regular`], plus what the load read from the files.
+/// `load_safetensors_regular`, plus what the load read from the files.
 ///
 /// The report is `None` for a GPTQ or AWQ checkpoint, which loads through
 /// its own reader.

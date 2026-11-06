@@ -81,6 +81,7 @@ pub async fn serve(
 
     // The model scheduler. Data-parallel replicas build theirs the same way.
     let scheduler_settings = SchedulerSettings {
+        operator_model: model.clone(),
         model_dir,
         num_ctx,
         chat_template,

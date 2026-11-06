@@ -15,7 +15,7 @@ pub use auxiliary::{AuxiliaryKind, AuxiliaryModel};
 pub use budget::{request_tokens, BudgetPermit, DecodeSlot, TokenBudget};
 pub use health::health;
 pub use models::{get_model, list_models, ModelInfo, ModelsResponse};
-pub use route::{Route, ServeReplica, Serving};
+pub use route::{Route, ServeReplica, Serving, StartReplica};
 pub use slots::{create_slot, delete_slot, list_slots};
 #[cfg(test)]
 pub(crate) use state::test_state;

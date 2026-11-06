@@ -5,21 +5,34 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 
+use crate::engine::model_dir::find_model_path;
+use crate::loader::decision::{is_kev_dir, read_kev_adapter};
 use crate::loader::{detect_model_source, get_gguf_info, ModelFormat};
 use crate::model::chat_template::ChatTemplate;
 
-/// Show model information. A bare name is looked up in `model_dir`.
+/// Show model information. The name resolves as `blazr serve --model` resolves
+/// it: a path, then an entry of `model_dir`.
 pub async fn info(model: String, model_dir: PathBuf) -> Result<()> {
-    let model_path = find_model_path(&model, &model_dir)?;
+    let model_path = find_model_path(&model_dir, &model, Some(&model)).ok_or_else(|| {
+        anyhow!(
+            "Model not found: {model}. Run `blazr list` for the ids in {}. A directory of several \
+             GGUF files names no model: pass <directory>/<file>",
+            model_dir.display()
+        )
+    })?;
 
     eprintln!("{}: {}", "Model".bold(), model);
     eprintln!("{}: {}", "Path".bold(), model_path.display());
+
+    if is_kev_dir(&model_path) {
+        return print_kev_info(&model_path);
+    }
 
     let source = detect_model_source(&model_path)?;
 
     let model_type = match source.format {
         ModelFormat::SafeTensors => print_safetensors_info(&model_path)?,
-        ModelFormat::Gguf => print_gguf_info(&model_path)?,
+        ModelFormat::Gguf => print_gguf_info(&source.weights_path)?,
     };
     print_chat_template(&model_path, &model_type);
 
@@ -54,20 +67,18 @@ fn print_chat_template(path: &std::path::Path, model_type: &str) {
     }
 }
 
-fn find_model_path(model: &str, model_dir: &std::path::Path) -> Result<PathBuf> {
-    // Try direct path
-    let direct = PathBuf::from(model);
-    if direct.exists() {
-        return Ok(direct);
+/// A Kev directory holds an adapter and a pointer head over a base it does not
+/// hold, so it has no weights format of its own.
+fn print_kev_info(dir: &std::path::Path) -> Result<()> {
+    let adapter = read_kev_adapter(dir).map_err(|e| anyhow!("{e}"))?;
+    eprintln!("{}: {}", "Format".bold(), "Kev".green());
+    eprintln!();
+    eprintln!("  {}: {}", "Base model".dimmed(), adapter.base);
+    eprintln!("  {}: {}", "Adapter rank".dimmed(), adapter.rank);
+    if let Some(revision) = &adapter.base_revision {
+        eprintln!("  {}: {}", "Base revision".dimmed(), revision);
     }
-
-    // Try in model directory
-    let in_dir = model_dir.join(model);
-    if in_dir.exists() {
-        return Ok(in_dir);
-    }
-
-    Err(anyhow!("Model not found: {}", model))
+    Ok(())
 }
 
 /// Estimate parameter count from config.json fields

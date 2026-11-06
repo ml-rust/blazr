@@ -6,9 +6,9 @@
 //! it by naming it as `model`, or by naming the adapter as `lora_adapter`.
 //!
 //! Endpoints:
-//!   POST   /v1/lora                    Register an adapter as a variant and build it
-//!   DELETE /v1/lora/{name}?model=<m>   Unregister the variant and drop its executor
-//!   GET    /v1/lora[?model=<m>]        List the registered variants
+//! - `POST /v1/lora`: register an adapter as a variant and build it.
+//! - `DELETE /v1/lora/{name}?model=<m>`: unregister the variant and drop its executor.
+//! - `GET /v1/lora[?model=<m>]`: list the registered variants.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,6 +21,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::engine::model_dir::stays_in_dir;
 use crate::engine::{lora::variant_id, AdapterSpec, LoraError, VariantInfo};
 use crate::server::generation::error_response;
 use crate::server::handlers::{lora_error_response, AppState};
@@ -33,8 +34,16 @@ pub struct LoadLoraRequest {
     /// The adapter name: requests reach the variant as `<model>:<name>` or
     /// with `lora_adapter: <name>`.
     pub name: String,
-    /// The PEFT adapter directory, or its `adapter_model.safetensors` file.
+    /// The PEFT adapter directory, or its `adapter_model.safetensors` file,
+    /// inside the model directory: relative to it, or absolute under it.
     pub path: PathBuf,
+}
+
+/// The adapter path a request names, inside `model_dir`. `None` when `path`
+/// leaves the directory. `--lora` at startup is an operator's, and skips this.
+fn adapter_in_dir(model_dir: &std::path::Path, path: &std::path::Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(model_dir).unwrap_or(path);
+    stays_in_dir(relative.to_str()?).then(|| model_dir.join(relative))
 }
 
 /// One registered variant, as `GET /v1/lora` and `/v1/models` list it.
@@ -93,13 +102,25 @@ fn data_parallel_refusal(state: &AppState, model: &str) -> Option<LoraError> {
 /// Registers the PEFT adapter at `path` as the variant `<model>:<name>`,
 /// loads `model` when needed, and builds the variant over its weights. A
 /// variant of the same id is replaced. 404 for an unknown model, 400 for a
-/// bad name, a model that takes no adapter or a data-parallel model, 422
-/// for an adapter that does not load or fit.
+/// bad name, a path outside the model directory, a model that takes no
+/// adapter or a data-parallel model, 422 for an adapter that does not load
+/// or fit.
 pub async fn load_lora(
     State(state): State<Arc<AppState>>,
     Json(request): Json<LoadLoraRequest>,
 ) -> Response {
-    let spec = match AdapterSpec::new(&request.name, request.path) {
+    let Some(path) = adapter_in_dir(state.scheduler.model_dir(), &request.path) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "adapter path {:?} leaves the model directory. Place the adapter in the model \
+                 directory and send its relative path, or start the server with --lora",
+                request.path
+            ),
+            "invalid_request_error",
+        );
+    };
+    let spec = match AdapterSpec::new(&request.name, path) {
         Ok(spec) => spec,
         Err(e) => return lora_error_response(&e),
     };
@@ -244,7 +265,7 @@ mod tests {
             Json(LoadLoraRequest {
                 model: model.into(),
                 name: name.into(),
-                path: "/adapters/kev".into(),
+                path: "adapters/kev".into(),
             })
         };
         let bad = load_lora(State(Arc::clone(&state)), request("m", "a:b")).await;
@@ -254,5 +275,38 @@ mod tests {
         state.scheduler.lora.insert(registered("m", "kev"));
         let stacked = load_lora(State(Arc::clone(&state)), request("m:kev", "jev")).await;
         assert_eq!(stacked.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A traversal answers 400 before any file is read, so the reply probes
+    /// nothing. An adapter inside the directory passes this check and reaches
+    /// the model lookup.
+    #[tokio::test]
+    async fn an_adapter_path_outside_the_model_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state = test_state(dir.path());
+        let request = |path: PathBuf| {
+            Json(LoadLoraRequest {
+                model: "absent".into(),
+                name: "kev".into(),
+                path,
+            })
+        };
+        for path in [
+            PathBuf::from("/etc"),
+            PathBuf::from("../adapters/kev"),
+            dir.path().join("../outside"),
+            PathBuf::from("a/../../b"),
+            PathBuf::from(""),
+        ] {
+            let refused = load_lora(State(Arc::clone(&state)), request(path.clone())).await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{path:?}");
+            let body = json(refused).await;
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(message.contains("leaves the model directory"), "{body}");
+        }
+        for path in [PathBuf::from("adapters/kev"), dir.path().join("kev")] {
+            let inside = load_lora(State(Arc::clone(&state)), request(path.clone())).await;
+            assert_eq!(inside.status(), StatusCode::NOT_FOUND, "{path:?}");
+        }
     }
 }

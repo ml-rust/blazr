@@ -9,7 +9,9 @@ use boostr::{DType, Runtime, VarBuilder};
 use splintr::AnyTokenizer;
 
 use crate::config::{compute_dtype, BlazrConfig, DtypeRequest};
-use crate::tokenizer::{apply_bos_files, from_vocab_size, CheckpointTokenizerFiles};
+use crate::tokenizer::{
+    apply_bos_files, apply_stop_files, from_vocab_size, CheckpointTokenizerFiles,
+};
 
 use super::checkpoint_map::load_checkpoint_map;
 use super::config::config_from_text;
@@ -42,7 +44,8 @@ fn parse_json(text: Option<&str>, name: &str) -> Result<Option<serde_json::Value
 /// Load a regular SafeTensors checkpoint from memory.
 ///
 /// The tokenizer is `tokenizer_json` when set, else the bundled vocabulary
-/// the config's `vocab_size` matches. The JSON files set its BOS rule. GPTQ
+/// the config's `vocab_size` matches. The JSON files set its BOS rule and its
+/// stop ids. GPTQ
 /// and AWQ checkpoints are refused.
 ///
 /// # Errors
@@ -67,6 +70,9 @@ where
         tokenizer_config: parse_json(tokenizer_config_json.as_deref(), "tokenizer_config.json")?,
         tokenizer_json: parse_json(tokenizer_json.as_deref(), "tokenizer.json")?,
         config: parse_json(config_json.as_deref(), "config.json")?,
+        // `SafeTensorsBytes` carries no such file. `config.json`,
+        // `tokenizer_config.json` and the turn markers state the stop ids.
+        generation_config: None,
     };
 
     let mut loader = SafeTensorsLoader::from_bytes(weights)
@@ -95,6 +101,6 @@ where
             .map_err(|e| anyhow!("tokenizer.json does not load as a tokenizer: {e}"))?,
         None => from_vocab_size(config.vocab_size())?,
     };
-    let tokenizer = apply_bos_files(base, &files)?;
+    let tokenizer = apply_stop_files(apply_bos_files(base, &files)?, &files);
     Ok((model, config, tokenizer))
 }

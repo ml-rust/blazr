@@ -43,8 +43,9 @@ impl ChatTemplate {
 
     /// The model's own template, when it ships one.
     ///
-    /// A GGUF file carries it in `tokenizer.chat_template`; a checkpoint
-    /// directory in `chat_template.jinja` or `tokenizer_config.json`.
+    /// A GGUF file carries it in `tokenizer.chat_template`, also when a
+    /// directory holds that one file. A checkpoint directory carries it in
+    /// `chat_template.jinja` or `tokenizer_config.json`.
     pub fn from_model(path: &Path) -> Result<Option<ModelTemplate>> {
         if path.is_file() {
             let is_gguf = path
@@ -55,6 +56,11 @@ impl ChatTemplate {
             } else {
                 Ok(None)
             };
+        }
+        if let Ok(source) = crate::loader::detect_model_source(path) {
+            if source.format == crate::loader::ModelFormat::Gguf {
+                return crate::loader::gguf_chat_template(&source.weights_path);
+            }
         }
         from_tokenizer_config(path)
     }

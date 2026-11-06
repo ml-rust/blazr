@@ -93,7 +93,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use boostr::{CpuDevice, CpuRuntime};
     use futures::StreamExt;
@@ -407,8 +407,8 @@ mod tests {
             .unwrap_or_else(|| panic!("no GGUF name for {hf}"))
     }
 
-    #[test]
-    fn gguf_from_bytes_generates_a_token() {
+    /// A tiny Llama GGUF with a SentencePiece vocabulary, and its vocab size.
+    pub(crate) fn tiny_gguf() -> (Vec<u8>, usize) {
         // SentencePiece pieces: three controls, then single characters.
         let mut tokens: Vec<String> = ["<unk>", "<s>", "</s>", "\u{2581}"]
             .iter()
@@ -440,8 +440,18 @@ mod tests {
             ("tokenizer.ggml.bos_token_id", Kv::U32(1)),
             ("tokenizer.ggml.eos_token_id", Kv::U32(2)),
             ("tokenizer.ggml.unknown_token_id", Kv::U32(0)),
+            (
+                "tokenizer.chat_template",
+                Kv::Str("{{ messages[0].content }}"),
+            ),
         ];
-        let bytes = ModelBytes::Gguf(gguf_bytes(&pairs, &tensors));
+        (gguf_bytes(&pairs, &tensors), vocab)
+    }
+
+    #[test]
+    fn gguf_from_bytes_generates_a_token() {
+        let (gguf, vocab) = tiny_gguf();
+        let bytes = ModelBytes::Gguf(gguf);
         let options = LoadOptions {
             num_ctx: 64,
             ..LoadOptions::default()
@@ -453,6 +463,65 @@ mod tests {
         assert!(!prompt.is_empty());
         let token = generate_one(&executor, &prompt);
         assert!((token as usize) < vocab);
+    }
+
+    /// Every id `/v1/models` lists resolves to a path that loads. A Whisper
+    /// directory, a `.safetensors` file of no model, and a flat `mmproj` file are
+    /// in the directory and get no id.
+    #[test]
+    fn every_listed_gguf_id_loads() {
+        use crate::engine::load::parts::load_model_parts;
+        use crate::engine::model_dir::{find_model_path, list_available};
+
+        let (gguf, vocab) = tiny_gguf();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        std::fs::create_dir(root.join("one")).expect("mkdir");
+        std::fs::write(root.join("one/only.gguf"), &gguf).expect("write");
+        std::fs::create_dir(root.join("two")).expect("mkdir");
+        std::fs::write(root.join("two/a.gguf"), &gguf).expect("write");
+        std::fs::write(root.join("two/b.gguf"), &gguf).expect("write");
+        std::fs::write(root.join("file.gguf"), &gguf).expect("write");
+        std::fs::write(root.join("mmproj-f16.gguf"), &gguf).expect("write");
+        let whisper = root.join("whisper-tiny");
+        std::fs::create_dir(&whisper).expect("mkdir");
+        std::fs::write(
+            whisper.join("config.json"),
+            r#"{"model_type": "whisper", "architectures": ["WhisperForConditionalGeneration"]}"#,
+        )
+        .expect("write");
+        std::fs::write(whisper.join("model.safetensors"), mel_safetensors()).expect("write");
+        std::fs::write(root.join("mel_filters.safetensors"), mel_safetensors()).expect("write");
+        std::fs::write(
+            root.join("whisper_mel_fixture.safetensors"),
+            mel_safetensors(),
+        )
+        .expect("write");
+
+        let models = list_available(root).expect("lists");
+        let names: Vec<&str> = models.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["file.gguf", "one", "two/a.gguf", "two/b.gguf"]);
+        for name in names {
+            let path = find_model_path(root, name, None).expect("a listed id resolves");
+            crate::loader::load_model_meta::<CpuRuntime>(&path)
+                .unwrap_or_else(|e| panic!("listed id {name} has no readable metadata: {e:#}"));
+            let (_, config, _) =
+                load_model_parts::<CpuRuntime>(&path, &CpuDevice::new(), None, None)
+                    .unwrap_or_else(|e| panic!("listed id {name} does not load: {e:#}"));
+            assert_eq!(config.vocab_size(), vocab, "{name}");
+            let template = ChatTemplate::from_model(&path).expect("template reads");
+            assert!(template.is_some(), "{name} loses its GGUF chat template");
+        }
+        assert_eq!(find_model_path(root, "two", None), None);
+    }
+
+    /// A SafeTensors file with one mel filter tensor and no model layout.
+    fn mel_safetensors() -> Vec<u8> {
+        let header = br#"{"mel_filters":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes
     }
 
     #[test]

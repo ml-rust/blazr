@@ -21,9 +21,9 @@ use super::registry::VariantInfo;
 use super::select::{not_registered, select_model};
 use super::spec::{split_variant, AdapterSpec};
 use crate::engine::load::blocking::BlockingStopped;
-use crate::engine::load::registered::Models;
+use crate::engine::load::registered::{release, Models};
 use crate::engine::scheduler::ModelEntry;
-use crate::engine::{Executor, Scheduler};
+use crate::engine::{Executor, ModelNotFound, ModelNotLoadable, Scheduler};
 
 /// Variants built over a loaded base: at registration, and again after an
 /// eviction or unload.
@@ -120,6 +120,10 @@ where
             }
         }
         let base_executor = self.base_executor(base).await?;
+        let loaded_as = self
+            .loaded_key(base)
+            .await
+            .unwrap_or_else(|| base.to_string());
         let lora = Arc::clone(&self.lora);
         let base = base.to_string();
         let adapter = spec.name.clone();
@@ -129,7 +133,7 @@ where
                 let derived = base_executor.derive_variant(&spec)?;
                 Ok((derived, spec))
             },
-            move |(derived, spec), models| {
+            move |(derived, spec), models, _| {
                 let info = VariantInfo {
                     id,
                     base,
@@ -140,7 +144,7 @@ where
                 };
                 lora.insert(info.clone());
                 let executor = Arc::new(derived.executor);
-                let executor = keep_variant(models, &info.id, &info.base, executor, replace);
+                let executor = keep_variant(models, &info.id, &loaded_as, executor, replace);
                 metrics::counter!(VARIANT_BUILDS).increment(1);
                 tracing::info!(
                     variant = %info.id,
@@ -160,7 +164,8 @@ where
     pub async fn remove_variant(&self, id: &str) -> Option<VariantInfo> {
         let _gate = self.gates.acquire(id).await;
         let info = self.lora.remove(id)?;
-        self.models.write().await.remove(id);
+        let removed = self.models.write().await.remove(id);
+        release(removed.into_iter().collect()).await;
         tracing::info!(variant = id, "LoRA variant removed");
         Some(info)
     }
@@ -191,13 +196,19 @@ where
         }
         if self.model_path(name).is_none() {
             return Err(LoraError::ModelNotFound(format!(
-                "model {name:?} not found: it is neither a path nor an entry of {}",
-                self.model_dir().display()
+                "model {name:?} not found: no entry of the model directory holds that name. \
+                 Request an id from /v1/models"
             )));
         }
-        self.load_model(name)
-            .await
-            .map_err(|e| LoraError::BaseLoad(format!("model {name:?} did not load: {e:#}")))
+        self.load_model(name).await.map_err(|e| {
+            if let Some(refused) = e.downcast_ref::<ModelNotLoadable>() {
+                return LoraError::Unsupported(refused.to_string());
+            }
+            if let Some(missing) = e.downcast_ref::<ModelNotFound>() {
+                return LoraError::ModelNotFound(missing.to_string());
+            }
+            LoraError::BaseLoad(format!("model {name:?} did not load: {e:#}"))
+        })
     }
 
     /// Build the registered variant `info` from its base, loading the base
@@ -217,11 +228,14 @@ where
             path: info.path.clone(),
         };
         let id = info.id.clone();
-        let base = info.base.clone();
+        let base = self
+            .loaded_key(&info.base)
+            .await
+            .unwrap_or_else(|| info.base.clone());
         self.run_registered(
             gate,
             move || base_executor.derive_variant(&spec),
-            move |derived, models| {
+            move |derived, models, _| {
                 metrics::counter!(VARIANT_BUILDS).increment(1);
                 keep_variant(models, &id, &base, Arc::new(derived.executor), false)
             },
@@ -282,6 +296,8 @@ fn keep_variant<R: Runtime<DType = DType>>(
             path,
             keep_alive,
             variant_of: Some(base.to_string()),
+            batching: None,
+            held: false,
         },
     );
     executor

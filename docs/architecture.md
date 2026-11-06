@@ -71,11 +71,15 @@ The engine builds without the CLI and the HTTP server, as a library. The `cli` a
 ### Load
 
 1. `Scheduler::get_executor` returns a cached executor. On a miss, it calls `load_model`.
-2. `ensure_capacity` removes least recently used models until one more model fits.
-3. `find_model_path` resolves the model name in the model directory.
-4. The tensor-parallel size comes from `BLAZR_TP_SIZE`, then `inference.tensor_parallel_size`, then the model `config.json`, then `1`. `validate_tp_config` checks it. When the size is above 1, the scheduler loads a tensor-parallel shard with `loader::load_model_tp`. That path needs the `cuda` and `nccl` features.
-5. Otherwise `detect_model_source` picks the format from a directory or a `.safetensors` or `.gguf` path.
-6. `from_vocab_size` builds the tokenizer from the vocabulary size. `ChatTemplate::detect` picks the chat template.
+2. `find_model_path` resolves the name inside the model directory: `<name>`, `<name>.safetensors`, `<name>.gguf`, then `<name>/model.safetensors`. A name with `..`, a root, or a leading `.` resolves to nothing. Only a name an operator stated (`--model`, `--decision-base`, a Kev adapter's own base) can be a path, and it tries that path first.
+3. A name whose weights file is the file of a loaded base model returns that model, with its batching scheduler. `same_weights` compares the two files.
+4. `check_loadable` and `load_model_meta` refuse a name before any eviction: another kind of model, a refused architecture, no weights, or a config or tokenizer that does not read.
+5. `make_room` removes least recently used models until one more model fits. The entries drop on a blocking thread, off the models lock, before the load starts.
+6. The tensor-parallel size comes from `BLAZR_TP_SIZE`, then `inference.tensor_parallel_size`, then the model `config.json`, then `1`. `validate_tp_config` checks it. When the size is above 1, the scheduler loads a tensor-parallel shard with `loader::load_model_tp`. That path needs the `cuda` and `nccl` features.
+7. Otherwise `detect_model_source` picks the format from a directory or a `.safetensors` or `.gguf` path.
+8. `checkpoint_tokenizer` builds the tokenizer from the checkpoint's own files, else from the vocabulary size. `ChatTemplate::detect` picks the chat template.
+
+A load that passes step 4 and then fails has already evicted the models of step 5: bad tensor bytes past the header, or a device that holds too little. The next request for the start model loads it again, and it runs one sequence at a time.
 
 For SafeTensors, `detect_architecture_from_loader` (`src/loader/formats/safetensors/detect_arch.rs`) reads tensor names and shapes to identify the architecture.
 
@@ -89,7 +93,11 @@ For SafeTensors, `detect_architecture_from_loader` (`src/loader/formats/safetens
 
 ### Eviction rule
 
-When a load needs room, the scheduler removes the least recently used model. The scheduler records the last access time on each `get_executor` hit. The default `max_loaded` is 1. No path in this tree calls `with_max_loaded`, so the scheduler holds one model at a time. Keep-alive expiry runs separately from this rule.
+When a load needs room, the scheduler removes the least recently used model. The scheduler records the last access time on each `get_executor` hit. The default `max_loaded` is 1. No path in this tree calls `with_max_loaded`, so the scheduler holds one model at a time. A held data-parallel model does not count. Keep-alive expiry runs separately from this rule.
+
+The model scheduler owns the start model of `blazr serve --model` and its batching scheduler, so eviction frees both and stops the engine thread. A request in flight holds them until it ends. When the start model loads again, it runs one sequence at a time. A data-parallel start model stays loaded: its replicas own it, and eviction skips it.
+
+Freed memory stays in numr's free list and the CUDA pool for reuse, so `nvidia-smi` stays above the loaded model's size after an eviction. Both drain when an allocation runs out of memory.
 
 ### Batch path selection
 

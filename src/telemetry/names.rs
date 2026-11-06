@@ -17,6 +17,12 @@ pub const ACTIVE_DECODE_SLOTS: &str = "blazr_active_decode_slots";
 pub const TOKEN_BUDGET_UTILIZATION: &str = "blazr_token_budget_utilization_ratio";
 pub const INTER_TOKEN_LATENCY: &str = "blazr_inter_token_latency_seconds";
 pub const VRAM_USED_BYTES: &str = "blazr_vram_used_bytes";
+/// Bytes of freed buffers numr's free list keeps on the device.
+pub const GPU_FREE_LIST_BYTES: &str = "blazr_gpu_free_list_bytes";
+/// Bytes the CUDA pool has handed out, the free list included.
+pub const GPU_POOL_USED_BYTES: &str = "blazr_gpu_pool_used_bytes";
+/// Bytes the CUDA pool took from the OS.
+pub const GPU_POOL_RESERVED_BYTES: &str = "blazr_gpu_pool_reserved_bytes";
 pub const KV_CACHE_UTILIZATION: &str = "blazr_kv_cache_utilization_ratio";
 pub const PREFIX_CACHE_HITS: &str = "blazr_prefix_cache_hits_total";
 pub const PREFIX_CACHE_MISSES: &str = "blazr_prefix_cache_misses_total";

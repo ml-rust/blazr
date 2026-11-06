@@ -17,6 +17,7 @@ pub use bytes::{load_safetensors_bytes, SafeTensorsBytes};
 pub use checkpoint_map::TensorLoadReport;
 pub use config::model_config_inference;
 pub use config_dtype::model_torch_dtype;
+pub(crate) use detect_arch::detect_architecture_from_loader;
 pub use loaders::{
     load_safetensors, load_safetensors_tp, load_safetensors_with_config,
     load_safetensors_with_offloading,

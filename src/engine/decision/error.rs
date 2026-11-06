@@ -78,6 +78,10 @@ impl DecisionFailure {
             Ok(lora) => return Self::from(lora),
             Err(error) => error,
         };
+        let error = match error.downcast::<crate::engine::ModelNotLoadable>() {
+            Ok(refused) => return Self::NotDecisionModel(refused.to_string()),
+            Err(error) => error,
+        };
         match error.downcast::<crate::engine::ModelNotFound>() {
             Ok(missing) => Self::from(missing),
             Err(error) => Self::Internal(format!("model '{name}' did not load: {error:#}")),

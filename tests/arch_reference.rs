@@ -2,7 +2,8 @@
 //!
 //! Each test loads one SafeTensors checkpoint on the CPU in F32. It checks
 //! the detected config and the prompt ids. It decodes 32 greedy tokens through
-//! `Executor::generate` and asserts the first 8 ids.
+//! `Executor::generate` and asserts all 32 ids. It runs no chat template and no
+//! stop. `chat_stop_reference` covers those.
 //!
 //! The reference ids come from `transformers` on the CPU in F32, with
 //! `add_special_tokens=True`, greedy, no repeat penalty. Tiny random-weight
@@ -37,7 +38,7 @@ use common::{model_fixture, skip_notice};
 /// Tokens each test decodes.
 const NUM_TOKENS: usize = 32;
 /// Leading ids that must equal the reference exactly.
-const CHECKED_IDS: usize = 8;
+const CHECKED_IDS: usize = NUM_TOKENS;
 /// KV capacity of each run.
 const NUM_CTX: usize = 256;
 /// Logit tolerance, relative to the largest reference logit.

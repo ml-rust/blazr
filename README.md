@@ -183,6 +183,10 @@ curl http://localhost:8080/v1/chat/completions \
 | DeepSeek-V2/V3 | Refused at load | None | No DeepSeek model implementation |
 | InternLM2 | Load fails | None | No tensor name map |
 
+The Evidence column covers the forward pass on a raw prompt. It says nothing about chat. `tests/chat_stop_reference.rs` checks chat prompt ids and stop ids against `transformers` for Qwen2.5, Qwen3, Gemma 2, and Phi-3.5, and one real Qwen3 turn that ends on `<|im_end|>`.
+
+A base checkpoint is not a chat model. `Qwen2.5-0.5B` and `gemma-2-2b` never learned their turn markers. Through `/v1/chat/completions` they run past the first sentence and print control text where a marker belongs, and `transformers` prints the same kind of control text from the same prompt. Use an `-Instruct`, `-it`, or chat checkpoint for chat.
+
 [docs/models.md](docs/models.md) holds the full matrix, with an evidence level per cell.
 
 ## Model Formats
@@ -213,7 +217,7 @@ This table lists the main routes. [docs/api.md](docs/api.md) lists every route, 
 | Method | Path                       | Description                                    |
 | ------ | -------------------------- | ---------------------------------------------- |
 | GET    | `/health`                  | Health check                                   |
-| GET    | `/v1/models`               | List loaded models                             |
+| GET    | `/v1/models`               | List available models                          |
 | POST   | `/v1/completions`          | Text completion                                |
 | POST   | `/v1/chat/completions`     | Chat completion                                |
 | POST   | `/v1/embeddings`           | Embeddings                                     |

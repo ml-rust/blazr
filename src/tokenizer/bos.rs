@@ -20,6 +20,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use splintr::AnyTokenizer;
 
+use super::eos::apply_stop_files;
 use super::splintr_tokenizer::from_vocab_size;
 
 /// `tokenizer_class` values whose HF tokenizer defaults `add_bos_token` to
@@ -42,15 +43,21 @@ pub struct CheckpointTokenizerFiles {
     pub tokenizer_json: Option<Value>,
     /// `config.json`.
     pub config: Option<Value>,
+    /// `generation_config.json`.
+    pub generation_config: Option<Value>,
 }
 
 impl CheckpointTokenizerFiles {
     /// Read the files beside `model`, a checkpoint directory or a weights
     /// file in one.
     ///
+    /// A `generation_config.json` that does not parse logs a warning and counts
+    /// as absent, because the model runs without it.
+    ///
     /// # Errors
     ///
-    /// An error when a file exists but does not parse as JSON.
+    /// An error when any other file exists but does not parse as JSON, or when
+    /// a file does not read.
     pub fn read(model: &Path) -> Result<Self> {
         let dir = if model.is_dir() {
             model
@@ -61,7 +68,28 @@ impl CheckpointTokenizerFiles {
             tokenizer_config: read_json(&dir.join("tokenizer_config.json"))?,
             tokenizer_json: read_json(&dir.join("tokenizer.json"))?,
             config: read_json(&dir.join("config.json"))?,
+            generation_config: read_optional_json(&dir.join("generation_config.json"))?,
         })
+    }
+}
+
+/// [`read_json`] for a file a model runs without: a parse error logs a warning
+/// and gives `None`.
+fn read_optional_json(path: &Path) -> Result<Option<Value>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow!("{} does not read: {e}", path.display())),
+    };
+    match serde_json::from_str(&text) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) => {
+            tracing::warn!(
+                "{} is not valid JSON: {e}. Its stop ids do not apply. Fix or remove the file",
+                path.display()
+            );
+            Ok(None)
+        }
     }
 }
 
@@ -208,7 +236,7 @@ fn added_token_id(json: &Value, name: &str) -> Option<u32> {
 }
 
 /// A token name stored as a string or as an `AddedToken` object.
-fn token_content(value: Option<&Value>) -> Option<String> {
+pub(super) fn token_content(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(s) => Some(s.clone()),
         Value::Object(o) => o.get("content")?.as_str().map(str::to_string),
@@ -242,8 +270,8 @@ pub fn apply_bos_files(
     })
 }
 
-/// The tokenizer for a SafeTensors checkpoint, with the BOS rule of its own
-/// files.
+/// The tokenizer for a SafeTensors checkpoint, with the BOS rule and the stop
+/// ids of its own files.
 ///
 /// - A `tokenizer.json` beside the weights is the model's own tokenizer, and
 ///   it wins.
@@ -274,7 +302,8 @@ pub fn checkpoint_tokenizer(model: &Path, vocab_size: usize) -> Result<AnyTokeni
     } else {
         from_vocab_size(vocab_size)?
     };
-    apply_checkpoint_bos(base, model)
+    let files = CheckpointTokenizerFiles::read(model)?;
+    Ok(apply_stop_files(apply_bos_files(base, &files)?, &files))
 }
 
 #[cfg(test)]
@@ -304,6 +333,7 @@ mod tests {
             tokenizer_config: tc,
             tokenizer_json: tj,
             config,
+            generation_config: None,
         }
     }
 
@@ -451,5 +481,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tok = checkpoint_tokenizer(dir.path(), 128256).unwrap();
         assert!(!tok.encode("Hi").contains(&128000));
+    }
+
+    /// A model runs without `generation_config.json`, so a bad one costs its
+    /// stop ids and not the load. A bad `config.json` stays an error.
+    #[test]
+    fn a_malformed_generation_config_counts_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("generation_config.json"), "{ not json").unwrap();
+        let files = CheckpointTokenizerFiles::read(dir.path()).unwrap();
+        assert!(files.generation_config.is_none());
+
+        std::fs::write(dir.path().join("config.json"), "{ not json").unwrap();
+        let err = CheckpointTokenizerFiles::read(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("config.json"), "{err}");
     }
 }

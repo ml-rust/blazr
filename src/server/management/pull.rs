@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::engine::model_dir::stays_in_dir;
 use crate::loader::hub_client::{async_client, async_get, async_model};
 use crate::server::handlers::AppState;
 use crate::server::ndjson::ndjson_response;
@@ -44,6 +45,14 @@ pub async fn pull_model(
         let repo_api = async_model(&client, &repo);
 
         let model_name = repo.split('/').next_back().unwrap_or(&repo);
+        if !stays_in_dir(model_name) {
+            let message = format!(
+                "repo name '{repo}' leaves the model directory. Send a Hugging Face repo id, \
+                 such as 'org/name'"
+            );
+            let _ = tx.send(Err(message)).await;
+            return;
+        }
         let dest = model_dir.join(model_name);
         let _ = tokio::fs::create_dir_all(&dest).await;
 
@@ -105,6 +114,14 @@ async fn pull_file(
     name: &str,
     dest: &Path,
 ) {
+    if !stays_in_dir(name) {
+        let message = format!(
+            "file name '{name}' in the repo's index leaves the model directory. Pull a repo with \
+             plain file names"
+        );
+        let _ = tx.send(Err(message)).await;
+        return;
+    }
     send_status(tx, &format!("pulling {}", name)).await;
     if let Ok(cached) = async_get(repo_api, name, true).await {
         let target = dest.join(name);

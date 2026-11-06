@@ -28,10 +28,15 @@ use crate::tokenizer::checkpoint_tokenizer;
 pub fn load_model_meta<R: Runtime<DType = DType>>(
     path: &Path,
 ) -> Result<(BlazrConfig, AnyTokenizer)> {
-    match detect_model_source(path)?.format {
+    let source = detect_model_source(path)?;
+    match source.format {
         ModelFormat::Gguf => {
-            let mut gguf =
-                Gguf::open(path).map_err(|e| anyhow!("Failed to open GGUF file: {e}"))?;
+            let mut gguf = Gguf::open(&source.weights_path).map_err(|e| {
+                anyhow!(
+                    "Failed to open GGUF file {}: {e}",
+                    source.weights_path.display()
+                )
+            })?;
             let config = config_from_gguf_metadata(&mut gguf)?;
             let tokenizer = gguf_tokenizer(&gguf)?;
             Ok((config, tokenizer))

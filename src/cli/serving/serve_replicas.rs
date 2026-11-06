@@ -12,11 +12,13 @@ use colored::Colorize;
 
 use crate::config::{tp_conflict, DecisionConfig, DtypeRequest, InferenceOverlay, VisionOverrides};
 use crate::engine::{DataParallelGroup, Executor, Scheduler, SloBatchPolicy};
-use crate::server::handlers::{ServeReplica, ServerDevice, ServerRuntime, Serving};
+use crate::server::handlers::{ServeReplica, ServerDevice, ServerRuntime, Serving, StartReplica};
 
 /// The settings every model scheduler of one server shares.
 #[derive(Debug, Clone)]
 pub struct SchedulerSettings {
+    /// `--model` or `default_model`, which can be a path.
+    pub operator_model: Option<String>,
     pub model_dir: PathBuf,
     pub num_ctx: usize,
     pub chat_template: Option<String>,
@@ -33,6 +35,7 @@ impl SchedulerSettings {
     /// A model scheduler on `device`.
     pub fn build(&self, device: ServerDevice) -> Scheduler<ServerRuntime> {
         Scheduler::new(self.model_dir.clone(), device)
+            .with_operator_model(self.operator_model.clone())
             .with_num_ctx(self.num_ctx)
             .with_chat_template(self.chat_template.clone())
             .with_inference_overlay(self.inference.clone())
@@ -65,7 +68,12 @@ pub async fn load_serving(
     if replicas <= 1 {
         let label = device_label(base_index, 0);
         let replica = serve_replica(first, label, slo_policy).await?;
-        return Ok(Serving::Single(replica));
+        // The model scheduler owns the copy, so an eviction frees the device.
+        let start = StartReplica::new(&replica);
+        if let Some(batching) = replica.scheduler {
+            primary.attach_batching(model, batching).await;
+        }
+        return Ok(Serving::Start(start));
     }
 
     let tp = first.config().inference.tensor_parallel_size;
@@ -92,6 +100,9 @@ pub async fn load_serving(
         "  Data parallel: {} replicas, cache-aware routing",
         replicas.to_string().green()
     );
+    // The group holds every replica for the server's life, so an eviction of
+    // replica 0 frees nothing.
+    primary.hold(model).await;
     let group = DataParallelGroup::new(model.to_string(), loaded)?;
     Ok(Serving::DataParallel(Arc::new(group)))
 }
@@ -173,5 +184,144 @@ mod tests {
         let devices = replica_devices(0, 3);
         assert_eq!(devices.map(|d| d.len()).ok(), Some(3));
         assert_eq!(device_label(0, 2), "cpu:2");
+    }
+
+    /// Settings that give a tiny GGUF a paged batching engine on any runtime.
+    fn settings(model_dir: &std::path::Path, start: &str) -> SchedulerSettings {
+        let section = crate::config::InferenceConfig {
+            paged_attention: true,
+            max_batch_size: 2,
+            block_size: 4,
+            kv_pool_blocks: 16,
+            ..Default::default()
+        };
+        let keys = [
+            "paged_attention",
+            "max_batch_size",
+            "block_size",
+            "kv_pool_blocks",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        SchedulerSettings {
+            operator_model: Some(start.to_string()),
+            model_dir: model_dir.to_path_buf(),
+            num_ctx: 32,
+            chat_template: None,
+            inference: InferenceOverlay::from_section(&section, &keys).expect("overlay"),
+            tensor_parallel_size: None,
+            vision: VisionOverrides::default(),
+            dtype: None,
+            decision: DecisionConfig::default(),
+        }
+    }
+
+    /// A model directory that holds `start.gguf` and `other.gguf`, both tiny
+    /// real checkpoints, and a Whisper directory.
+    fn model_dir() -> tempfile::TempDir {
+        let (gguf, _) = crate::engine::load::bytes::tests::tiny_gguf();
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("start.gguf"), &gguf).expect("write");
+        std::fs::write(dir.path().join("other.gguf"), &gguf).expect("write");
+        let whisper = dir.path().join("whisper-tiny");
+        std::fs::create_dir(&whisper).expect("mkdir");
+        std::fs::write(whisper.join("config.json"), r#"{"model_type": "whisper"}"#).expect("write");
+        std::fs::write(whisper.join("model.safetensors"), b"").expect("write");
+        dir
+    }
+
+    async fn loaded(
+        dir: &std::path::Path,
+        start: &str,
+    ) -> (Arc<Scheduler<ServerRuntime>>, Serving) {
+        let settings = settings(dir, start);
+        let device = crate::runtime::open_device(0).expect("device 0 opens");
+        let primary = Arc::new(settings.build(device));
+        let serving = load_serving(&primary, &settings, start, 0, 1, None)
+            .await
+            .expect("the start model loads");
+        (primary, serving)
+    }
+
+    /// What `blazr serve --model <path>` does: the entry owns the batching
+    /// scheduler, so an eviction stops it and frees the model.
+    #[tokio::test]
+    async fn load_serving_leaves_one_evictable_batching_copy() {
+        let dir = model_dir();
+        let spelled = dir.path().join("start.gguf").display().to_string();
+        let (primary, serving) = loaded(dir.path(), &spelled).await;
+        assert!(matches!(serving, Serving::Start(_)));
+        assert_eq!(serving.schedulers().len(), 1, "the start model batches");
+
+        let executor = primary.get_executor(&spelled).await.expect("loaded");
+        let weak = Arc::downgrade(&executor);
+        assert!(serving
+            .route(Arc::clone(&executor), &[1])
+            .scheduler
+            .is_some());
+        drop(executor);
+
+        let other = primary.get_executor("other.gguf").await.expect("loads");
+        assert!(weak.upgrade().is_none(), "the start model is still held");
+        assert!(serving.schedulers().is_empty(), "the engine stopped");
+        assert!(serving.route(other, &[1]).scheduler.is_none());
+    }
+
+    /// `--model /abs/start.gguf`, and a client that sends the listed id or the
+    /// bare name: the request stays on the batching start model.
+    #[tokio::test]
+    async fn the_listed_id_of_the_start_file_stays_on_the_batching_copy() {
+        let dir = model_dir();
+        let spelled = dir.path().join("start.gguf").display().to_string();
+        let (primary, serving) = loaded(dir.path(), &spelled).await;
+        let start = primary.get_executor(&spelled).await.expect("loaded");
+        for name in ["start.gguf", "start"] {
+            let executor = primary.get_executor(name).await.expect("routes");
+            assert!(
+                Arc::ptr_eq(&start, &executor),
+                "{name} loaded a second copy"
+            );
+            assert!(
+                serving.route(executor, &[1]).scheduler.is_some(),
+                "{name} lost batching"
+            );
+        }
+        assert_eq!(serving.schedulers().len(), 1);
+        let ids: Vec<String> = primary
+            .list_served()
+            .expect("lists")
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(ids, ["other.gguf", "start.gguf"]);
+    }
+
+    /// One bad id frees nothing, whether it resolves to nothing or to a model
+    /// the text routes do not run.
+    #[tokio::test]
+    async fn a_refused_request_leaves_the_start_model_batching() {
+        let dir = model_dir();
+        std::fs::create_dir(dir.path().join("config-only")).expect("mkdir");
+        std::fs::write(dir.path().join("config-only/config.json"), "{}").expect("write");
+        std::fs::write(dir.path().join("mmproj-f16.gguf"), b"").expect("write");
+        std::fs::write(dir.path().join("corrupt.gguf"), b"not a gguf").expect("write");
+        let spelled = dir.path().join("start.gguf").display().to_string();
+        let (primary, serving) = loaded(dir.path(), &spelled).await;
+
+        for (name, status) in [
+            ("/etc", "404"),
+            ("../start.gguf", "404"),
+            ("config-only", "404"),
+            ("whisper-tiny", "400"),
+            ("mmproj-f16.gguf", "400"),
+            ("corrupt.gguf", "500"),
+        ] {
+            let error = primary.get_executor(name).await.err().expect(name);
+            let failure = crate::server::handlers::classify_lookup(&error);
+            assert_eq!(failure.status.as_str(), status, "{name}: {error:#}");
+            assert!(primary.is_loaded(&spelled).await, "{name} freed the model");
+            assert_eq!(serving.schedulers().len(), 1, "{name} stopped the engine");
+        }
     }
 }

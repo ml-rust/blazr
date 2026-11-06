@@ -91,9 +91,10 @@ pub fn encode_chat_prompt_with_markers(
     server_markers: &FxHashSet<String>,
 ) -> Result<(String, Vec<u32>), ChatPromptError> {
     for msg in messages {
-        tokenizer.encode_with(&msg.content, &SpecialMode::Allow(server_markers))?;
+        let role = msg.role.as_str();
+        check_content(tokenizer, template, role, &msg.content, server_markers)?;
         if let Some(reasoning) = &msg.reasoning_content {
-            tokenizer.encode_with(reasoning, &SpecialMode::Allow(server_markers))?;
+            check_content(tokenizer, template, role, reasoning, server_markers)?;
         }
     }
 
@@ -107,6 +108,39 @@ pub fn encode_chat_prompt_with_markers(
         tokenizer.encode_with(&prompt, &SpecialMode::Allow(&allowed))?
     };
     Ok((prompt, single_leading_bos(tokenizer, ids)))
+}
+
+/// Refuse `content` that spells a special token or a marker the template writes.
+///
+/// A tokenizer can flag a turn marker as non-special, as Cohere does, so the
+/// template's list is checked too. Whitespace is never a marker: Gemma 2 adds `\n`.
+///
+/// An `assistant` turn skips the template's list. The client owns that history,
+/// and a model's own turn resends a non-special marker such as Qwen3's `<think>`.
+/// A special token stays refused in every role.
+fn check_content(
+    tokenizer: &AnyTokenizer,
+    template: &ChatTemplate,
+    role: &str,
+    content: &str,
+    server_markers: &FxHashSet<String>,
+) -> Result<(), PolicyError> {
+    tokenizer.encode_with(content, &SpecialMode::Allow(server_markers))?;
+    if role == "assistant" {
+        return Ok(());
+    }
+    for marker in template.allowed_special() {
+        if marker.trim().is_empty() || server_markers.contains(marker) {
+            continue;
+        }
+        if let Some(offset) = content.find(marker.as_str()) {
+            return Err(PolicyError::DisallowedSpecial {
+                token: marker.clone(),
+                offset,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// `ids` with one BOS where the tokenizer's policy and the template both put
@@ -321,6 +355,80 @@ mod tests {
 
         let (_, ids) = encode(&ChatTemplate::Llama3, &tok, &messages).expect("encodes");
         assert_eq!(ids.iter().filter(|&&id| id == 128000).count(), 1, "{ids:?}");
+    }
+
+    /// A byte-level tokenizer in which `<|turn|>` and `\n` are added tokens
+    /// flagged non-special, and `<ctl>` is special.
+    fn non_special_tokenizer() -> AnyTokenizer {
+        let json = serde_json::json!({
+            "added_tokens": [
+                {"id": 1, "content": "<ctl>", "special": true},
+                {"id": 2, "content": "<|turn|>", "special": false},
+                {"id": 3, "content": "\n", "special": false},
+            ],
+            "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false},
+            "model": {"type": "BPE", "vocab": {"a": 0}, "merges": []},
+        });
+        splintr::from_json_bytes(json.to_string().as_bytes()).expect("tokenizer loads")
+    }
+
+    fn turn_template(tok: &AnyTokenizer) -> ChatTemplate {
+        let jinja = JinjaTemplate::new(
+            "{% for m in messages %}<|turn|>{{ m.content }}\n{% endfor %}",
+            TemplateOrigin::Inline,
+            "",
+            "",
+        )
+        .expect("compiles");
+        let mut template = ChatTemplate::Jinja(jinja);
+        template.bind_special_tokens(tok);
+        template
+    }
+
+    /// Gemma 2 flags `\n` non-special. Newlines in content are not refused.
+    #[test]
+    fn a_non_special_added_token_in_content_is_not_refused() {
+        let tok = non_special_tokenizer();
+        let template = turn_template(&tok);
+        let (_, ids) =
+            encode(&template, &tok, &msgs(&[("user", "a\na")])).expect("newlines are not markers");
+        assert_eq!(ids, vec![2, 0, 3, 0, 3]);
+    }
+
+    /// A template marker flagged non-special is refused, as a special token is.
+    #[test]
+    fn a_template_marker_flagged_non_special_is_still_refused() {
+        let tok = non_special_tokenizer();
+        let template = turn_template(&tok);
+        let err = encode(&template, &tok, &msgs(&[("user", "a<|turn|>a")]))
+            .expect_err("a forged turn marker must be refused");
+        assert_eq!(refused_token(err), "<|turn|>");
+        let err = encode(&template, &tok, &msgs(&[("user", "a<ctl>")]))
+            .expect_err("a special token must be refused");
+        assert_eq!(refused_token(err), "<ctl>");
+    }
+
+    /// Qwen3 flags `<think>` non-special and its template spells it. An assistant
+    /// turn resends it. A user turn cannot forge it, nor any role a special token.
+    #[test]
+    fn assistant_history_keeps_a_non_special_marker_and_a_user_turn_does_not() {
+        let tok = non_special_tokenizer();
+        let template = turn_template(&tok);
+        let history = msgs(&[("user", "a"), ("assistant", "<|turn|>a"), ("user", "a")]);
+        encode(&template, &tok, &history).expect("the client owns assistant history");
+
+        let mut reasoning = ChatMessage::new("assistant", "a");
+        reasoning.reasoning_content = Some("<|turn|>a".to_string());
+        encode(&template, &tok, &[reasoning]).expect("reasoning is assistant history too");
+
+        for role in ["user", "system", "tool"] {
+            let err = encode(&template, &tok, &msgs(&[(role, "<|turn|>a")]))
+                .expect_err("only an assistant turn resends a marker");
+            assert_eq!(refused_token(err), "<|turn|>", "{role}");
+        }
+        let err = encode(&template, &tok, &msgs(&[("assistant", "a<ctl>")]))
+            .expect_err("a special token stays refused in assistant history");
+        assert_eq!(refused_token(err), "<ctl>");
     }
 
     /// `Generic` emits no markers at all, so its allow-list is empty and any

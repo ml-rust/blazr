@@ -181,8 +181,9 @@ pub struct GgufBytesModel<R: Runtime> {
 pub(super) fn gguf_tokenizer(gguf: &Gguf) -> Result<AnyTokenizer> {
     let vocab = boostr::format::extract_gguf_vocab(gguf.metadata())
         .map_err(|e| anyhow!("Failed to extract GGUF vocabulary: {}", e))?;
-    splintr::from_gguf_vocab(vocab)
-        .map_err(|e| anyhow!("Failed to build tokenizer from GGUF vocabulary: {}", e))
+    let tokenizer = splintr::from_gguf_vocab(vocab)
+        .map_err(|e| anyhow!("Failed to build tokenizer from GGUF vocabulary: {}", e))?;
+    Ok(crate::tokenizer::with_turn_end_stops(tokenizer))
 }
 
 /// Config, embedded tokenizer and weights of an open GGUF.

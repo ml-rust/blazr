@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 
 use super::state::{AppState, ServerRuntime};
-use crate::engine::{is_out_of_memory, Executor, LoraError, ModelNotFound};
+use crate::engine::{is_out_of_memory, Executor, LoraError, ModelNotFound, ModelNotLoadable};
 use crate::server::generation::error_response_with_code;
 
 /// The status and error `type` of a LoRA failure.
@@ -65,9 +65,9 @@ pub struct LookupFailure {
 }
 
 /// Classify a failed executor lookup: a [`LoraError`] by its kind, an
-/// unknown model ([`ModelNotFound`]) a 404 `model_not_found`, a load the
-/// device could not hold a 503, and any other load failure a 500 with its
-/// message.
+/// unknown model ([`ModelNotFound`]) a 404 `model_not_found`, another kind of
+/// model ([`ModelNotLoadable`]) a 400 `model_not_loadable`, a load too large
+/// for the device a 503, and any other load failure a 500 with its message.
 pub fn classify_lookup(error: &anyhow::Error) -> LookupFailure {
     if let Some(lora) = error.downcast_ref::<LoraError>() {
         return lora_failure(lora);
@@ -78,6 +78,14 @@ pub fn classify_lookup(error: &anyhow::Error) -> LookupFailure {
             kind: "invalid_request_error",
             code: Some(MODEL_NOT_FOUND),
             message: missing.to_string(),
+        };
+    }
+    if let Some(refused) = error.downcast_ref::<ModelNotLoadable>() {
+        return LookupFailure {
+            status: StatusCode::BAD_REQUEST,
+            kind: "invalid_request_error",
+            code: Some(MODEL_NOT_LOADABLE),
+            message: refused.to_string(),
         };
     }
     let (status, code) = if is_out_of_memory(error) {
@@ -95,6 +103,8 @@ pub fn classify_lookup(error: &anyhow::Error) -> LookupFailure {
 
 /// The OpenAI `code` of an unknown model.
 const MODEL_NOT_FOUND: &str = "model_not_found";
+/// The OpenAI `code` of a model the text routes do not run.
+const MODEL_NOT_LOADABLE: &str = "model_not_loadable";
 
 /// The OpenAI error response of a failed executor lookup: see
 /// [`classify_lookup`].
@@ -250,9 +260,16 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_model_is_a_404_and_a_failed_load_a_500() {
         let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::create_dir(dir.path().join("broken")).expect("mkdir");
-        std::fs::write(dir.path().join("broken/config.json"), "{}").expect("write");
+        std::fs::create_dir(dir.path().join("no-weights")).expect("mkdir");
+        std::fs::write(dir.path().join("no-weights/config.json"), "{}").expect("write");
+        std::fs::write(dir.path().join("broken.gguf"), b"not a gguf").expect("write");
         let state = test_state(dir.path());
+
+        let no_weights = select_executor(&state, "no-weights", None)
+            .await
+            .err()
+            .expect("a directory with no weights is no model");
+        assert_eq!(no_weights.status(), StatusCode::NOT_FOUND);
 
         let missing = select_executor(&state, "absent", None)
             .await
@@ -263,10 +280,10 @@ mod tests {
         assert_eq!(body["error"]["message"], "Model not found: absent");
         assert_eq!(body["error"]["code"], "model_not_found");
 
-        let broken = select_executor(&state, "broken", None)
+        let broken = select_executor(&state, "broken.gguf", None)
             .await
             .err()
-            .expect("an empty config does not load");
+            .expect("a corrupt file does not load");
         assert_eq!(broken.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_of(*broken).await;
         assert_eq!(body["error"]["type"], "server_error");

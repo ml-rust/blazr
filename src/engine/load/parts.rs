@@ -46,7 +46,8 @@ where
     let source = loader::detect_model_source(path)?;
     let (model, config) = match (source.format, offload) {
         (ModelFormat::Gguf, _) => {
-            let parts = loader::load_gguf_with_tokenizer_as::<R, _>(path, device, dtype)?;
+            let parts =
+                loader::load_gguf_with_tokenizer_as::<R, _>(&source.weights_path, device, dtype)?;
             tracing::info!("Using GGUF-embedded tokenizer");
             return Ok(parts);
         }

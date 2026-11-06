@@ -2,7 +2,7 @@
 //!
 //! Contains the core logic for batched single-token decoding. Each row
 //! samples through its own sequence's sampler state and emits through
-//! [`emit_token`].
+//! `emit_token`.
 
 use anyhow::{anyhow, Result};
 

@@ -8,7 +8,7 @@
 //! - Jebadiah (`decision_entry`, then AINode's `answer_from_decision`): the
 //!   distribution to 6 digits first, and everything else from the rounded
 //!   values; the Score `confidence` chance-corrected.
-//! - Kev (`to_answers`): see [`super::kev_answer`].
+//! - Kev (`to_answers`): see [`mod@super::kev_answer`].
 //! - Clef (`systemone_answer`): see [`super::clef_answer`], which also
 //!   reads the record's field layout.
 

@@ -2,5 +2,5 @@
 heavy-model = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(arch_reference) | binary(batch_decode_per_row)'
+filter = 'binary(arch_reference) | binary(batch_decode_per_row) | binary(chat_stop_reference) | binary(qwen35_concurrent_chat) | binary(qwen35_generate) | binary(qwen35_lane_engine) | binary(qwen35_lane_prefill_interleave) | binary(qwen35_prefill_real_file) | binary(qwen35_vision_generate) | test(a_prefill_returns_the_logits_of_its_last_token_only)'
 test-group = 'heavy-model'

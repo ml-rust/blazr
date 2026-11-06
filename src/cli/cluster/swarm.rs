@@ -127,7 +127,8 @@ async fn run_leader(
     } = settings;
     let api_keys: Vec<String> = api_key.into_iter().collect();
     let device = crate::runtime::open_device(gpu_index)?;
-    let models = Scheduler::<ServerRuntime>::new(model_dir.clone(), device.clone());
+    let models = Scheduler::<ServerRuntime>::new(model_dir.clone(), device.clone())
+        .with_operator_model(Some(model_name.to_string()));
     let model_path = models.model_path(model_name).ok_or_else(|| {
         anyhow!(
             "model '{model_name}' has no path under {}: the workers load it from there",

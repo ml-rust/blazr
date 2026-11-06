@@ -11,7 +11,7 @@ use crate::config::BlazrConfig;
 use super::gguf_rope::rope_scaling_from_gguf;
 
 /// `general.architecture` values [`config_from_gguf_metadata`] accepts.
-const SUPPORTED_GGUF_ARCHS: &[&str] = &[
+pub(crate) const SUPPORTED_GGUF_ARCHS: &[&str] = &[
     "llama",
     "llama2",
     "llama3",

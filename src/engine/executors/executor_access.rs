@@ -157,9 +157,23 @@ where
     /// never emit an id past its vocabulary.
     pub(crate) fn eos_ids(&self) -> Vec<u32> {
         self.tokenizer()
-            .eos_token_id()
+            .eos_token_ids()
+            .iter()
+            .copied()
             .filter(|&id| usize::try_from(id).is_ok_and(|at| at < self.vocab_size()))
-            .into_iter()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::test_support::executor_with_eos;
+
+    /// Every id the tokenizer stops on inside the vocabulary ends generation, so
+    /// a stream, a batch and a disaggregated worker stop on the same ids.
+    #[test]
+    fn eos_ids_holds_every_stop_inside_the_vocabulary() {
+        let executor = executor_with_eos(&[7, 9, u32::MAX]).expect("executor starts");
+        assert_eq!(executor.eos_ids(), [7, 9]);
     }
 }

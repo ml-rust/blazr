@@ -13,7 +13,7 @@ use super::kev_model::{kev_base_of, kev_dir_of};
 use super::registry::{lock, variant_decision_config};
 use crate::config::DecisionConfig;
 use crate::engine::load::blocking::run_blocking;
-use crate::engine::model_dir::find_model_path;
+use crate::engine::model_dir::OperatorNames;
 use crate::engine::VariantInfo;
 use crate::loader::decision::{
     detect_decision_with, load_renderer, read_gguf_facts, DecisionSource, GgufFacts, LoadedRenderer,
@@ -69,16 +69,17 @@ pub(super) fn settings_of<'a>(
 /// decision model.
 pub(super) fn locate_decision(
     model_dir: &Path,
+    names: &OperatorNames,
     cfg: &DecisionConfig,
     variant: Option<&VariantInfo>,
     name: &str,
     headers: &Mutex<GgufHeaders>,
 ) -> Result<Option<(PathBuf, DecisionSource)>, DecisionFailure> {
-    let path = match kev_dir_of(model_dir, variant, name) {
+    let path = match kev_dir_of(model_dir, names, variant, name) {
         Some(dir) => dir,
         None => {
             let weights = variant.map_or(name, |v| v.base.as_str());
-            let Some(path) = find_model_path(model_dir, weights) else {
+            let Some(path) = names.resolve(model_dir, weights) else {
                 return Ok(None);
             };
             path
@@ -109,6 +110,7 @@ pub(super) fn locate_decision(
 /// template or a sidecar does not load, or the contract does not match.
 pub(super) fn renderer_of(
     model_dir: &Path,
+    names: &OperatorNames,
     cfg: &DecisionConfig,
     variant: Option<&VariantInfo>,
     name: &str,
@@ -116,7 +118,7 @@ pub(super) fn renderer_of(
     source: &DecisionSource,
 ) -> Result<LoadedRenderer, DecisionFailure> {
     let base = match source.family {
-        Family::Kev => kev_base_of(model_dir, cfg, variant, name, path),
+        Family::Kev => kev_base_of(model_dir, names, cfg, variant, name, path),
         Family::Jebadiah | Family::Decider | Family::Clef => None,
     };
     load_renderer(source, cfg, base.as_deref())
@@ -148,11 +150,12 @@ mod tests {
         let models = tempfile::tempdir().expect("temp dir");
         let headers = Mutex::new(GgufHeaders::new());
         let cfg = DecisionConfig::default();
-        let missing = locate_decision(models.path(), &cfg, None, "absent", &headers);
+        let names = OperatorNames::default();
+        let missing = locate_decision(models.path(), &names, &cfg, None, "absent", &headers);
         assert!(matches!(missing, Ok(None)), "{missing:?}");
 
         std::fs::create_dir(models.path().join("plain")).expect("mkdir");
-        let plain = locate_decision(models.path(), &cfg, None, "plain", &headers);
+        let plain = locate_decision(models.path(), &names, &cfg, None, "plain", &headers);
         assert!(
             matches!(plain, Err(DecisionFailure::NotDecisionModel(_))),
             "{plain:?}"

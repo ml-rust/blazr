@@ -61,6 +61,24 @@ pub fn detect_model_source<P: AsRef<Path>>(path: P) -> Result<ModelSource> {
     }
 }
 
+/// The file that identifies the model at `path`: its weights, or `path` for a
+/// directory with none of its own, such as a Kev directory. Symlinks resolve.
+fn weights_identity(path: &Path) -> Option<PathBuf> {
+    let weights = detect_model_source(path)
+        .map(|source| source.weights_path)
+        .unwrap_or_else(|_| path.to_path_buf());
+    std::fs::canonicalize(weights).ok()
+}
+
+/// Whether `a` and `b` name the same model on disk: a file and the directory
+/// that holds it as its one GGUF, or two paths through a symlink.
+pub fn same_weights(a: &Path, b: &Path) -> bool {
+    match (weights_identity(a), weights_identity(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Detect model files in a directory
 fn detect_model_in_directory(dir: &Path) -> Result<ModelSource> {
     // Look for SafeTensors first (preferred)
@@ -102,13 +120,30 @@ fn detect_model_in_directory(dir: &Path) -> Result<ModelSource> {
         }
     }
 
-    // Look for GGUF files
-    if let Some(gguf_file) = find_gguf_in_dir(dir) {
-        return Ok(ModelSource {
-            weights_path: gguf_file,
-            config_path: None,
-            format: ModelFormat::Gguf,
-        });
+    // One GGUF is the model. Several are separate models, and the caller names one.
+    let ggufs = gguf_models_in_dir(dir);
+    match ggufs.as_slice() {
+        [] => {}
+        [only] => {
+            return Ok(ModelSource {
+                weights_path: only.clone(),
+                config_path: None,
+                format: ModelFormat::Gguf,
+            });
+        }
+        many => {
+            let names: Vec<String> = many
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect();
+            return Err(anyhow!(
+                "Directory {} holds {} GGUF models: {}. Name one of those files.",
+                dir.display(),
+                many.len(),
+                names.join(", ")
+            ));
+        }
     }
 
     Err(anyhow!(
@@ -151,9 +186,23 @@ fn find_first_shard(dir: &Path) -> Option<PathBuf> {
         .next()
 }
 
-/// Find a GGUF file in a directory
-fn find_gguf_in_dir(dir: &Path) -> Option<PathBuf> {
-    find_first_in_dir(dir, "*.gguf")
+/// The model GGUF files directly in `dir`, in name order. An `mmproj*` file
+/// is a vision tower that `inference.mmproj` names, not a model of its own.
+pub fn gguf_models_in_dir(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "gguf"))
+        .filter(|p| {
+            !p.file_name()
+                .is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with("mmproj"))
+        })
+        .collect();
+    files.sort();
+    files
 }
 
 /// The first file in `dir` matching `pattern`, in name order.
@@ -184,6 +233,30 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn test_several_ggufs_in_a_directory_are_refused_by_name() {
+        let dir = make_tempdir("gguf_many");
+        fs::write(dir.join("a-q4.gguf"), b"dummy").unwrap();
+        fs::write(dir.join("b-q8.gguf"), b"dummy").unwrap();
+
+        let err = detect_model_source(&dir).unwrap_err().to_string();
+        assert!(err.contains("a-q4.gguf, b-q8.gguf"), "{err}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_a_vision_tower_is_not_a_second_model() {
+        let dir = make_tempdir("gguf_mmproj");
+        fs::write(dir.join("mmproj-f16.gguf"), b"dummy").unwrap();
+        fs::write(dir.join("model-q8.gguf"), b"dummy").unwrap();
+
+        let source = detect_model_source(&dir).unwrap();
+        assert_eq!(source.weights_path, dir.join("model-q8.gguf"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -298,6 +371,27 @@ mod tests {
         assert_eq!(source.format, ModelFormat::SafeTensors);
         assert_eq!(source.weights_path, first);
         assert!(source.config_path.is_some());
+    }
+
+    #[test]
+    fn same_weights_follows_a_one_gguf_directory_and_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = dir.path().join("one");
+        fs::create_dir(&one).unwrap();
+        let file = one.join("only.gguf");
+        fs::write(&file, b"dummy").unwrap();
+        let other = dir.path().join("other.gguf");
+        fs::write(&other, b"dummy").unwrap();
+
+        assert!(same_weights(&one, &file));
+        assert!(!same_weights(&file, &other));
+        assert!(!same_weights(&file, &dir.path().join("absent.gguf")));
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.gguf");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(same_weights(&link, &file));
+        }
     }
 
     #[test]

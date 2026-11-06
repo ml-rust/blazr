@@ -110,6 +110,10 @@ BLAZR_MODEL_DIR=/srv/blazr/models blazr serve --model <name> --host 127.0.0.1 --
 4. `<model-dir>/<name>.gguf`.
 5. `<model-dir>/<name>/model.safetensors`.
 
+A directory of several GGUF files names no model. Pass `<directory>/<file>`.
+
+A request's `model` takes steps 2 to 5 only. It reaches a path only by spelling `--model` exactly. A name with `..`, a root, or a leading `.` resolves to nothing, whether or not the target exists.
+
 The model directory comes from `BLAZR_MODEL_DIR`, then `model_dir` in `config.yaml`, then `./models`. The default is relative to the working directory of the process.
 
 With `--model`, `blazr serve` loads and warms the model before it binds the port. A load error stops startup.
@@ -386,6 +390,9 @@ Request logging is on by default through `server.request_logging`. Each request 
 | `blazr_prefix_cache_hits_total`     | counter   | Prefix cache hits                                        |
 | `blazr_prefix_cache_misses_total`   | counter   | Prefix cache misses                                      |
 | `blazr_vram_used_bytes`             | gauge     | GPU memory in use, CUDA builds only                      |
+| `blazr_gpu_free_list_bytes`         | gauge     | Freed buffers numr keeps for reuse, CUDA builds only     |
+| `blazr_gpu_pool_used_bytes`         | gauge     | Pool bytes handed out, the free list included, CUDA builds only |
+| `blazr_gpu_pool_reserved_bytes`     | gauge     | Pool bytes taken from the OS, CUDA builds only           |
 | `blazr_scheduler_loads_total`       | counter   | Model loads                                              |
 | `blazr_scheduler_evictions_total`   | counter   | Model evictions. A base evicted with its LoRA variants counts once. |
 | `blazr_lora_variant_builds_total`   | counter   | LoRA variants built over a loaded base: at registration, and again after an eviction or unload |
@@ -395,7 +402,7 @@ Request logging is on by default through `server.request_logging`. Each request 
 | `blazr_data_parallel_replicas`      | gauge     | Data-parallel replicas of the start model                |
 | `blazr_replica_active_requests`     | gauge     | Requests in flight on each replica. Label: `replica`.    |
 
-`blazr_token_budget_utilization_ratio` appears only when `server.max_inflight_tokens` is above `0`. `blazr_vram_used_bytes` updates on CUDA builds at each scrape while a model is loaded.
+`blazr_token_budget_utilization_ratio` appears only when `server.max_inflight_tokens` is above `0`. `blazr_vram_used_bytes` and the `blazr_gpu_*` gauges update on CUDA builds at each scrape, for the server's device.
 
 The `path` label holds the raw request path. Each distinct path adds a time series.
 

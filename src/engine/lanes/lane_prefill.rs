@@ -141,14 +141,15 @@ impl Qwen35LaneSession {
         let end = (pending.fed + chunk_size).min(total);
         let chunk = &pending.prompt_tokens[pending.fed..end];
         let input = exec.create_input_tensor(chunk)?;
-        let logits =
-            exec.qwen35_prefill_at(&input, pending.fed, &mut pending.kv, &mut pending.gdn)?;
-        pending.fed = end;
-
-        if pending.fed < total {
+        if end < total {
+            exec.qwen35_advance_at(&input, pending.fed, &mut pending.kv, &mut pending.gdn)?;
+            pending.fed = end;
             self.pending = Some(pending);
             return Ok(None);
         }
+        let logits =
+            exec.qwen35_prefill_at(&input, pending.fed, &mut pending.kv, &mut pending.gdn)?;
+        pending.fed = end;
 
         let PendingPrefill {
             prompt_tokens,
@@ -196,8 +197,7 @@ impl Qwen35LaneSession {
     ///
     /// `kv` and `gdn` are the scratch one-lane caches the prefill wrote and
     /// are dropped once their contents are copied into the lane.
-    /// `prefill_logits` is the last chunk's logits; the sampler reads their
-    /// last position.
+    /// `prefill_logits` is the logits of the last token, `[1, 1, vocab]`.
     fn install_prefilled(
         &mut self,
         exec: &Executor<CudaRuntime>,

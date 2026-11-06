@@ -95,7 +95,8 @@ async fn run_disagg_router(
     );
 
     let device = crate::runtime::open_device(settings.gpu_index)?;
-    let models = Scheduler::<ServerRuntime>::new(settings.model_dir.clone(), device.clone());
+    let models = Scheduler::<ServerRuntime>::new(settings.model_dir.clone(), device.clone())
+        .with_operator_model(Some(model.clone()));
     let path = models.model_path(&model).ok_or_else(|| {
         anyhow!(
             "model '{model}' not found as a path or under {}: the router reads its \
@@ -154,7 +155,8 @@ async fn worker_executor(
         .require_model(&format!("disagg {role}"))
         .map_err(anyhow::Error::msg)?;
     let device = crate::runtime::open_device(settings.gpu_index)?;
-    let loader = Scheduler::<ServerRuntime>::new(settings.model_dir.clone(), device);
+    let loader = Scheduler::<ServerRuntime>::new(settings.model_dir.clone(), device)
+        .with_operator_model(Some(model.clone()));
     let executor = loader.get_executor(&model).await?;
     check_disagg_model(&executor, role)?;
     tracing::info!(

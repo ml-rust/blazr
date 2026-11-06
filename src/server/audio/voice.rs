@@ -37,27 +37,20 @@ pub(super) fn resolve_voice(
         }
     });
 
-    // Accepts either a bundled catalog ID (`af_alloy`) or a direct path to a
-    // custom voice file (`.safetensors`, `.pt`, `.pth`). Path form is
-    // detected by the presence of a separator or a known extension; bare IDs
-    // fall through to the bundle's catalog.
-    let voice_is_path = voice_id.contains('/')
-        || voice_id.contains('\\')
-        || voice_id.ends_with(".safetensors")
-        || voice_id.ends_with(".pt")
-        || voice_id.ends_with(".pth");
+    // A request names a voice by id. The engine reads any path it gets, so a
+    // path from a client never reaches it.
+    if is_path_form(&voice_id) {
+        return Err(Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Voice '{voice_id}' is a path. Send a voice id, and place custom voice files \
+                 under --voice-dir."
+            ),
+            "invalid_request_error",
+        )));
+    }
 
-    if voice_is_path {
-        // External voice file: a missing one is a 400 here, before the
-        // engine loads it.
-        if let Err(err) = voxr::kokoro::VoiceResolver::new().resolve_path(&voice_id) {
-            return Err(Box::new(error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Voice path rejected: {err}"),
-                "invalid_request_error",
-            )));
-        }
-    } else if let Some(file) = state
+    if let Some(file) = state
         .voice_dir
         .as_deref()
         .filter(|_| bundle.voice(ZERO_SHOT_VOICE_ID).is_none())
@@ -83,8 +76,7 @@ pub(super) fn resolve_voice(
                 StatusCode::BAD_REQUEST,
                 &format!(
                     "Invalid voice '{}'. Available voices for model '{}': {}. \
-                     Custom voice files can also be referenced by absolute path \
-                     or placed under --voice-dir.",
+                     Place custom voice files under --voice-dir.",
                     voice_id,
                     model_name,
                     available.join(", ")
@@ -95,6 +87,15 @@ pub(super) fn resolve_voice(
     }
 
     Ok(voice_id)
+}
+
+/// True for what `voxr::kokoro::VoiceResolver` reads as a file path.
+fn is_path_form(id: &str) -> bool {
+    id.contains('/')
+        || id.contains('\\')
+        || id.ends_with(".safetensors")
+        || id.ends_with(".pt")
+        || id.ends_with(".pth")
 }
 
 /// The voice file `id` names in `dir`: `{id}.safetensors`, `.pt` or
@@ -109,6 +110,23 @@ fn voice_file_in(dir: &Path, id: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_voice_path_is_told_from_a_voice_id() {
+        for path in [
+            "/etc/passwd",
+            "../voices/a",
+            "a\\b",
+            "custom.pt",
+            "custom.pth",
+            "custom.safetensors",
+        ] {
+            assert!(is_path_form(path), "{path}");
+        }
+        for id in ["af_heart", "alloy", "zero-shot"] {
+            assert!(!is_path_form(id), "{id}");
+        }
+    }
 
     #[test]
     fn voice_file_in_prefers_safetensors_and_skips_missing_ids() {

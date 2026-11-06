@@ -1082,7 +1082,13 @@ A type with fewer than `--min-rows` answers is not fitted. Score pools listed an
 
 ### GET /v1/models
 
-Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A Kev model is listed once, with its `lora` object once it loaded. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family` (`jebadiah`, `decider`, `kev` or `clef`), `readout` (`label_token`, `pointer` or `joint_schema`), `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider, Kev) and `max_prompt_tokens` (Jebadiah; Kev's row limit; Clef's record limit, `16384`), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. Kev adds `base_path`, `adapter_rank` and `temperature`. Clef adds `head_width`, `head_hidden_size` and `head_dtype` (`f32`). While the model's decision worker runs, `prefix_cache` reports its [prefix-state cache](#prefix-state-cache): `enabled`, `capacity_mb`, `bytes`, `entries`, `hits`, `misses` and `evictions`. When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora).
+Lists text models, registered LoRA variants, and resident vision, ASR, and TTS models. A text model wins a name collision. A Kev model is listed once, with its `lora` object once it loaded. A decision model's entry adds a `decision` object, read from its sidecars and GGUF header without loading weights: `family` (`jebadiah`, `decider`, `kev` or `clef`), `readout` (`label_token`, `pointer` or `joint_schema`), `detected_by`, `layout`, `max_options`, `max_state_tokens` (decider, Kev) and `max_prompt_tokens` (Jebadiah; Kev's row limit; Clef's record limit, `16384`), `context_length`, `prompt_contract`, `calibration`, `license`, and `base_model`. Kev adds `base_path`, `adapter_rank` and `temperature`. Clef adds `head_width`, `head_hidden_size` and `head_dtype` (`f32`). While the model's decision worker runs, `prefix_cache` reports its [prefix-state cache](#prefix-state-cache): `enabled`, `capacity_mb`, `bytes`, `entries`, `hits`, `misses` and `evictions`. When `blazr_calibration.json` sets a type, `calibration` adds `fitted_at` and `sources`, the file of each type's temperature. A LoRA variant's entry has the id `<model>:<name>` and adds a `lora` object, the entry shape of [GET /v1/lora](#get-v1lora). A resident vision, ASR, or TTS entry adds `kind` (`vision`, `asr` or `tts`).
+
+An id can hold a slash: `<directory>/<file>`.
+
+The list leaves out each file a load refuses: a speech or vision checkpoint, a flat `mmproj*` file, a refused architecture, a GGUF file with no vocabulary, and a checkpoint with no tokenizer. A file with tensor or tokenizer bytes that do not read stays listed, and its request returns `500` with no eviction. A start model outside the model directory is listed under its file name, or under the `--model` value when an entry of the directory holds that file name.
+
+A request's `model` resolves inside the model directory: `<name>`, `<name>.safetensors`, `<name>.gguf`, then `<name>/model.safetensors`. A name with `..`, a root, or a leading `.` returns `404`, whether or not the target exists. Only the exact `--model` value can be a path. A name for the file of a loaded model reaches that model and its batching scheduler. A name for a speech or vision checkpoint, or for a flat `mmproj*` file, returns `400` with code `model_not_loadable`. None of these refusals evict a loaded model.
 
 ```bash
 curl http://localhost:8080/v1/models
@@ -1104,7 +1110,7 @@ curl http://localhost:8080/v1/models
 
 ### GET /v1/models/{model_id}
 
-Returns one model in the same entry shape. Returns `404` when the model is not listed.
+Returns one model in the same entry shape. Returns `404` when the model is not listed. An id can hold a slash: `<directory>/<file>`. It resolves by the rule in [GET /v1/models](#get-v1models).
 
 ## Inference slots
 
@@ -1159,7 +1165,7 @@ Registers the adapter as the variant `<model>:<name>` and builds it. `model` loa
 | ------- | ------ | -------------------------------------------------------------------------------- |
 | `model` | string | Base model name.                                                                 |
 | `name`  | string | Adapter name: 1 to 64 letters, digits, `-`, `_` or `.`. Use it as `lora_adapter`. |
-| `path`  | string | Adapter directory, or an `adapter_model.safetensors` file.                       |
+| `path`  | string | Adapter directory, or an `adapter_model.safetensors` file, inside the model directory: relative to it, or absolute under it. Any other path returns `400`. `--lora` at startup takes any path. |
 
 The adapter needs `adapter_config.json` beside its weights, with `r` and `lora_alpha` set. `use_rslora`, `rank_pattern` and `alpha_pattern` apply per module. The load fails on any of these:
 
@@ -1426,9 +1432,9 @@ curl -X DELETE http://localhost:8080/api/delete \
 | Field         | Type   | Meaning                                       |
 | ------------- | ------ | --------------------------------------------- |
 | `source`      | string | Model name to copy.                           |
-| `destination` | string | Name for the copy. Created beside the source. |
+| `destination` | string | One plain name for the copy, with no directory. Created beside the source. A copy of a file keeps the source extension. |
 
-Returns `200` with no body. Returns `409` when the destination exists. Returns `404` when the source is not found.
+Returns `200` with no body. Returns `400` when the destination is anything but one plain name. Returns `409` when the destination exists. Returns `404` when the source is not found.
 
 ```bash
 curl http://localhost:8080/api/copy \

@@ -92,7 +92,7 @@ pub fn resolve_kev_base(
     hubs: &[PathBuf],
 ) -> Result<KevBase, String> {
     if let Some(spec) = configured {
-        return find_model_path(model_dir, spec)
+        return find_model_path(model_dir, spec, Some(spec))
             .map(|path| KevBase {
                 name: spec.to_string(),
                 path,

@@ -18,7 +18,7 @@ use super::kev_base::{resolve_kev_base, KevBase};
 use crate::config::DecisionConfig;
 use crate::engine::load::blocking::run_blocking;
 use crate::engine::lora::spec::check_name;
-use crate::engine::model_dir::find_model_path;
+use crate::engine::model_dir::OperatorNames;
 use crate::engine::{AdapterSpec, Executor, LoraError, Scheduler, VariantInfo};
 use crate::loader::decision::is_kev_dir;
 use crate::loader::hf_cache::hub_caches;
@@ -44,12 +44,13 @@ fn adapter_dir(path: &Path) -> Option<PathBuf> {
 /// blocking thread.
 pub(super) fn kev_dir_of(
     model_dir: &Path,
+    names: &OperatorNames,
     variant: Option<&VariantInfo>,
     name: &str,
 ) -> Option<PathBuf> {
     match variant {
         Some(v) => adapter_dir(&v.path).filter(|d| is_kev_dir(d)),
-        None => find_model_path(model_dir, name).filter(|p| is_kev_dir(p)),
+        None => names.resolve(model_dir, name).filter(|p| is_kev_dir(p)),
     }
 }
 
@@ -59,13 +60,14 @@ pub(super) fn kev_dir_of(
 /// runs it on a blocking thread.
 pub(super) fn kev_base_of(
     model_dir: &Path,
+    names: &OperatorNames,
     cfg: &DecisionConfig,
     variant: Option<&VariantInfo>,
     name: &str,
     kev_dir: &Path,
 ) -> Option<PathBuf> {
     match variant {
-        Some(v) => find_model_path(model_dir, &v.base),
+        Some(v) => names.resolve(model_dir, &v.base),
         None => resolve_kev_base(kev_dir, cfg.base_for(name), model_dir, &hub_caches())
             .ok()
             .map(|b| b.path),
@@ -82,10 +84,11 @@ pub(super) fn kev_base_of(
 /// As [`resolve_kev_base`].
 fn locate_kev(
     model_dir: &Path,
+    names: &OperatorNames,
     name: &str,
     configured: Option<&str>,
 ) -> Result<Option<(PathBuf, KevBase)>, String> {
-    let Some(dir) = find_model_path(model_dir, name).filter(|p| is_kev_dir(p)) else {
+    let Some(dir) = names.resolve(model_dir, name).filter(|p| is_kev_dir(p)) else {
         return Ok(None);
     };
     resolve_kev_base(&dir, configured, model_dir, &hub_caches()).map(|base| Some((dir, base)))
@@ -110,7 +113,13 @@ where
     /// variant when it is a Kev directory, else `name`'s own path when it
     /// is one. `None` for any other model.
     pub(crate) fn kev_dir(&self, name: &str) -> Option<PathBuf> {
-        kev_dir_of(self.model_dir(), self.variant(name).as_ref(), name)
+        let variant = self.variant(name);
+        kev_dir_of(
+            self.model_dir(),
+            &self.operator_names,
+            variant.as_ref(),
+            name,
+        )
     }
 
     /// The base checkpoint the Kev model `name` at `kev_dir` runs on: its
@@ -118,8 +127,14 @@ where
     /// when it resolves to none.
     pub(crate) fn kev_base_path(&self, name: &str, kev_dir: &Path) -> Option<PathBuf> {
         let variant = self.variant(name);
-        let cfg = &self.decision_config;
-        kev_base_of(self.model_dir(), cfg, variant.as_ref(), name, kev_dir)
+        kev_base_of(
+            self.model_dir(),
+            &self.operator_names,
+            &self.decision_config,
+            variant.as_ref(),
+            name,
+            kev_dir,
+        )
     }
 
     /// Build the Kev model `name` over its base, loading the base first
@@ -136,15 +151,19 @@ where
         let model_dir = self.model_dir().to_path_buf();
         let configured = self.decision_config.base_for(name).map(str::to_owned);
         let target = name.to_string();
-        let found = run_blocking(move || locate_kev(&model_dir, &target, configured.as_deref()))
-            .await
-            .map_err(|e| {
-                LoraError::BaseLoad(format!("Kev model '{name}': the base lookup stopped: {e}"))
-            })?
-            .map_err(|e| LoraError::ModelNotFound(format!("Kev model '{name}': {e}")))?;
+        let names = self.operator_names.clone();
+        let found =
+            run_blocking(move || locate_kev(&model_dir, &names, &target, configured.as_deref()))
+                .await
+                .map_err(|e| {
+                    LoraError::BaseLoad(format!("Kev model '{name}': the base lookup stopped: {e}"))
+                })?
+                .map_err(|e| LoraError::ModelNotFound(format!("Kev model '{name}': {e}")))?;
         let Some((dir, base)) = found else {
             return Ok(None);
         };
+        // The adapter's own files name this base, and its name can be a path.
+        self.operator_names.add_kev_base(&base.name);
         let adapter = dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -182,14 +201,19 @@ mod tests {
     fn locating_reads_only_kev_directories_and_names_a_missing_base() {
         let models = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir(models.path().join("plain")).expect("mkdir");
-        let plain = locate_kev(models.path(), "plain", None).expect("no Kev directory");
+        let none = OperatorNames::default();
+        let plain = locate_kev(models.path(), &none, "plain", None).expect("no Kev directory");
         assert_eq!(plain, None);
-        let absent = locate_kev(models.path(), "absent", None).expect("no model");
+        let absent = locate_kev(models.path(), &none, "absent", None).expect("no model");
         assert_eq!(absent, None);
 
         let kev = kev_dir("Nobody/No-Such-Base-For-Blazr-Tests");
-        let e = locate_kev(models.path(), &kev.path().display().to_string(), None)
-            .expect_err("no base");
+        let spelled = kev.path().display().to_string();
+        let request = locate_kev(models.path(), &none, &spelled, None).expect("no such entry");
+        assert_eq!(request, None, "a request names no path");
+        let mut operator = OperatorNames::default();
+        operator.set_start(Some(spelled.clone()));
+        let e = locate_kev(models.path(), &operator, &spelled, None).expect_err("no base");
         assert!(e.contains("--decision-base"), "{e}");
     }
 

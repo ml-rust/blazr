@@ -11,7 +11,7 @@ use crate::config::torch_dtype;
 const DTYPE_KEYS: [&str; 2] = ["torch_dtype", "dtype"];
 
 /// The dtype a model's `config.json` names. `None` when the file, every key
-/// or a known value is missing. See [`torch_dtype_of`].
+/// or a known value is missing. See `torch_dtype_of`.
 pub fn model_torch_dtype(dir: &Path) -> Option<DType> {
     let content = std::fs::read_to_string(dir.join("config.json")).ok()?;
     torch_dtype_of(&content)

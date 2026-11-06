@@ -166,6 +166,7 @@ async fn calibrate(args: CalibrateArgs) -> Result<()> {
         .with_num_ctx(resolve::resolve_num_ctx(None, &file))
         .with_inference_overlay(file.inference.clone())
         .with_dtype(resolve::resolve_dtype(None, &file))
+        .with_operator_model(Some(args.model.clone()))
         .with_decision(cfg.clone());
     let source = decision_source(&scheduler, &args.model, &cfg)?;
     if source.family == Family::Clef {

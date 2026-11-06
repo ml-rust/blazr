@@ -41,7 +41,7 @@ pub struct StreamCompletionChunk {
 /// The `object` of a completions stream chunk.
 const COMPLETION_CHUNK_OBJECT: &str = "text_completion.chunk";
 
-/// The one-choice case of [`create_completion_choices_stream`].
+/// The one-choice case of `create_completion_choices_stream`.
 pub fn create_completion_stream(
     id: String,
     model: String,

@@ -39,7 +39,7 @@ The sweep runs its requests one after another through a single executor. The swe
 | `blazr_queue_depth`                 | gauge     | Requests waiting for a batch slot or an HTTP slot. Rising values mean requests wait for capacity. |
 | `blazr_slo_violations_total`        | counter   | Samples over a `server.slo` threshold. Labels `metric` and `percentile`. |
 
-`blazr_token_budget_utilization_ratio` appears only when `server.max_inflight_tokens` is above `0`. `blazr_kv_cache_utilization_ratio` covers the batched scheduler only. `blazr_vram_used_bytes` updates on CUDA builds at each scrape while a model is loaded.
+`blazr_token_budget_utilization_ratio` appears only when `server.max_inflight_tokens` is above `0`. `blazr_kv_cache_utilization_ratio` covers the batched scheduler only. `blazr_vram_used_bytes` updates on CUDA builds at each scrape, for the server's device.
 
 ## How to read the knob tables
 
@@ -189,7 +189,7 @@ A PEFT LoRA adapter applies at load time as a variant of a loaded `qwen35` base 
 | One-shot decode    | flag `--lora <dir>[=<name>]` (`run`, `generate`, once)                             | Decodes with the variant in place of the base.                                                                                                |
 
 - Eviction and `keep_alive` drop a variant like any loaded model. A registered variant builds again from its base on its next request. Dropping a base drops its variants first. Only base models count against the loaded-model limit.
-- A variant runs one sequence at a time, as any model other than the start model does. It gets no batching engine.
+- A variant runs one sequence at a time. So does any other model, and a start model that was evicted and loaded again. It gets no batching engine.
 - With `inference.data_parallel` above `1`, the start model takes no adapter: `serve` refuses `--lora`, and `POST /v1/lora` returns `400`.
 - A VoxCPM2 TTS bundle's `adapters/<one>.safetensors` is a separate path: the adapter folds into that bundle at load. See `--tts-model`.
 

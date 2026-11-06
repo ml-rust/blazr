@@ -46,7 +46,7 @@ Tests that name a checkpoint through an environment variable skip when that vari
 
 Any other model type that has an attention config loads through the Llama path. That route is untested.
 
-The `Tested` SafeTensors cells with a `BLAZR_TEST_*_MODEL` variable run `tests/arch_reference.rs`. They load SafeTensors on the CPU in F32. Each test decodes 32 greedy tokens and compares the first 8 ids with `transformers`. All 32 ids match on every listed checkpoint. Random-weight checkpoints also compare the last prompt position's logits. AWQ, GPTQ and GGUF files of these architectures are untested.
+The `Tested` SafeTensors cells with a `BLAZR_TEST_*_MODEL` variable run `tests/arch_reference.rs`. They load SafeTensors on the CPU in F32. Each test decodes 32 greedy tokens and compares all 32 ids with `transformers`. Random-weight checkpoints also compare the last prompt position's logits. AWQ, GPTQ and GGUF files of these architectures are untested.
 
 Load paths:
 

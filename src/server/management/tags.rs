@@ -16,7 +16,7 @@ use crate::server::handlers::{AppState, AuxiliaryModel};
 
 /// GET /api/tags — List local models with metadata
 pub async fn list_tags(State(state): State<Arc<AppState>>) -> Response {
-    match state.scheduler.list_available() {
+    match state.scheduler.list_served() {
         Ok(models) => {
             let mut model_list: Vec<ModelTag> = models.iter().map(text_model_tag).collect();
             let auxiliary = state.auxiliary_models().await;

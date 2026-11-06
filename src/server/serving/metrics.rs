@@ -91,6 +91,18 @@ pub fn install_recorder() -> Result<PrometheusHandle, Box<dyn std::error::Error>
     );
     metrics::describe_gauge!(names::VRAM_USED_BYTES, "GPU VRAM currently in use (bytes)");
     metrics::describe_gauge!(
+        names::GPU_FREE_LIST_BYTES,
+        "Freed buffers numr's free list keeps on the device (bytes)"
+    );
+    metrics::describe_gauge!(
+        names::GPU_POOL_USED_BYTES,
+        "CUDA pool bytes handed out, the free list included"
+    );
+    metrics::describe_gauge!(
+        names::GPU_POOL_RESERVED_BYTES,
+        "CUDA pool bytes taken from the OS"
+    );
+    metrics::describe_gauge!(
         names::KV_CACHE_UTILIZATION,
         "Ratio of allocated KV cache blocks to total pool (0.0-1.0)"
     );
@@ -235,14 +247,7 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> Response {
 
     // Update VRAM usage (CUDA only)
     #[cfg(feature = "cuda")]
-    {
-        // Get device from first loaded model if available
-        let loaded = state.scheduler.list_loaded().await;
-        if !loaded.is_empty() {
-            let device = boostr::CudaDevice::new(0);
-            update_vram_used(&device);
-        }
-    }
+    update_vram_used(state.scheduler.device());
 
     let output = state.metrics_handle.render();
     (

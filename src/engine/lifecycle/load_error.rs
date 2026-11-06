@@ -1,14 +1,34 @@
 //! Why an executor lookup failed: [`ModelNotFound`] when the name resolves
-//! to no model, and [`is_out_of_memory`] for a load the device could not
-//! hold. The server maps each to its own HTTP status.
+//! to no model, [`ModelNotLoadable`] for a model the text routes do not run,
+//! and [`is_out_of_memory`] for a load too large for the device. The server
+//! maps each to its own HTTP status.
 
 use std::error::Error;
 use std::fmt;
 
 use boostr::NumrError;
 
-/// No model has the name: it is neither a path nor an entry of the model
-/// directory. Carried through `anyhow`, so a caller can `downcast_ref` it.
+/// The name resolves to a model the text routes do not run. Carried through
+/// `anyhow`, so a caller can `downcast_ref` it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelNotLoadable {
+    /// The requested model name.
+    pub name: String,
+    /// What the model is, and what the caller does instead.
+    pub reason: String,
+}
+
+impl fmt::Display for ModelNotLoadable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Model '{}' does not load: {}", self.name, self.reason)
+    }
+}
+
+impl Error for ModelNotLoadable {}
+
+/// No model has the name: it is no entry of the model directory and no path
+/// an operator stated. Carried through `anyhow`, so a caller can
+/// `downcast_ref` it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelNotFound {
     /// The requested model name.

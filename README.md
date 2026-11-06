@@ -2,10 +2,10 @@
 
 # blazr
 
-<h3>Inference server for LLMs, speech, and embeddings.</h3>
+<h3>OpenAI-compatible inference server in Rust for LLMs, speech, and embeddings.</h3>
 
 <p>
-Serves OpenAI-compatible routes for SafeTensors, AWQ, GPTQ, and GGUF models.
+Runs and serves SafeTensors, AWQ, GPTQ, and GGUF models. Also a Rust library.
 </p>
 
 <p>
@@ -50,7 +50,14 @@ Serves OpenAI-compatible routes for SafeTensors, AWQ, GPTQ, and GGUF models.
 
 </div>
 
-blazr is one binary that runs text, speech, and embedding models. It serves them over HTTP or the command line. Model architectures and quantization kernels come from [boostr](https://github.com/ml-rust/boostr). See [docs/architecture.md](docs/architecture.md).
+blazr is an LLM inference server in Rust. It runs text, speech, and embedding models from one binary. You use it over HTTP with OpenAI, Anthropic Messages, and Ollama routes, or from the command line. It is also a Rust library, so an app can embed the engine. See [Use as a library](#use-as-a-library).
+
+- Language: the server, scheduler, and sampling are Rust. Python is not needed to build or run it.
+- Built on: [boostr](https://github.com/ml-rust/boostr) supplies model architectures and quantization kernels. [numr](https://github.com/ml-rust/numr) supplies tensors and the CPU, CUDA, and WebGPU backends.
+- Runs models trained with [oxidizr](https://github.com/ml-rust/oxidizr) and files made by [compressr](https://github.com/ml-rust/compressr).
+- Not supported yet: DeepSeek-V2/V3 (refused at load), InternLM2 (load fails), and Mamba2 and Mamba3 checkpoints (in code, untested). CI runs no GPU test.
+
+See [docs/architecture.md](docs/architecture.md).
 
 ## What works
 
@@ -292,6 +299,43 @@ The commands write reports to standard output and logs to standard error.
 | 3 | `speak --model` names a model blazr does not run. The caller runs that model elsewhere |
 
 A command fetches a missing model from the Hugging Face Hub on first use. [docs/models.md](docs/models.md#speech) holds the model list, search path, and device rules.
+
+## Use as a library
+
+The engine builds without the CLI and the HTTP stack:
+
+```toml
+[dependencies]
+blazr = { version = "0.7", default-features = false, features = ["f16"] }
+```
+
+`Scheduler` loads models from a directory on first use. `Executor::generate` streams tokens and stops when you drop the stream. This example needs `anyhow`, `futures`, and an async runtime such as `tokio`.
+
+```rust
+use std::pin::pin;
+
+use blazr::boostr::{CpuDevice, CpuRuntime};
+use blazr::tokenizer::Tokenize;
+use blazr::{GenerationConfig, Scheduler};
+use futures::StreamExt;
+
+async fn complete(on_token: impl Fn(&str)) -> anyhow::Result<()> {
+    let scheduler = Scheduler::<CpuRuntime>::new("./models".into(), CpuDevice::new());
+    let executor = scheduler.get_executor("llama-3.2-1b").await?;
+    let prompt = executor.tokenizer().encode("The capital of France is");
+    let config = GenerationConfig {
+        max_tokens: 64,
+        ..Default::default()
+    };
+    let mut tokens = pin!(executor.generate(&prompt, &config));
+    while let Some(token) = tokens.next().await {
+        on_token(&token?.text);
+    }
+    Ok(())
+}
+```
+
+[docs.rs/blazr](https://docs.rs/blazr) documents the API.
 
 ## C library
 

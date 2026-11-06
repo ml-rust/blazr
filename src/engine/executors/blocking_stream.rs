@@ -224,8 +224,9 @@ mod tests {
         Ok(())
     }
 
-    /// The reader takes one token and leaves. The decode stops at its next
-    /// step, the thread exits, and the KV lease returns its blocks.
+    /// The reader takes one token and leaves. The decode stops by its next
+    /// step, the thread exits, and the KV lease returns its blocks. A thread
+    /// that finds the receiver gone before step 1 stops there.
     #[tokio::test]
     async fn a_dropped_receiver_stops_the_decode_and_frees_its_blocks() -> Result<()> {
         let exec = executor(true)?;
@@ -257,11 +258,8 @@ mod tests {
         left.fetch_add(1, Ordering::SeqCst);
         tokio::time::timeout(WAIT_LIMIT, decode).await??;
 
-        assert_eq!(
-            steps.load(Ordering::SeqCst),
-            2,
-            "the decode ran past the drop"
-        );
+        let ran = steps.load(Ordering::SeqCst);
+        assert!(ran <= 2, "the decode ran past the drop: {ran} steps");
         assert_eq!(free_blocks(&exec)?, POOL.blocks);
         Ok(())
     }

@@ -399,6 +399,7 @@ dependencies = [
  "glob",
  "half",
  "hf-hub",
+ "http-body-util",
  "hyper-util",
  "indicatif",
  "metrics",

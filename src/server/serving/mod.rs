@@ -1,6 +1,7 @@
 //! Server runtime: startup, TLS, concurrency, config reload, routing, metrics.
 
 pub(super) mod auth;
+pub mod body_limit;
 pub(super) mod concurrency;
 pub(super) mod config_watch;
 pub(super) mod lora;

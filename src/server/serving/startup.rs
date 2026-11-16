@@ -11,13 +11,13 @@ use axum::response::Response;
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{preflight_request_headers, AllowOrigin, Any, CorsLayer};
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::{FileConfig, LiveConfig, ReasoningFormat, ServerConfig};
 use crate::engine::Scheduler;
 
 use super::auth::{auth_middleware, inject_api_keys};
+use super::body_limit::with_body_limit;
 use super::concurrency::{limit_concurrency, ConcurrencyLimit};
 use super::config_watch;
 use super::metrics;
@@ -223,8 +223,8 @@ pub async fn start_with_batch(
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(config.request_timeout_secs),
-        ))
-        .layer(RequestBodyLimitLayer::new(config.max_body_size))
+        ));
+    let app = with_body_limit(app, config.max_body_size)
         .layer(middleware::from_fn_with_state(
             ConcurrencyLimit::new(config.max_concurrent_requests),
             limit_concurrency,

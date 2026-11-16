@@ -53,6 +53,7 @@ server = [
   "tokio/full",
   "dep:axum",
   "dep:tower-http",
+  "dep:http-body-util",
   "dep:hyper-util",
   "dep:rustls",
   "dep:tokio-rustls",
@@ -132,6 +133,9 @@ tower-http = { version = "0.7", optional = true, features = [
   "timeout",
   "limit",
 ] }
+# `LengthLimitError`: a body cut at `server.max_body_size`, found in an
+# extractor's error chain.
+http-body-util = { version = "0.1", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

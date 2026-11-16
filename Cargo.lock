@@ -415,6 +415,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "splintr",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-rustls",

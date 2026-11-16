@@ -59,6 +59,7 @@ server = [
   "dep:reqwest",
   "dep:metrics-exporter-prometheus",
   "dep:tokio-stream",
+  "dep:subtle",
 ]
 
 # Speech: text-to-speech synthesis and audio transcription endpoints, the
@@ -233,6 +234,8 @@ tokio-rustls = { version = "0.26", default-features = false, optional = true, fe
   "tls12",
 ] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
+# Constant-time API key comparison (`server`).
+subtle = { version = "2.6", default-features = false, optional = true }
 
 # Browser builds: the engine's sampling and request ids read randomness from
 # the JavaScript host.

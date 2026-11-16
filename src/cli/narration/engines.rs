@@ -209,7 +209,7 @@ pub fn load_engines(
                 }
             };
             let source = voxcpm2_source_at(&path).map_err(|e| load_failed("VoxCPM2", e))?;
-            let synth = VoxCpm2SynthOptions::default();
+            let synth = speak_synth_options();
             engines.voxcpm = Some(match at {
                 Placement::Cpu => LoadedVoxcpm::Cpu(
                     source
@@ -226,6 +226,19 @@ pub fn load_engines(
         }
     }
     Ok(engines)
+}
+
+/// VoxCPM2 options for a speak run.
+///
+/// A speak run generates its parts one after another, so nothing joins a
+/// batch mid-flight. A persistent batch would cap every part at a fixed
+/// slot size and refuse a long part. A batch torn down after each
+/// generation sizes its caches to the part instead.
+fn speak_synth_options() -> VoxCpm2SynthOptions {
+    VoxCpm2SynthOptions {
+        continuous_batching: false,
+        ..VoxCpm2SynthOptions::default()
+    }
 }
 
 /// What a speak run speaks: the script, its options, the config and where
@@ -282,5 +295,18 @@ pub fn run_speak<'a, H: Hearing>(
             let mut runs = runs.with_voxcpm(VoxcpmSpeech::new(e));
             speak_script(script, opts, tts, target, &mut runs)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speak_sizes_each_generation_to_its_part() {
+        let synth = speak_synth_options();
+        assert!(!synth.continuous_batching);
+        let default = VoxCpm2SynthOptions::default();
+        assert_eq!(synth.max_batch, default.max_batch);
     }
 }

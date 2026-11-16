@@ -1,6 +1,6 @@
 //! `/v1/audio/transcriptions` and `/v1/audio/translations` handlers, sharing
-//! one pipeline: decode, run Whisper per 30s chunk, render the requested
-//! format.
+//! one pipeline: read the form, decode, read the audio through the
+//! long-form path `blazr transcribe` runs, render the requested format.
 //!
 //! `/v1/audio/transcriptions` accepts multipart `timestamp_granularities[]`
 //! (`word`, `segment`, or both), valid only with `response_format=verbose_json`
@@ -10,93 +10,65 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Multipart, State},
+    extract::{Extension, Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 
 use crate::engine::WorkHold;
-use crate::server::audio_decode::{decode_to_whisper_input, extension_hint};
+use crate::server::audio_decode::decode_to_whisper_input;
+use crate::server::audio_transcribe::{
+    transcribe_long, word_separator, LongTranscript, WhisperReader, WhisperRequest,
+    WHISPER_SAMPLE_RATE,
+};
+use crate::server::body_limit::BodyLimit;
 use crate::server::gen_types::error_response;
 use crate::server::handlers::AppState;
 
+use super::transcription_form::{read_form, TranscriptionForm};
 use super::types::{
     render_srt, render_vtt, validate_timestamp_granularities, TranscriptionResponse,
     TranscriptionSegment, TranscriptionWord, VerboseTranscriptionResponse,
     DEFAULT_TRANSCRIPTION_FORMAT, VALID_TRANSCRIPTION_FORMATS,
 };
 
+/// Largest audio file, matching OpenAI.
+const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
+
 /// Shared pipeline for `/v1/audio/transcriptions` and `/v1/audio/translations`.
-/// `force_translate=true` overrides the `task` field.
+/// `force_translate=true` overrides the `task` field. `limit` is the server's
+/// body limit, named when the form is over it.
 async fn run_audio_pipeline(
     state: Arc<AppState>,
+    limit: Option<BodyLimit>,
     mut multipart: Multipart,
     force_translate: bool,
 ) -> Response {
-    let mut file_bytes: Option<Vec<u8>> = None;
-    let mut file_ext: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut language: Option<String> = None;
-    let mut response_format: Option<String> = None;
-    let mut temperature: Option<f32> = None;
-    let mut translate = force_translate;
-    // `timestamp_granularities[]` arrives as one multipart field per value.
-    let mut timestamp_granularities: Vec<String> = Vec::new();
+    let TranscriptionForm {
+        file: file_bytes,
+        file_ext,
+        model,
+        language,
+        response_format,
+        temperature,
+        translate,
+        timestamp_granularities,
+    } = match read_form(&mut multipart, force_translate).await {
+        Ok(form) => form,
+        Err(e) => return e.into_response(limit),
+    };
 
-    // Extract multipart fields
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = match field.name() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-
-        match name.as_str() {
-            "file" => {
-                if let Some(fname) = field.file_name() {
-                    file_ext = extension_hint(fname).map(|s| s.to_string());
-                }
-                file_bytes = field.bytes().await.ok().map(|b| b.to_vec());
-            }
-            "model" => {
-                model = field.text().await.ok();
-            }
-            "language" => {
-                language = field.text().await.ok().filter(|s| !s.is_empty());
-            }
-            "response_format" => {
-                response_format = field.text().await.ok().filter(|s| !s.is_empty());
-            }
-            "temperature" => {
-                temperature = field.text().await.ok().and_then(|s| s.parse::<f32>().ok());
-            }
-            "timestamp_granularities[]" if !force_translate => {
-                if let Some(v) = field.text().await.ok().filter(|s| !s.is_empty()) {
-                    timestamp_granularities.push(v);
-                }
-            }
-            // Some clients pass `task=translate` on the transcriptions
-            // endpoint — honor it when the route itself isn't forcing it.
-            "task" if !force_translate => {
-                translate = field
-                    .text()
-                    .await
-                    .ok()
-                    .is_some_and(|s| s.eq_ignore_ascii_case("translate"));
-            }
-            _ => {}
-        }
-    }
-
-    // Validate file size (25MB limit, matching OpenAI)
-    const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
     if file_bytes
         .as_ref()
         .is_some_and(|b| b.len() > MAX_AUDIO_BYTES)
     {
         return error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "Audio file exceeds 25MB limit",
+            &format!(
+                "Audio file exceeds the {MAX_AUDIO_BYTES}-byte (25 MB) limit. Send a shorter \
+                 or more compressed file."
+            ),
             "invalid_request_error",
         );
     }
@@ -208,63 +180,71 @@ async fn run_audio_pipeline(
         }
     };
 
-    // Run the Whisper pipeline per 30-second chunk, concatenating segments,
-    // off the reactor: the model runs on a blocking worker thread.
-    use crate::server::audio_transcribe::{transcribe_chunks, ChunkTranscript};
+    // Read the audio through the long-form path off the reactor: the model
+    // runs on a blocking worker thread.
     let sample_count = samples.len();
     let language_for_pipeline = language.clone();
     let device = state.scheduler.device().clone();
-    let want_words = granularities.want_words;
     // The blocking thread holds the request's slot until the model ends.
     let hold = WorkHold::current();
-    let chunks: Vec<ChunkTranscript> = match tokio::task::spawn_blocking(move || {
-        let _hold = hold;
-        transcribe_chunks(
-            bundle.as_ref(),
-            &device,
-            &samples,
-            language_for_pipeline.as_deref(),
-            translate,
-            bundle.config.max_target_positions,
-            want_words,
-        )
-    })
-    .await
-    {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => {
+    let read: anyhow::Result<(LongTranscript, Option<&'static str>)> =
+        match tokio::task::spawn_blocking(move || {
+            let _hold = hold;
+            let language = language_for_pipeline.as_deref();
+            let request = WhisperRequest {
+                language,
+                translate,
+                max_new_tokens: bundle.config.max_target_positions,
+            };
+            let mut reader = WhisperReader::new(bundle.as_ref(), &device, request);
+            let long = transcribe_long(&samples, &mut reader, language)?;
+            Ok((long, reader.language()))
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Transcription task join error: {e}"),
+                    "server_error",
+                );
+            }
+        };
+    let (long, decoded) = match read {
+        Ok(r) => r,
+        Err(e) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Transcription failed: {e}"),
                 "server_error",
             );
         }
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Transcription task join error: {e}"),
-                "server_error",
-            );
-        }
     };
 
-    let full_text: String = chunks
-        .iter()
-        .map(|c| c.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
-    let total_duration =
-        sample_count as f64 / crate::server::audio_transcribe::WHISPER_SAMPLE_RATE as f64;
-    let segments: Vec<TranscriptionSegment> = chunks
+    // The language the first piece decoded under: the request's own, or the
+    // detected one. An english-only checkpoint has none. A translation is
+    // English text.
+    let decoded_language = decoded
+        .map(str::to_string)
+        .or(language)
+        .unwrap_or_else(|| "en".to_string());
+    let separator = if translate {
+        " "
+    } else {
+        word_separator(Some(&decoded_language))
+    };
+    let full_text = long.text(separator);
+    let total_duration = sample_count as f64 / WHISPER_SAMPLE_RATE as f64;
+    let segments: Vec<TranscriptionSegment> = long
+        .segments
         .iter()
         .enumerate()
-        .map(|(i, c)| TranscriptionSegment {
+        .map(|(i, s)| TranscriptionSegment {
             id: i,
-            start: c.start,
-            end: c.end,
-            text: c.text.clone(),
+            start: s.start,
+            end: s.end,
+            text: s.text(separator),
         })
         .collect();
 
@@ -273,17 +253,8 @@ async fn run_audio_pipeline(
         "srt" => (StatusCode::OK, render_srt(&segments)).into_response(),
         "vtt" => (StatusCode::OK, render_vtt(&segments)).into_response(),
         "verbose_json" => {
-            // The language the first window was decoded under: the request's
-            // own, or the detected one. An english-only checkpoint has none.
-            let decoded_language = chunks
-                .first()
-                .and_then(|c| c.language)
-                .map(str::to_string)
-                .or(language)
-                .unwrap_or_else(|| "en".to_string());
-            let words: Vec<TranscriptionWord> = chunks
-                .iter()
-                .flat_map(|c| c.words.iter())
+            let words: Vec<TranscriptionWord> = long
+                .words()
                 .map(|w| TranscriptionWord {
                     word: w.text.clone(),
                     start: w.start,
@@ -308,11 +279,19 @@ async fn run_audio_pipeline(
 }
 
 /// `POST /v1/audio/transcriptions` — Speech-to-text transcription (Whisper).
-pub async fn transcriptions(State(state): State<Arc<AppState>>, multipart: Multipart) -> Response {
-    run_audio_pipeline(state, multipart, false).await
+pub async fn transcriptions(
+    State(state): State<Arc<AppState>>,
+    limit: Option<Extension<BodyLimit>>,
+    multipart: Multipart,
+) -> Response {
+    run_audio_pipeline(state, limit.map(|Extension(l)| l), multipart, false).await
 }
 
 /// `POST /v1/audio/translations` — Speech-to-English translation (Whisper).
-pub async fn translations(State(state): State<Arc<AppState>>, multipart: Multipart) -> Response {
-    run_audio_pipeline(state, multipart, true).await
+pub async fn translations(
+    State(state): State<Arc<AppState>>,
+    limit: Option<Extension<BodyLimit>>,
+    multipart: Multipart,
+) -> Response {
+    run_audio_pipeline(state, limit.map(|Extension(l)| l), multipart, true).await
 }

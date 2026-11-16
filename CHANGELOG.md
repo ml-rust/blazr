@@ -12,6 +12,13 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### Fixed
+
+- `server.max_body_size`: every route reads bodies up to the configured limit. Requests over 2 MB, such as audio uploads, no longer fail. No action needed.
+- `413`: a body over `server.max_body_size` returns an OpenAI-style error with code `request_too_large` that names the limit. Match on the code, not the old plain-text body.
+- `/v1/audio/transcriptions`, `/v1/audio/translations`: a form that fails to read returns its read error, not `Field 'model' is required`. A `temperature` that is not a number returns `400`. Send a number.
+- `/v1/audio/transcriptions`, `/v1/audio/translations`: long audio is read the way `blazr transcribe` reads it, in pieces cut in silences, so accuracy matches the CLI. Segments now follow those pieces, not fixed 30 s windows.
+
 ## [0.8.0] - 2026-11-16
 
 ### Changed

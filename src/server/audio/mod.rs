@@ -8,6 +8,9 @@ mod request;
 mod speech;
 mod stream;
 mod transcription;
+mod transcription_form;
+#[cfg(test)]
+mod transcription_tests;
 mod types;
 mod voice;
 mod voices;

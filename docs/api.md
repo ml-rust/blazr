@@ -1514,7 +1514,17 @@ Transcribes speech. The request is `multipart/form-data`.
 | `timestamp_granularities[]` | string | `segment` | `segment` or `word`. One field per value.        |
 | `task`                      | string | none      | `translate` switches to translation.             |
 
-The server-wide `max_body_size` applies to this request too. The default is 10 MB. Raise it for uploads above that size.
+The whole request body counts against `server.max_body_size`, 10 MB by default. A file near 10 MB needs a higher limit, because the form adds its own bytes. A 25 MB file needs `max_body_size` of at least `26214400` plus about 1 KB.
+
+A body over `max_body_size` returns `413` with code `request_too_large`. The message names the limit. A form that fails to read returns the read error, never a missing-field error.
+
+The server reads audio of any length the way `blazr transcribe` does:
+- It cuts the audio in silences into pieces of at most 20 s, and reads each piece alone.
+- It drops words heard in silence, collapses repeated phrases, and fits word times to the sound.
+- Each segment is one piece that holds words. Its `start` and `end` are the piece's bounds.
+- `text` joins the words with spaces. For `zh`, `ja`, `th`, `lo`, `my` and `yue` it joins them with none.
+
+Reading needs word times. A checkpoint with no `alignment_heads` returns each piece's text, untimed.
 
 ```bash
 curl http://localhost:8080/v1/audio/transcriptions \
@@ -1641,7 +1651,7 @@ A request holds its `max_concurrent_requests` slot until its work ends: a stream
 | `404`  | `invalid_request_error`, `not_found_error`, `slot_not_found`, `lora_not_found` | Model, slot, adapter, or source not found.                                                                                     |
 | `408`  |                                                                                | Request exceeded `request_timeout_secs`.                                                                                       |
 | `409`  |                                                                                | `POST /api/copy` destination exists.                                                                                           |
-| `413`  |                                                                                | Body exceeds `max_body_size`, or an audio file exceeds 25 MB.                                                                  |
+| `413`  | `invalid_request_error`                                                        | Body exceeds `max_body_size` (code `request_too_large`), or an audio file exceeds 25 MB.                                       |
 | `422`  | `lora_load_error`                                                              | LoRA adapter failed to load or does not fit the base model.                                                                    |
 | `500`  | `server_error`                                                                 | Generation, embedding, detokenization, or synthesis failed. The base model of a LoRA variant did not load.                     |
 | `501`  | `not_implemented`                                                              | Speech `response_format` is not native.                                                                                        |

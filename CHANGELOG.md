@@ -33,6 +33,7 @@ preview on crates.io that shares no code with it.
 - `blazr pull`: a failed download exits non-zero, and a GGUF repo fetches its GGUF file. Rerun a pull that printed an error.
 - `POST /api/pull`: a failed download ends the stream with an error line, not `success`. Check the last line for `error`.
 - API keys: the server compares keys in constant time. No change for clients.
+- Image input: a model with no vision tower or image encoder answers `400` before it fetches or decodes an image, on chat, Responses and Anthropic messages. The message names the model. Load an image-capable model, or send text only.
 - `blazr serve`: the startup log lists every route, and the key count names only the file's keys. Read the routes from the log.
 - `GET /health`: `gpu_memory` reports the GPU the `device` key names, not device 0. Recheck alerts set on `cuda:N` hosts.
 - `README`: the quick start uses an `-Instruct` model and sends `model`. Copy the new example.

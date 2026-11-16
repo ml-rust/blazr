@@ -577,12 +577,13 @@ Chat messages accept image and audio parts in `content`.
 - Base64 that fails to decode fails with `Invalid image_url: expected a data: URI, an http(s) URL, or base64 (<decode error>)`.
 - A `http(s)` fetch that returns a non-success status returns `400`.
 - With `HF_HUB_OFFLINE` set, an `http(s)` URL returns `400` with a message that names the URL. Send the image inline instead.
+- A model with no vision tower and no image encoder returns `400` before the server fetches or decodes any image part. The message names the model. This holds on chat, Responses and Anthropic messages.
 
 Image routing depends on the loaded model:
 
 | Model                             | Images                                                      | Audio    |
 | --------------------------------- | ----------------------------------------------------------- | -------- |
-| Text only                         | `400`. Start the server with `--mmproj` for a vision tower. | `400`    |
+| Text only                         | `400`, with no fetch. Load a qwen35 model with `--mmproj`.  | `400`    |
 | Vision tower (`--mmproj`, qwen35) | Accepted                                                    | `400`    |
 | Multimodal model (own encoders)   | Accepted                                                    | Accepted |
 
@@ -733,7 +734,7 @@ curl http://localhost:8080/v1/messages/count_tokens \
 | `dimensions`      | integer                            | none     | Keep the first `dimensions` values of each vector, then apply `normalize`. Must be from 1 to the model dimension. Not allowed with `pooling` `none`. Quality holds only for Matryoshka-trained models. |
 | `user`            | string                             | none     | Caller identifier.                                                       |
 
-Image input needs a vision embedder registered for the model with `--vision-model NAME=PATH`. Without one, the server returns `400`.
+Image input needs a vision embedder registered for the model with `--vision-model NAME=PATH`. Without one, the server returns `400` before it fetches or decodes any image.
 
 ```bash
 curl http://localhost:8080/v1/embeddings \

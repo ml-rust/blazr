@@ -140,7 +140,37 @@ pub struct DecodedImage {
     pub mime_type: String,
 }
 
+/// The 400 message for image input sent to `model`, which has no vision
+/// tower and no image encoder.
+pub fn image_input_unsupported(model: &str) -> String {
+    format!(
+        "model '{model}' takes no image input: it has no vision tower or image encoder. \
+         Load a qwen35 model with its mmproj (--mmproj) or a multimodal model, or send text only"
+    )
+}
+
+/// Decode an image for `model`. With `accepts_images` false, the image is
+/// refused before any fetch or decode.
+///
+/// # Errors
+///
+/// [`image_input_unsupported`] when `model` takes no images, else the
+/// [`decode_image`] error.
+pub async fn decode_image_for(
+    model: &str,
+    accepts_images: bool,
+    url: &str,
+) -> Result<DecodedImage, String> {
+    if !accepts_images {
+        return Err(image_input_unsupported(model));
+    }
+    decode_image(url).await
+}
+
 /// Decode an image from a URL string.
+///
+/// Callers that serve a model use [`decode_image_for`], so a model without
+/// image support never fetches a URL.
 ///
 /// Supports:
 /// - `data:image/png;base64,...` — inline base64 data URI
@@ -340,6 +370,37 @@ mod tests {
         assert!(err.contains("data: URI"), "{err}");
         assert!(err.contains("http(s) URL"), "{err}");
         assert!(err.contains("base64"), "{err}");
+    }
+
+    /// A text-only model refuses an image URL before it connects: the local
+    /// listener the URL names gets no connection, and the error is the
+    /// modality error, not a fetch error. A broken data URI gets the same
+    /// error, so nothing decodes either.
+    #[tokio::test]
+    async fn decode_image_for_a_text_only_model_fetches_nothing() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let port = listener.local_addr().expect("local address").port();
+        let url = format!("http://127.0.0.1:{port}/probe.png");
+
+        let Err(err) = decode_image_for("text-model", false, &url).await else {
+            panic!("a text-only model must refuse an image URL");
+        };
+        assert_eq!(err, image_input_unsupported("text-model"));
+        assert!(err.contains("'text-model'"), "{err}");
+        assert!(err.contains("--mmproj"), "{err}");
+        assert!(!err.contains("fetch"), "{err}");
+        match listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("the image URL got a connection: {other:?}"),
+        }
+
+        let Err(err) = decode_image_for("text-model", false, "data:image/png").await else {
+            panic!("a text-only model must refuse a data URI");
+        };
+        assert_eq!(err, image_input_unsupported("text-model"));
     }
 
     #[test]

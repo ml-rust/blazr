@@ -19,7 +19,7 @@ use super::anthropic_types::{
 use crate::model::chat_template::{
     encode_chat_prompt, encode_chat_prompt_with_markers, RenderOptions,
 };
-use crate::server::chat_vision::{decode_image_sources, image_route, ImageRoute};
+use crate::server::chat_vision::{decode_image_sources, image_route, ImageRoute, MediaCount};
 use crate::server::generation::{
     admit_generation, overloaded_response, record_generation_metrics, validate_generation_params,
     HasSamplingFields,
@@ -54,29 +54,34 @@ pub async fn messages(
     };
     let _load_duration_ms = load_start.elapsed().as_millis() as u64;
 
-    // Decode the `image` blocks, then pick the path that serves them: the
-    // vision tower, the model's own encoders, or a 400.
-    let media = {
+    // Pick the path that serves the `image` blocks (the vision tower, the
+    // model's own encoders, or a 400), then decode them. The route is picked
+    // first, so a model without image support fetches nothing.
+    let (route, media) = {
         let sources = match request.image_sources() {
             Ok(sources) => sources,
             Err(message) => {
                 return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
         };
-        // `sources` borrows the request, so it ends here: the handler moves
-        // request fields into the reply below.
-        match decode_image_sources(&sources).await {
-            Ok(media) => media,
+        let route = match image_route(
+            &request.model,
+            executor.vision_tower().is_some(),
+            executor.is_multimodal(),
+            MediaCount::images(sources.len()),
+        ) {
+            Ok(route) => route,
             Err(message) => {
                 return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
-        }
-    };
-    let multimodal_model = executor.is_multimodal();
-    let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
-        Ok(route) => route,
-        Err(message) => {
-            return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+        };
+        // `sources` borrows the request, so it ends here: the handler moves
+        // request fields into the reply below.
+        match decode_image_sources(&sources, &request.model, route).await {
+            Ok(media) => (route, media),
+            Err(message) => {
+                return anthropic_error(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+            }
         }
     };
     let msgs = request.chat_messages(route.image_marker());

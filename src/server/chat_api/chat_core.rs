@@ -7,7 +7,7 @@ use axum::{http::StatusCode, response::Response};
 
 use super::chat::named_template;
 use super::chat_types::ChatRequest;
-use super::chat_vision::{decode_request_media, image_route, ImageRoute, RequestMedia};
+use super::chat_vision::{decode_request_media, image_route, ImageRoute, MediaCount, RequestMedia};
 use super::route_stream::generate_for_media;
 use super::tool_choice::ToolChoice;
 use super::tools::{build_tools_system_prompt, request_msg_to_chat_msg, Tool};
@@ -123,19 +123,24 @@ pub(in crate::server) async fn prepare_chat<'r>(
             .map_err(|message| bad_request(&message))?
     };
 
-    // Decode the media parts, then pick the path that serves them: the
-    // vision tower, the model's own encoders, or a 400.
-    let media = decode_request_media(&request.messages)
-        .await
-        .map_err(|message| bad_request(&message))?;
+    // Pick the path that serves the media parts (the vision tower, the
+    // model's own encoders, or a 400) before any part is fetched or decoded.
     let multimodal_model = executor.is_multimodal();
-    let route = image_route(executor.vision_tower().is_some(), multimodal_model, &media)
-        .map_err(|message| bad_request(&message))?;
+    let route = image_route(
+        &request.model,
+        executor.vision_tower().is_some(),
+        multimodal_model,
+        MediaCount::of_messages(&request.messages),
+    )
+    .map_err(|message| bad_request(&message))?;
     if route == ImageRoute::Tower && request.raw.unwrap_or(false) {
         return Err(bad_request(
             "raw mode renders no image markers; send images without `raw`",
         ));
     }
+    let media = decode_request_media(&request.messages, &request.model, route)
+        .await
+        .map_err(|message| bad_request(&message))?;
 
     // The prompt is encoded here, once, under an explicit special-token policy:
     // whatever the server itself inserts is allowed and everything else in the

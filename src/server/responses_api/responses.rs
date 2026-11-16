@@ -17,7 +17,9 @@ use super::responses_types::{
     output_items, ResponsesInput, ResponsesRequest, ResponsesResponse, ResponsesUsage,
 };
 use crate::model::chat_template::{encode_chat_prompt_with_markers, ChatMessage, RenderOptions};
-use crate::server::chat_vision::{decode_image_sources, image_route, marked_text, ImageRoute};
+use crate::server::chat_vision::{
+    decode_image_sources, image_route, marked_text, ImageRoute, MediaCount,
+};
 use crate::server::generation::{
     admit_generation, chat_prompt_error_response, error_response, overloaded_response,
     record_generation_metrics, validate_generation_params,
@@ -44,29 +46,34 @@ pub async fn responses(
             Err(response) => return *response,
         };
 
-    // Decode the `input_image` parts, then pick the path that serves them:
-    // the vision tower, the model's own encoders, or a 400.
-    let media = {
+    // Pick the path that serves the `input_image` parts (the vision tower,
+    // the model's own encoders, or a 400), then decode them. The route is
+    // picked first, so a model without image support fetches nothing.
+    let (route, media) = {
         let sources = match request.input.image_sources() {
             Ok(sources) => sources,
             Err(message) => {
                 return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
         };
-        // `sources` borrows the request, so it ends here: the handler moves
-        // request fields into the reply below.
-        match decode_image_sources(&sources).await {
-            Ok(media) => media,
+        let route = match image_route(
+            &request.model,
+            executor.vision_tower().is_some(),
+            executor.is_multimodal(),
+            MediaCount::images(sources.len()),
+        ) {
+            Ok(route) => route,
             Err(message) => {
                 return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
             }
-        }
-    };
-    let multimodal_model = executor.is_multimodal();
-    let route = match image_route(executor.vision_tower().is_some(), multimodal_model, &media) {
-        Ok(route) => route,
-        Err(message) => {
-            return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+        };
+        // `sources` borrows the request, so it ends here: the handler moves
+        // request fields into the reply below.
+        match decode_image_sources(&sources, &request.model, route).await {
+            Ok(media) => (route, media),
+            Err(message) => {
+                return error_response(StatusCode::BAD_REQUEST, &message, "invalid_request_error");
+            }
         }
     };
 

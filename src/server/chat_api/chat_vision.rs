@@ -5,7 +5,8 @@
 use splintr::FxHashSet;
 
 use super::tools::ChatRequestMessage;
-use crate::engine::vision_tower::{IMAGE_MARKER_TEXT, MARKER_NAMES, NO_TOWER_ERROR};
+use crate::engine::vision_tower::{IMAGE_MARKER_TEXT, MARKER_NAMES};
+use crate::server::multimodal::{decode_image_for, decode_image_source, image_input_unsupported};
 
 /// Decoded media of one request, in message order.
 #[derive(Clone, Default)]
@@ -53,43 +54,92 @@ impl ImageRoute {
     }
 }
 
-/// Pick the route for `media` on an executor that has a vision tower
-/// (`has_tower`) or a model with its own encoders (`multimodal_model`).
+/// How many image and audio parts a request carries, counted before any
+/// part is fetched or decoded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::server) struct MediaCount {
+    pub images: usize,
+    pub audio: usize,
+}
+
+impl MediaCount {
+    /// The image and audio parts of `messages`.
+    pub fn of_messages(messages: &[ChatRequestMessage]) -> Self {
+        messages.iter().filter_map(|msg| msg.content.as_ref()).fold(
+            Self::default(),
+            |count, content| Self {
+                images: count.images + content.image_urls().len(),
+                audio: count.audio + content.audio_inputs().len(),
+            },
+        )
+    }
+
+    /// `images` image parts and no audio.
+    pub fn images(images: usize) -> Self {
+        Self { images, audio: 0 }
+    }
+
+    fn is_empty(self) -> bool {
+        self.images == 0 && self.audio == 0
+    }
+}
+
+impl ImageRoute {
+    /// Whether this route takes image parts.
+    pub fn takes_images(self) -> bool {
+        matches!(self, ImageRoute::Tower | ImageRoute::Multimodal)
+    }
+}
+
+/// Pick the route for `count` media parts sent to `model`, on an executor
+/// that has a vision tower (`has_tower`) or a model with its own encoders
+/// (`multimodal_model`). Call it before any part is fetched or decoded.
 ///
 /// # Errors
 ///
 /// The message for a 400: images without a tower or encoder, or audio on
-/// a tower.
+/// a tower or a text-only model.
 pub(in crate::server) fn image_route(
+    model: &str,
     has_tower: bool,
     multimodal_model: bool,
-    media: &RequestMedia,
+    count: MediaCount,
 ) -> Result<ImageRoute, String> {
-    if media.is_empty() {
+    if count.is_empty() {
         return Ok(ImageRoute::Text);
     }
     if has_tower {
-        if !media.audio.is_empty() {
-            return Err("audio input is not supported by the vision tower".to_string());
+        if count.audio > 0 {
+            return Err(format!(
+                "model '{model}' takes no audio input: its vision tower reads images only. \
+                 Send the audio to a model with an audio encoder"
+            ));
         }
         return Ok(ImageRoute::Tower);
     }
     if multimodal_model {
         return Ok(ImageRoute::Multimodal);
     }
-    if media.images.is_empty() {
-        return Err("audio input is not supported by this model".to_string());
+    if count.images == 0 {
+        return Err(format!(
+            "model '{model}' takes no audio input: it has no audio encoder. \
+             Send the audio to a model with an audio encoder, or send text only"
+        ));
     }
-    Err(NO_TOWER_ERROR.to_string())
+    Err(image_input_unsupported(model))
 }
 
-/// Decode every image and audio part of `messages`, in order.
+/// Decode every image and audio part of `messages` for `model`, in order.
+/// `route` comes from [`image_route`]: a route that takes no images refuses
+/// an image part before it is fetched.
 ///
 /// # Errors
 ///
 /// The 400 message naming the part that did not decode.
 pub(in crate::server) async fn decode_request_media(
     messages: &[ChatRequestMessage],
+    model: &str,
+    route: ImageRoute,
 ) -> Result<RequestMedia, String> {
     let mut media = RequestMedia::default();
     for msg in messages {
@@ -97,7 +147,7 @@ pub(in crate::server) async fn decode_request_media(
             continue;
         };
         for img_url in content.image_urls() {
-            let decoded = crate::server::multimodal::decode_image(&img_url.url)
+            let decoded = decode_image_for(model, route.takes_images(), &img_url.url)
                 .await
                 .map_err(|e| format!("Failed to decode image: {e}"))?;
             media.images.push(decoded.data);
@@ -121,21 +171,26 @@ pub(in crate::server) enum ImageSource<'a> {
     Base64 { media_type: &'a str, data: &'a str },
 }
 
-/// Decode `sources` in order, for a route whose messages carry images only.
+/// Decode `sources` in order for `model`, for a route whose messages carry
+/// images only. `route` comes from [`image_route`]: a route that takes no
+/// images refuses every part before it is fetched or decoded.
 ///
 /// # Errors
 ///
 /// The 400 message naming the 1-based part that did not decode.
 pub(in crate::server) async fn decode_image_sources(
     sources: &[ImageSource<'_>],
+    model: &str,
+    route: ImageRoute,
 ) -> Result<RequestMedia, String> {
     let mut media = RequestMedia::default();
     for (index, source) in sources.iter().enumerate() {
         let decoded = match source {
-            ImageSource::Url(url) => crate::server::multimodal::decode_image(url).await,
-            ImageSource::Base64 { media_type, data } => {
-                crate::server::multimodal::decode_image_source(media_type, data)
+            ImageSource::Url(url) => decode_image_for(model, route.takes_images(), url).await,
+            ImageSource::Base64 { .. } if !route.takes_images() => {
+                Err(image_input_unsupported(model))
             }
+            ImageSource::Base64 { media_type, data } => decode_image_source(media_type, data),
         };
         let decoded =
             decoded.map_err(|e| format!("Failed to decode image part {}: {e}", index + 1))?;
@@ -217,49 +272,80 @@ pub(in crate::server) fn marked_text(
 mod tests {
     use super::*;
 
-    fn with_images(n: usize) -> RequestMedia {
-        RequestMedia {
-            images: vec![vec![0u8; 4]; n],
-            audio: Vec::new(),
-        }
-    }
+    const MODEL: &str = "test-model";
 
     #[test]
     fn text_only_takes_the_text_route_whatever_is_loaded() {
-        let media = RequestMedia::default();
-        assert_eq!(image_route(false, false, &media), Ok(ImageRoute::Text));
-        assert_eq!(image_route(true, false, &media), Ok(ImageRoute::Text));
-        assert_eq!(image_route(false, true, &media), Ok(ImageRoute::Text));
+        let none = MediaCount::default();
+        assert_eq!(image_route(MODEL, false, false, none), Ok(ImageRoute::Text));
+        assert_eq!(image_route(MODEL, true, false, none), Ok(ImageRoute::Text));
+        assert_eq!(image_route(MODEL, false, true, none), Ok(ImageRoute::Text));
+        assert!(!ImageRoute::Text.takes_images());
     }
 
     #[test]
-    fn images_without_a_tower_are_refused_naming_mmproj() {
-        let err = image_route(false, false, &with_images(1)).expect_err("no tower, no encoder");
-        assert_eq!(err, NO_TOWER_ERROR);
+    fn images_without_a_tower_are_refused_naming_the_model_and_mmproj() {
+        let err = image_route(MODEL, false, false, MediaCount::images(1))
+            .expect_err("no tower, no encoder");
+        assert_eq!(err, image_input_unsupported(MODEL));
+        assert!(err.contains("'test-model'"), "{err}");
         assert!(err.contains("--mmproj"), "{err}");
+    }
+
+    #[test]
+    fn audio_on_a_text_only_model_is_refused_naming_the_model() {
+        let audio = MediaCount {
+            images: 0,
+            audio: 1,
+        };
+        let err = image_route(MODEL, false, false, audio).expect_err("no encoder");
+        assert!(err.contains("'test-model'"), "{err}");
+        assert!(err.contains("audio"), "{err}");
     }
 
     #[test]
     fn a_tower_takes_images_and_refuses_audio() {
         assert_eq!(
-            image_route(true, false, &with_images(2)),
+            image_route(MODEL, true, false, MediaCount::images(2)),
             Ok(ImageRoute::Tower)
         );
-        let media = RequestMedia {
-            images: Vec::new(),
-            audio: vec![vec![0.0; 8]],
+        assert!(ImageRoute::Tower.takes_images());
+        let audio = MediaCount {
+            images: 0,
+            audio: 1,
         };
-        assert!(image_route(true, false, &media).is_err());
+        let err = image_route(MODEL, true, false, audio).expect_err("tower takes no audio");
+        assert!(err.contains("'test-model'"), "{err}");
     }
 
     #[test]
     fn a_multimodal_model_keeps_its_own_path() {
         assert_eq!(
-            image_route(false, true, &with_images(1)),
+            image_route(MODEL, false, true, MediaCount::images(1)),
             Ok(ImageRoute::Multimodal)
         );
+        assert!(ImageRoute::Multimodal.takes_images());
         assert!(ImageRoute::Multimodal.image_marker().is_none());
         assert!(ImageRoute::Multimodal.server_markers().is_empty());
+    }
+
+    /// A Text route refuses a base64 source and a URL source before either
+    /// decodes or fetches.
+    #[tokio::test]
+    async fn image_sources_on_the_text_route_are_refused_before_decode() {
+        let sources = [ImageSource::Base64 {
+            media_type: "image/png",
+            data: "!!not base64!!",
+        }];
+        let Err(err) = decode_image_sources(&sources, MODEL, ImageRoute::Text).await else {
+            panic!("the text route must refuse an image");
+        };
+        assert!(err.contains(&image_input_unsupported(MODEL)), "{err}");
+        let sources = [ImageSource::Url("http://127.0.0.1:9/probe.png")];
+        let Err(err) = decode_image_sources(&sources, MODEL, ImageRoute::Text).await else {
+            panic!("the text route must refuse an image URL");
+        };
+        assert!(err.contains(&image_input_unsupported(MODEL)), "{err}");
     }
 
     #[test]

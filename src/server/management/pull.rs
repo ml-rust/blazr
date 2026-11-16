@@ -15,9 +15,14 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::engine::model_dir::stays_in_dir;
-use crate::loader::hub_client::{async_client, async_get, async_model};
+use crate::loader::hub_client::pull_plan::{plan, shards_of, SAFETENSORS_INDEX};
+use crate::loader::hub_client::{async_client, async_files, async_get, async_model};
 use crate::server::handlers::AppState;
 use crate::server::ndjson::ndjson_response;
+
+/// How a pull error tells the client to name one file: this route takes
+/// no file name.
+const PICK: &str = "Pull one file with `blazr pull <repo> --file <name>`";
 
 /// One progress line: a `{"status": ...}` object, or the message of the
 /// error that ends the pull.
@@ -33,67 +38,56 @@ pub async fn pull_model(
     let repo = request.name.clone();
     let model_dir = state.scheduler.model_dir().to_path_buf();
 
-    // Spawn download in background
+    // Spawn download in background. The first error ends the pull with an
+    // error line.
     tokio::spawn(async move {
-        let client = match async_client(None) {
-            Ok(client) => client,
-            Err(e) => {
-                let _ = tx.send(Err(format!("Failed to init HF API: {}", e))).await;
-                return;
-            }
-        };
-        let repo_api = async_model(&client, &repo);
-
-        let model_name = repo.split('/').next_back().unwrap_or(&repo);
-        if !stays_in_dir(model_name) {
-            let message = format!(
-                "repo name '{repo}' leaves the model directory. Send a Hugging Face repo id, \
-                 such as 'org/name'"
-            );
+        if let Err(message) = pull_repo(&tx, &repo, &model_dir).await {
             let _ = tx.send(Err(message)).await;
             return;
         }
-        let dest = model_dir.join(model_name);
-        let _ = tokio::fs::create_dir_all(&dest).await;
-
-        let files_to_try = [
-            "config.json",
-            "model.safetensors",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "tokenizer.model",
-        ];
-
-        for filename in files_to_try {
-            pull_file(&tx, &repo_api, filename, &dest).await;
-        }
-
-        // Try sharded safetensors
-        if let Ok(cached) = async_get(&repo_api, "model.safetensors.index.json", true).await {
-            let index_dest = dest.join("model.safetensors.index.json");
-            let _ = tokio::fs::copy(&cached, &index_dest).await;
-            if let Ok(content) = tokio::fs::read_to_string(&index_dest).await {
-                if let Ok(index) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(weight_map) = index.get("weight_map").and_then(|v| v.as_object()) {
-                        let mut shards: Vec<String> = weight_map
-                            .values()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect();
-                        shards.sort();
-                        shards.dedup();
-                        for shard in &shards {
-                            pull_file(&tx, &repo_api, shard, &dest).await;
-                        }
-                    }
-                }
-            }
-        }
-
         send_status(&tx, "success").await;
     });
 
     progress_response(rx)
+}
+
+/// Pulls the files of `repo` the repo's file list picks into its directory
+/// under `model_dir`. The error is the message of the first failure.
+async fn pull_repo(
+    tx: &mpsc::Sender<Progress>,
+    repo: &str,
+    model_dir: &Path,
+) -> Result<(), String> {
+    let model_name = repo.split('/').next_back().unwrap_or(repo);
+    if !stays_in_dir(model_name) {
+        return Err(format!(
+            "repo name '{repo}' leaves the model directory. Send a Hugging Face repo id, \
+             such as 'org/name'"
+        ));
+    }
+    let client = async_client(None).map_err(|e| format!("Failed to init HF API: {e}"))?;
+    let repo_api = async_model(&client, repo);
+    let files = async_files(&repo_api)
+        .await
+        .map_err(|e| format!("listing the files of {repo} failed: {e}"))?;
+    let plan = plan(&files).map_err(|e| e.message(repo, PICK))?;
+    let dest = model_dir.join(model_name);
+    tokio::fs::create_dir_all(&dest)
+        .await
+        .map_err(|e| format!("creating {} failed: {e}", dest.display()))?;
+    for name in &plan.files {
+        pull_file(tx, &repo_api, repo, name, &dest).await?;
+    }
+    if plan.sharded {
+        let index_path = dest.join(SAFETENSORS_INDEX);
+        let index = tokio::fs::read_to_string(&index_path)
+            .await
+            .map_err(|e| format!("reading {} failed: {e}", index_path.display()))?;
+        for shard in shards_of(&index).map_err(|e| format!("{repo}: {e}"))? {
+            pull_file(tx, &repo_api, repo, &shard, &dest).await?;
+        }
+    }
+    Ok(())
 }
 
 /// The NDJSON response of the progress lines `rx` receives.
@@ -107,30 +101,30 @@ async fn send_status(tx: &mpsc::Sender<Progress>, status: &str) {
 }
 
 /// Downloads the repo file `name` and copies it into `dest`, with a
-/// `pulling` line before and a `downloaded` line after a fetch that worked.
+/// `pulling` line before and a `downloaded` line after. The plan checked
+/// that `name` stays in `dest`.
 async fn pull_file(
     tx: &mpsc::Sender<Progress>,
     repo_api: &HFRepository<RepoTypeModel>,
+    repo: &str,
     name: &str,
     dest: &Path,
-) {
-    if !stays_in_dir(name) {
-        let message = format!(
-            "file name '{name}' in the repo's index leaves the model directory. Pull a repo with \
-             plain file names"
-        );
-        let _ = tx.send(Err(message)).await;
-        return;
-    }
+) -> Result<(), String> {
     send_status(tx, &format!("pulling {}", name)).await;
-    if let Ok(cached) = async_get(repo_api, name, true).await {
-        let target = dest.join(name);
-        if let Some(parent) = target.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        let _ = tokio::fs::copy(&cached, &target).await;
-        send_status(tx, &format!("downloaded {}", name)).await;
+    let cached = async_get(repo_api, name, true)
+        .await
+        .map_err(|e| format!("downloading {name} from {repo} failed: {e}"))?;
+    let target = dest.join(name);
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("creating {} failed: {e}", parent.display()))?;
     }
+    tokio::fs::copy(&cached, &target)
+        .await
+        .map_err(|e| format!("copying {name} to {} failed: {e}", target.display()))?;
+    send_status(tx, &format!("downloaded {}", name)).await;
+    Ok(())
 }
 
 #[derive(Deserialize)]

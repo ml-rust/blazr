@@ -3,19 +3,34 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
 use hf_hub::repository::RepoTypeModel;
 use hf_hub::HFRepositorySync;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 
-use crate::loader::hub_client::{sync_client, sync_get, sync_model};
+use crate::engine::model_dir::stays_in_dir;
+use crate::loader::hub_client::pull_plan::{plan, shards_of, SAFETENSORS_INDEX};
+use crate::loader::hub_client::{sync_client, sync_files, sync_get, sync_model};
 
 /// Threshold above which we show a byte-level copy progress bar (10 MB)
 const PROGRESS_BAR_THRESHOLD: u64 = 10 * 1024 * 1024;
 
+/// How a `pull` error tells the caller to name one file.
+const PICK: &str = "Name the file to fetch with --file <name>";
+
 /// Pull model from HuggingFace Hub into `output_dir`: `--output`, then
 /// `BLAZR_MODEL_DIR`, then `model_dir`, then `./models`.
+///
+/// Without `file`, the repo's file list picks the files: its configs and
+/// tokenizer files, then `model.safetensors`, the shards its index names,
+/// or its one GGUF file.
+///
+/// # Errors
+///
+/// An error when the file list or any download fails, when the repo holds
+/// no weights blazr loads or several GGUF files, and when offline mode
+/// (`HF_HUB_OFFLINE`) is on.
 pub async fn pull(repo: String, file: Option<String>, output_dir: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&output_dir)?;
 
@@ -23,64 +38,75 @@ pub async fn pull(repo: String, file: Option<String>, output_dir: PathBuf) -> Re
 
     let client = sync_client(None)?;
     let repo_api = sync_model(&client, &repo);
-    let mut total_bytes = 0u64;
-    let mut file_count = 0usize;
 
     if let Some(ref filename) = file {
-        let size = download_file(&repo_api, filename, &output_dir)?;
-        eprintln!("\n{} 1 file downloaded ({})", "✓".green(), HumanBytes(size),);
-    } else {
-        let model_name = repo.split('/').next_back().unwrap_or(&repo);
-        let model_dir = output_dir.join(model_name);
-        std::fs::create_dir_all(&model_dir)?;
-
-        eprintln!(
-            "  Destination: {}\n",
-            model_dir.display().to_string().dimmed()
-        );
-
-        let files_to_try = [
-            "config.json",
-            "model.safetensors",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "tokenizer.model",
-        ];
-
-        for filename in files_to_try {
-            if let Ok(size) = download_file(&repo_api, filename, &model_dir) {
-                total_bytes += size;
-                file_count += 1;
-            }
+        if !stays_in_dir(filename) {
+            bail!(
+                "--file '{filename}' leaves {}. Pass a path in the repo",
+                output_dir.display()
+            );
         }
-
-        // Check for sharded safetensors
-        let (s_bytes, s_count) = download_sharded_safetensors(&repo_api, &model_dir);
-        total_bytes += s_bytes;
-        file_count += s_count;
-
-        // Check for GGUF files
-        let (g_bytes, g_count) = download_gguf_files(&repo_api, &model_dir, &repo);
-        total_bytes += g_bytes;
-        file_count += g_count;
-
-        eprintln!(
-            "\n{} {} files downloaded ({}) to: {}",
-            "✓".green(),
-            file_count,
-            HumanBytes(total_bytes),
-            model_dir.display().to_string().bold()
-        );
+        let size = download_file(&repo_api, &repo, filename, &output_dir)?;
+        eprintln!("\n{} 1 file downloaded ({})", "✓".green(), HumanBytes(size),);
+        return Ok(());
     }
 
+    let model_name = repo.split('/').next_back().unwrap_or(&repo);
+    if !stays_in_dir(model_name) {
+        bail!(
+            "repo id '{repo}' leaves {}. Pass an id such as org/name",
+            output_dir.display()
+        );
+    }
+    let files =
+        sync_files(&repo_api).map_err(|e| anyhow!("listing the files of {repo} failed: {e}"))?;
+    let plan = plan(&files).map_err(|e| anyhow!(e.message(&repo, PICK)))?;
+    let model_dir = output_dir.join(model_name);
+    std::fs::create_dir_all(&model_dir)?;
+
+    eprintln!(
+        "  Destination: {}\n",
+        model_dir.display().to_string().dimmed()
+    );
+
+    let fetch = |name: &str| download_file(&repo_api, &repo, name, &model_dir);
+    let (mut total_bytes, mut file_count) = fetch_all(&plan.files, fetch)?;
+    if plan.sharded {
+        let index_path = model_dir.join(SAFETENSORS_INDEX);
+        let index = std::fs::read_to_string(&index_path)
+            .with_context(|| format!("reading {}", index_path.display()))?;
+        let shards = shards_of(&index).map_err(|e| anyhow!("{repo}: {e}"))?;
+        let (bytes, count) = fetch_all(&shards, fetch)?;
+        total_bytes += bytes;
+        file_count += count;
+    }
+
+    eprintln!(
+        "\n{} {} files downloaded ({}) to: {}",
+        "✓".green(),
+        file_count,
+        HumanBytes(total_bytes),
+        model_dir.display().to_string().bold()
+    );
+
     Ok(())
+}
+
+/// Fetches every file of `names` with `fetch`, in order, and returns the
+/// bytes and the file count. The first error stops the pull.
+fn fetch_all(names: &[String], mut fetch: impl FnMut(&str) -> Result<u64>) -> Result<(u64, usize)> {
+    let mut bytes = 0u64;
+    for name in names {
+        bytes += fetch(name)?;
+    }
+    Ok((bytes, names.len()))
 }
 
 /// Download a single file with progress indication.
 /// Returns the file size in bytes on success.
 fn download_file(
     repo_api: &HFRepositorySync<RepoTypeModel>,
+    repo: &str,
     filename: &str,
     dest_dir: &std::path::Path,
 ) -> Result<u64> {
@@ -88,13 +114,15 @@ fn download_file(
     spinner.set_style(
         ProgressStyle::default_spinner()
             .template("  {spinner:.cyan} {msg}")
-            .unwrap(),
+            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
     );
     spinner.set_message(format!("Fetching {}", filename));
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let cached_path = sync_get(repo_api, filename, true)?;
+    let cached_path = sync_get(repo_api, filename, true);
     spinner.finish_and_clear();
+    let cached_path =
+        cached_path.map_err(|e| anyhow!("downloading {filename} from {repo} failed: {e}"))?;
 
     let size = std::fs::metadata(&cached_path)
         .map(|m| m.len())
@@ -132,7 +160,7 @@ fn copy_with_progress(
     pb.set_style(
         ProgressStyle::default_bar()
             .template("  {bar:40.cyan/dim} {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .unwrap()
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("━╸─"),
     );
 
@@ -154,70 +182,33 @@ fn copy_with_progress(
     Ok(())
 }
 
-/// Try to download sharded safetensors files. Returns (total_bytes, file_count).
-fn download_sharded_safetensors(
-    repo_api: &HFRepositorySync<RepoTypeModel>,
-    model_dir: &std::path::Path,
-) -> (u64, usize) {
-    let mut total = 0u64;
-    let mut count = 0usize;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    if let Ok(cached) = sync_get(repo_api, "model.safetensors.index.json", true) {
-        let dest = model_dir.join("model.safetensors.index.json");
-        let _ = std::fs::copy(&cached, &dest);
-
-        if let Ok(content) = std::fs::read_to_string(&dest) {
-            if let Ok(index) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(weight_map) = index.get("weight_map").and_then(|v| v.as_object()) {
-                    let mut shard_files: Vec<String> = weight_map
-                        .values()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
-                    shard_files.sort();
-                    shard_files.dedup();
-
-                    for shard in &shard_files {
-                        match download_file(repo_api, shard, model_dir) {
-                            Ok(size) => {
-                                total += size;
-                                count += 1;
-                            }
-                            Err(e) => {
-                                eprintln!("  {} Failed to download {}: {}", "✗".red(), shard, e);
-                            }
-                        }
-                    }
-                }
+    /// A failed download used to be skipped, and `pull` exited 0.
+    #[test]
+    fn a_failed_download_stops_the_pull() {
+        let names: Vec<String> = ["config.json", "model.safetensors", "tokenizer.json"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let mut tried = Vec::new();
+        let result = fetch_all(&names, |name| {
+            tried.push(name.to_string());
+            match name {
+                "model.safetensors" => Err(anyhow!("downloading {name} failed: timed out")),
+                _ => Ok(10),
             }
-        }
+        });
+        let err = result.expect_err("a failed download is an error");
+        assert!(err.to_string().contains("model.safetensors"), "{err}");
+        assert_eq!(tried, ["config.json", "model.safetensors"]);
     }
 
-    (total, count)
-}
-
-/// Try to download GGUF files from the repo. Returns (total_bytes, file_count).
-fn download_gguf_files(
-    repo_api: &HFRepositorySync<RepoTypeModel>,
-    model_dir: &std::path::Path,
-    repo: &str,
-) -> (u64, usize) {
-    let model_name = repo.split('/').next_back().unwrap_or(repo).to_lowercase();
-
-    let quant_suffixes = [
-        "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q8_0", "Q6_K", "Q3_K_M", "Q2_K",
-    ];
-
-    for suffix in &quant_suffixes {
-        let filename = format!("{}.{}.gguf", model_name, suffix);
-        if let Ok(size) = download_file(repo_api, &filename, model_dir) {
-            return (size, 1);
-        }
+    #[test]
+    fn every_fetched_file_counts() {
+        let names = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(fetch_all(&names, |_| Ok(5)).expect("pull"), (10, 2));
     }
-
-    let unquant = format!("{}.gguf", model_name);
-    if let Ok(size) = download_file(repo_api, &unquant, model_dir) {
-        return (size, 1);
-    }
-
-    (0, 0)
 }

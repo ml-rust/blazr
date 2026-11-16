@@ -5,9 +5,10 @@ mod download;
 mod env;
 mod kinds;
 mod search;
+mod spec;
 
 pub use super::hf_cache::home;
-pub use download::{offline, repo_files};
+pub use download::repo_files;
 pub use env::{default_hubs, env};
 pub use kinds::{
     checkpoint_id, missing_file, ModelKind, CLAP_ID, KOKORO_G2P_ID, OOV_FILES, TAGGER_FILES,

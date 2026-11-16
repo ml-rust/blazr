@@ -3,5 +3,9 @@
 
 mod client;
 mod progress;
+pub mod pull_plan;
 
-pub use client::{async_client, async_get, async_model, sync_client, sync_get, sync_model};
+pub use client::{
+    async_client, async_files, async_get, async_model, sync_client, sync_files, sync_get,
+    sync_model,
+};

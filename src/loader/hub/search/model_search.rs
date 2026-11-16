@@ -1,25 +1,24 @@
 //! Finding a model on disk: a path, or a Hugging Face id looked up under
 //! model folders by name and in hub caches, each candidate checked for
-//! every file its loader reads. A missing one downloads on first use, or
-//! names the next action.
+//! every file its loader reads. A missing one names the next action.
 
 use std::path::{Path, PathBuf};
 
 use voxr_narrate::resolve;
 
-use super::download::{download, download_file, offline};
-use super::env::{default_hubs, env};
-use super::kinds::{checkpoint_id, missing_file, ModelKind};
+use super::super::env::{default_hubs, env};
+use super::super::kinds::{checkpoint_id, missing_file, ModelKind};
+use super::super::spec::looks_like_path;
 
 /// Where models are looked for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelSearch {
     /// Directories holding models by name, such as `$BOOSTR_MODELS_DIR`.
-    roots: Vec<PathBuf>,
+    pub(super) roots: Vec<PathBuf>,
     /// Hugging Face hub caches.
-    hubs: Vec<PathBuf>,
+    pub(super) hubs: Vec<PathBuf>,
     /// The working directory a relative path resolves against.
-    cwd: PathBuf,
+    pub(super) cwd: PathBuf,
 }
 
 impl ModelSearch {
@@ -69,7 +68,7 @@ impl ModelSearch {
     }
 
     /// Every place `id` can sit, in search order.
-    fn candidates(&self, id: &str) -> Vec<PathBuf> {
+    pub(super) fn candidates(&self, id: &str) -> Vec<PathBuf> {
         let name = id.rsplit('/').next().unwrap_or(id);
         let mut out = Vec::new();
         for root in &self.roots {
@@ -105,7 +104,7 @@ impl ModelSearch {
     }
 
     /// [`Self::find`], with what a download can fix.
-    fn look(&self, spec: &str, kind: ModelKind) -> Result<PathBuf, Missing> {
+    pub(super) fn look(&self, spec: &str, kind: ModelKind) -> Result<PathBuf, Missing> {
         let as_path = resolve(&self.cwd, Path::new(spec));
         if as_path.exists() {
             return match missing_file(&as_path, kind) {
@@ -115,6 +114,12 @@ impl ModelSearch {
                     id: None,
                 }),
             };
+        }
+        if looks_like_path(spec) {
+            return Err(Missing {
+                reason: no_such_path(kind, &as_path),
+                id: None,
+            });
         }
         let id = checkpoint_id(spec, kind);
         let mut partial: Option<(PathBuf, String)> = None;
@@ -151,100 +156,24 @@ impl ModelSearch {
             id: Some(id),
         })
     }
-
-    /// Where a download goes: the first hub cache.
-    pub fn download_dir(&self) -> PathBuf {
-        self.hubs
-            .first()
-            .cloned()
-            .unwrap_or_else(|| self.cwd.join("models"))
-    }
-
-    /// The model `spec` names, downloaded first when it is a Hugging Face
-    /// id that is not on disk. The download prints `notice` on standard
-    /// error first, or a notice of its own. Offline (`$HF_HUB_OFFLINE`), or
-    /// when the download fails, the error is the reason with the next
-    /// action, led by `what`, such as `speak`.
-    pub fn obtain(
-        &self,
-        what: &str,
-        spec: &str,
-        kind: ModelKind,
-        notice: Option<&str>,
-    ) -> Result<PathBuf, String> {
-        let failed = |reason: String| format!("{what}: {reason}");
-        let missing = match self.look(spec, kind) {
-            Ok(dir) => return Ok(dir),
-            Err(m) => m,
-        };
-        let Some(id) = missing.id.filter(|_| !offline()) else {
-            return Err(failed(missing.reason));
-        };
-        let hub = self.download_dir();
-        match notice {
-            Some(text) => eprintln!("{text}"),
-            None => eprintln!(
-                "{what}: no {} model {id} on disk. Downloading it into {}. This happens once.",
-                kind.name(),
-                hub.display()
-            ),
-        }
-        if let Err(e) = download(&id, kind, &hub) {
-            return Err(failed(format!(
-                "downloading {id} failed ({e}). {}",
-                missing.reason
-            )));
-        }
-        self.find(spec, kind).map_err(failed)
-    }
-}
-
-impl ModelSearch {
-    /// The directories on disk the model `spec` names: its path, else every
-    /// place the search holds it. With them, its Hugging Face id when
-    /// `spec` is no path.
-    pub fn copies(&self, spec: &str, kind: ModelKind) -> (Vec<PathBuf>, Option<String>) {
-        let as_path = resolve(&self.cwd, Path::new(spec));
-        if as_path.exists() {
-            return (vec![as_path], None);
-        }
-        let id = checkpoint_id(spec, kind);
-        let dirs = self
-            .candidates(&id)
-            .into_iter()
-            .filter(|d| d.is_dir())
-            .collect();
-        (dirs, Some(id))
-    }
-
-    /// The `config.json` of the model `spec` names: on disk at its path or
-    /// in the search, else fetched alone from the hub, a small file, so a
-    /// model's kind is known before its weights are downloaded. `None` when
-    /// it is nowhere and cannot be fetched.
-    pub fn config_of(&self, spec: &str, kind: ModelKind) -> Option<PathBuf> {
-        let as_path = resolve(&self.cwd, Path::new(spec));
-        if as_path.exists() {
-            return Some(as_path.join("config.json")).filter(|c| c.is_file());
-        }
-        let id = checkpoint_id(spec, kind);
-        let on_disk = self
-            .candidates(&id)
-            .into_iter()
-            .map(|d| d.join("config.json"))
-            .find(|c| c.is_file());
-        if on_disk.is_some() || offline() {
-            return on_disk;
-        }
-        download_file(&id, "config.json", &self.download_dir()).ok()
-    }
 }
 
 /// A model the search did not find whole.
-struct Missing {
+pub(super) struct Missing {
     /// Why, with the next action.
-    reason: String,
+    pub(super) reason: String,
     /// The Hugging Face id a download can fix it from.
-    id: Option<String>,
+    pub(super) id: Option<String>,
+}
+
+/// Why the path `path`, which does not exist, names no `kind` model.
+fn no_such_path(kind: ModelKind, path: &Path) -> String {
+    format!(
+        "no such path: {}. Pass the directory of a {} model, or a Hugging Face id such as \
+         owner/name.",
+        path.display(),
+        kind.name()
+    )
 }
 
 /// Why a model that lacks `file` cannot load, with the next action.
@@ -262,7 +191,7 @@ fn incomplete(kind: ModelKind, dir: &Path, file: &str, id: Option<&str>) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use super::super::kinds::{KOKORO_ID, VOXCPM_ID};
+    use super::super::super::kinds::{KOKORO_ID, VOXCPM_ID};
     use super::*;
     use voxr_narrate::{DEFAULT_ASR_MODEL, KOKORO_MODEL, SMALL_ASR_MODEL};
 

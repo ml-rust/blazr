@@ -5,14 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use super::kinds::ModelKind;
-use crate::loader::hub_client::{sync_client, sync_get, sync_model};
-
-/// Whether the hub is off limits: `$HF_HUB_OFFLINE` set to anything but
-/// `0` or `false`.
-pub fn offline() -> bool {
-    std::env::var("HF_HUB_OFFLINE")
-        .is_ok_and(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
-}
+use crate::loader::hub_client::{sync_client, sync_files, sync_get, sync_model};
 
 /// Whether the loader of `kind` reads the repo file `name`: the configs
 /// and tokenizer files at the top, and the weights the loader opens. ONNX,
@@ -41,12 +34,9 @@ pub fn download(id: &str, kind: ModelKind, hub: &Path) -> Result<PathBuf, String
     std::fs::create_dir_all(hub).map_err(|e| format!("creating {}: {e}", hub.display()))?;
     let client = sync_client(Some(hub)).map_err(|e| e.to_string())?;
     let repo = sync_model(&client, id);
-    let info = repo.info().send().map_err(|e| e.to_string())?;
-    let mut names: Vec<String> = info
-        .siblings
-        .unwrap_or_default()
+    let mut names: Vec<String> = sync_files(&repo)
+        .map_err(|e| e.to_string())?
         .into_iter()
-        .map(|s| s.rfilename)
         .filter(|n| wanted(n, kind))
         .collect();
     // A repo with both weights files needs one: the SafeTensors copy.
@@ -76,16 +66,7 @@ pub fn download(id: &str, kind: ModelKind, hub: &Path) -> Result<PathBuf, String
 /// is the hub's reason.
 pub fn repo_files(id: &str) -> Result<Vec<String>, String> {
     let client = sync_client(None).map_err(|e| e.to_string())?;
-    let info = sync_model(&client, id)
-        .info()
-        .send()
-        .map_err(|e| e.to_string())?;
-    Ok(info
-        .siblings
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.rfilename)
-        .collect())
+    sync_files(&sync_model(&client, id)).map_err(|e| e.to_string())
 }
 
 /// Downloads the one repo file `name` of `id` into the hub cache `hub`

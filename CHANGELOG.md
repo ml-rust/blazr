@@ -12,6 +12,8 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-16
+
 ### Changed
 
 - `HF_HUB_OFFLINE`: blocks every outbound request, `blazr pull`, `POST /api/pull` and remote image URLs included. Set it on an air-gapped host, see `docs/deployment.md`.

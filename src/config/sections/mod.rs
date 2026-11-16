@@ -1,6 +1,7 @@
 //! Config sections: `server`, `inference`, `generation`, decision, and vision.
 
 pub(super) mod constraint;
+pub(super) mod cors_origin;
 pub(super) mod decision;
 pub(super) mod generation;
 pub(super) mod inference;
@@ -11,6 +12,7 @@ pub(super) mod speculative_drafter;
 pub(super) mod vision;
 
 pub use constraint::{CompiledConstraint, Constraint};
+pub use cors_origin::check_cors_origins;
 pub use decision::{DecisionConfig, DecisionFamily};
 pub use generation::GenerationConfig;
 pub use inference::InferenceConfig;

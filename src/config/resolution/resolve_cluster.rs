@@ -54,6 +54,7 @@ pub fn resolve_cluster(
     server.port = pick(flags.port, None, None, server.port);
     server.host = pick(flags.host, None, None, server.host);
     check_tls_pair(&server)?;
+    crate::config::check_cors_origins(&server.cors_origins)?;
     let model_flag = flags.model.is_some();
     Ok(ClusterSettings {
         model: resolve_model(flags.model, file),

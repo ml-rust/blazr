@@ -79,6 +79,7 @@ pub fn resolve_serve(
     server.tls_key = flags.tls_key.or(server.tls_key);
     server.reasoning_format = resolve_reasoning_format(flags.reasoning_format, &server);
     check_tls_pair(&server)?;
+    crate::config::check_cors_origins(&server.cors_origins)?;
 
     let model = resolve_model(flags.model, file);
     let tensor_parallel_size = resolve_tp_size(env, file);

@@ -21,7 +21,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .map(|m| m.name)
         .collect::<Vec<_>>();
 
-    let gpu_memory = get_gpu_memory_info();
+    let gpu_memory = gpu_memory_info(&state);
     let error = state
         .serving
         .schedulers()
@@ -43,13 +43,14 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (code, Json(response)).into_response()
 }
 
-/// Query GPU memory info (CUDA only)
-fn get_gpu_memory_info() -> Option<GpuMemoryInfo> {
+/// The memory of the GPU the server runs on: the `device` key's index, not
+/// device 0 (CUDA only).
+fn gpu_memory_info(state: &AppState) -> Option<GpuMemoryInfo> {
+    #[cfg(not(feature = "cuda"))]
+    let _ = state;
     #[cfg(feature = "cuda")]
     {
-        use boostr::Runtime;
-        let device = <boostr::CudaRuntime as Runtime>::default_device();
-        if let Ok((free, total)) = device.memory_info() {
+        if let Ok((free, total)) = state.scheduler.device().memory_info() {
             let used = total.saturating_sub(free);
             return Some(GpuMemoryInfo {
                 used_bytes: used,

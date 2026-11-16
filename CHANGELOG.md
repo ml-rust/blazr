@@ -12,6 +12,8 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-17
+
 ### Fixed
 
 - `server.max_body_size`: every route reads bodies up to the configured limit. Requests over 2 MB, such as audio uploads, no longer fail. No action needed.

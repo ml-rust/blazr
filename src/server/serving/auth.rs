@@ -4,7 +4,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use subtle::{Choice, ConstantTimeEq};
+use constant_time_eq::constant_time_eq;
 
 /// The valid API keys, in request extensions. Absent when auth is off.
 #[derive(Clone)]
@@ -15,10 +15,8 @@ struct ApiKeys(Vec<String>);
 /// key a guess matched.
 fn key_matches(keys: &[String], token: &str) -> bool {
     let token = token.as_bytes();
-    let found = keys.iter().fold(Choice::from(0), |found, key| {
-        found | key.as_bytes().ct_eq(token)
-    });
-    found.into()
+    keys.iter()
+        .fold(false, |found, key| found | constant_time_eq(key.as_bytes(), token))
 }
 
 /// The `401` reply with `message`.

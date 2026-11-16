@@ -21,7 +21,7 @@ use super::ollama_types::{
     OllamaEmbedRequest, OllamaEmbedResponse, OllamaEmbeddingsRequest, OllamaEmbeddingsResponse,
     OllamaKeepAlive,
 };
-use crate::engine::Executor;
+use crate::engine::{Executor, KeepAlive};
 use crate::server::embeddings::handler::{embed_text, TokenLimit};
 use crate::server::embeddings::options::{check_dimensions, Pooling};
 use crate::server::generation::apply_keep_alive;
@@ -40,9 +40,12 @@ fn limit(executor: &Executor<ServerRuntime>, truncate: bool) -> Option<TokenLimi
     Some(TokenLimit { max, truncate })
 }
 
-/// The keep-alive argument of `keep_alive`.
-fn keep_alive_arg(keep_alive: Option<&OllamaKeepAlive>) -> Option<String> {
-    keep_alive.map(OllamaKeepAlive::to_arg)
+/// The checked `keep_alive`, or the message for a value that is no duration.
+fn keep_alive_arg(keep_alive: Option<&OllamaKeepAlive>) -> Result<Option<KeepAlive>, String> {
+    keep_alive
+        .map(OllamaKeepAlive::parse)
+        .transpose()
+        .map_err(|e| e.to_string())
 }
 
 /// POST /api/embed. An empty input list loads the model and returns no vectors.
@@ -59,13 +62,16 @@ pub async fn ollama_embed(
     if let Err(message) = check_dimensions(request.dimensions, Pooling::Mean) {
         return bad_request(&message);
     }
+    let keep_alive = match keep_alive_arg(request.keep_alive.as_ref()) {
+        Ok(keep_alive) => keep_alive,
+        Err(message) => return bad_request(&message),
+    };
     let model = resolve(&state, &request.model).await;
     let executor = match select_executor(&state, &model, None).await {
         Ok(executor) => executor,
         Err(response) => return from_openai(*response, &request.model).await,
     };
     let load = start.elapsed();
-    let keep_alive = keep_alive_arg(request.keep_alive.as_ref());
     let inputs = request.input.map(|i| i.into_vec()).unwrap_or_default();
     if inputs.is_empty() {
         apply_keep_alive(&state, &model, &keep_alive).await;
@@ -118,12 +124,15 @@ pub async fn ollama_embeddings(
         Err(e) => return rejection(e),
     };
     log_ignored(request.options.as_ref());
+    let keep_alive = match keep_alive_arg(request.keep_alive.as_ref()) {
+        Ok(keep_alive) => keep_alive,
+        Err(message) => return bad_request(&message),
+    };
     let model = resolve(&state, &request.model).await;
     let executor = match select_executor(&state, &model, None).await {
         Ok(executor) => executor,
         Err(response) => return from_openai(*response, &request.model).await,
     };
-    let keep_alive = keep_alive_arg(request.keep_alive.as_ref());
     let embedding = if request.prompt.is_empty() {
         Vec::new()
     } else {

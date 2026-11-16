@@ -5,6 +5,6 @@ pub(super) mod load_error;
 pub(crate) mod model_dir;
 pub(super) mod scheduler;
 
-pub use keep_alive::parse_keep_alive;
+pub use keep_alive::{parse_keep_alive, KeepAlive, KeepAliveError};
 pub use load_error::{is_out_of_memory, ModelNotFound, ModelNotLoadable};
 pub use scheduler::{AvailableModelInfo, Scheduler};

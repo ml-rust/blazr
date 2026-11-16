@@ -118,7 +118,7 @@ pub async fn completions(
         // non-streaming path.
         let keep_alive_state = Arc::clone(&state);
         let keep_alive_model = model_name.clone();
-        let keep_alive = request.keep_alive.clone();
+        let keep_alive = request.keep_alive;
         // The `n` choices run one after another, each sampled as the
         // non-streaming path samples it. The task holds the request's slot
         // until the last one stops.

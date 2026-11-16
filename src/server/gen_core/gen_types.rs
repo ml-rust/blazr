@@ -7,7 +7,7 @@ use boostr::inference::grammar::json_schema::unwrap_response_format;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Constraint;
-use crate::engine::{parse_keep_alive, GeneratedToken, TokenLogprob};
+use crate::engine::{GeneratedToken, KeepAlive, TokenLogprob};
 use crate::server::handlers::AppState;
 
 pub use super::error_responses::{
@@ -135,10 +135,10 @@ pub fn logprob_entry(
     }
 }
 
-/// Apply per-request keep_alive to the model's scheduler entry
-pub async fn apply_keep_alive(state: &AppState, model_name: &str, keep_alive: &Option<String>) {
-    if let Some(ref ka) = keep_alive {
-        let duration = parse_keep_alive(ka);
+/// Apply per-request keep_alive to the model's scheduler entry. The value
+/// was checked when the request parsed.
+pub async fn apply_keep_alive(state: &AppState, model_name: &str, keep_alive: &Option<KeepAlive>) {
+    if let Some(KeepAlive(duration)) = *keep_alive {
         state.scheduler.set_keep_alive(model_name, duration).await;
     }
 }

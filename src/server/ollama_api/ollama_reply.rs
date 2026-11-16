@@ -114,7 +114,7 @@ fn stream_reply(
     } = prepared;
     let keep_alive_state = Arc::clone(state);
     let keep_alive_model = request.model.clone();
-    let keep_alive = request.keep_alive.clone();
+    let keep_alive = request.keep_alive;
     let tokens = spawn_media_stream(
         permit,
         placement,

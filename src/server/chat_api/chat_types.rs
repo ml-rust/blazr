@@ -81,7 +81,7 @@ pub struct ChatRequest {
     #[serde(default)]
     pub n: Option<usize>,
     #[serde(default)]
-    pub keep_alive: Option<String>,
+    pub keep_alive: Option<crate::engine::KeepAlive>,
     #[serde(default)]
     pub logit_bias: Option<HashMap<String, f32>>,
     #[serde(default)]

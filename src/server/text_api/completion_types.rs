@@ -66,7 +66,7 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub context: Option<Vec<i64>>,
     #[serde(default)]
-    pub keep_alive: Option<String>,
+    pub keep_alive: Option<crate::engine::KeepAlive>,
     #[serde(default)]
     pub logit_bias: Option<HashMap<String, f32>>,
     /// A boolean, or an integer 0 to 5 for the top logprobs count.

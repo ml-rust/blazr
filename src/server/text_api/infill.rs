@@ -101,7 +101,7 @@ pub async fn infill(
         // non-streaming path.
         let keep_alive_state = Arc::clone(&state);
         let keep_alive_model = model_name.clone();
-        let keep_alive = request.keep_alive.clone();
+        let keep_alive = request.keep_alive;
         let slot = DecodeSlot::enter();
         // The task carries the request's slot, so a client that leaves
         // frees it only once the decode stops.
@@ -191,7 +191,7 @@ pub struct InfillRequest {
     #[serde(default)]
     pub seed: Option<u64>,
     #[serde(default)]
-    pub keep_alive: Option<String>,
+    pub keep_alive: Option<crate::engine::KeepAlive>,
     #[serde(default)]
     pub user: Option<String>,
 }

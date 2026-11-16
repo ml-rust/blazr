@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::engine::{KeepAlive, KeepAliveError};
 use crate::server::generation::string_or_array;
 
 /// `POST /api/chat` request.
@@ -136,6 +137,15 @@ impl OllamaKeepAlive {
             Self::Secs(n) if *n < 0.0 => "-1".to_string(),
             Self::Secs(n) => format!("{}", n.ceil() as u64),
         }
+    }
+
+    /// The checked value.
+    ///
+    /// # Errors
+    ///
+    /// [`KeepAliveError`] for a string that is no duration, such as `"5min"`.
+    pub fn parse(&self) -> Result<KeepAlive, KeepAliveError> {
+        self.to_arg().parse()
     }
 }
 
@@ -275,7 +285,15 @@ mod tests {
         for (value, arg) in cases {
             let ka: OllamaKeepAlive = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(ka.to_arg(), arg, "{value}");
+            assert!(ka.parse().is_ok(), "{value}");
         }
+    }
+
+    #[test]
+    fn an_unparseable_keep_alive_is_an_error() {
+        let ka: OllamaKeepAlive = serde_json::from_value(json!("5min")).unwrap();
+        let err = ka.parse().expect_err("not a duration");
+        assert!(err.to_string().contains("is not a duration"), "{err}");
     }
 
     #[test]

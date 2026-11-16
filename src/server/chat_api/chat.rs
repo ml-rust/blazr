@@ -75,7 +75,7 @@ fn stream_reply(
     // non-streaming path.
     let keep_alive_state = Arc::clone(state);
     let keep_alive_model = model_name.clone();
-    let keep_alive = request.keep_alive.clone();
+    let keep_alive = request.keep_alive;
     let configs = (0..request.choice_count())
         .map(|i| choice_config(&gen_config, i))
         .collect();

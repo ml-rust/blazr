@@ -52,6 +52,7 @@ impl Shared<'_> {
             }
         }
         if let Some(keep_alive) = self.keep_alive {
+            keep_alive.parse().map_err(|e| e.to_string())?;
             fields.insert("keep_alive".into(), keep_alive.to_arg().into());
         }
         Ok(())
@@ -366,8 +367,23 @@ mod tests {
         assert_eq!(req.system.as_deref(), Some("Be brief"));
         assert_eq!(req.raw, Some(false));
         assert_eq!(req.context, Some(vec![1, 2]));
-        assert_eq!(req.keep_alive.as_deref(), Some("0"));
+        assert_eq!(
+            req.keep_alive,
+            Some(crate::engine::KeepAlive(Some(std::time::Duration::ZERO)))
+        );
         assert_eq!(req.fim_suffix, None);
+    }
+
+    #[test]
+    fn an_unparseable_keep_alive_is_a_bad_request() {
+        let body = json!({"model": "m", "messages": [{"role": "user", "content": "hi"}], "keep_alive": "5min"});
+        let Err(err) = chat(body) else {
+            panic!("keep_alive \"5min\" parsed");
+        };
+        assert!(
+            err.starts_with("keep_alive \"5min\" is not a duration"),
+            "{err}"
+        );
     }
 
     #[test]

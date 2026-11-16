@@ -7,10 +7,10 @@ use std::time::Duration;
 use axum::{http::StatusCode, response::IntoResponse, response::Response, Json};
 
 use super::model_name::{is_known, not_found, resolve};
-use super::ollama_error::{from_openai, ollama_error};
+use super::ollama_error::{bad_request, from_openai, ollama_error};
 use super::ollama_render::{Kind, Render};
 use super::ollama_types::OllamaKeepAlive;
-use crate::engine::parse_keep_alive;
+use crate::engine::KeepAlive;
 use crate::server::generation::apply_keep_alive;
 use crate::server::handlers::{select_executor, AppState};
 
@@ -22,10 +22,13 @@ pub(super) async fn load_reply(
     keep_alive: Option<&OllamaKeepAlive>,
     kind: Kind,
 ) -> Response {
+    let keep_alive = match keep_alive.map(OllamaKeepAlive::parse).transpose() {
+        Ok(keep_alive) => keep_alive,
+        Err(e) => return bad_request(&e.to_string()),
+    };
     let name = resolve(state, requested).await;
-    let keep_alive = keep_alive.map(OllamaKeepAlive::to_arg);
     let render = Render::new(kind);
-    if keep_alive.as_deref().map(parse_keep_alive) == Some(Some(Duration::ZERO)) {
+    if keep_alive == Some(KeepAlive(Some(Duration::ZERO))) {
         if !is_known(state, &name).await {
             return ollama_error(StatusCode::NOT_FOUND, &not_found(requested));
         }

@@ -120,13 +120,10 @@ mod tests {
             .look(spec, ModelKind::Whisper)
             .expect_err("missing path");
         assert!(missing.id.is_none(), "a path has no id to download");
-        assert!(
-            missing
-                .reason
-                .starts_with("no such path: /no/such/blazr/whisper-base"),
-            "{}",
-            missing.reason
-        );
+        // The message names the resolved path: `C:\no\such\...` on Windows.
+        let shown = resolve(tmp.path(), Path::new(spec));
+        let want = format!("no such path: {}.", shown.display());
+        assert!(missing.reason.starts_with(&want), "{}", missing.reason);
         let err = search
             .obtain("transcribe", spec, ModelKind::Whisper, None)
             .expect_err("no download");

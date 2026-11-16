@@ -30,14 +30,15 @@ preview on crates.io that shares no code with it.
 
 ### Fixed
 
-- `blazr pull`: a failed download exits non-zero, and a GGUF repo fetches its GGUF file. Rerun a pull that printed an error.
+- `blazr pull`: a failed download exits non-zero. Rerun a pull that printed an error.
 - `POST /api/pull`: a failed download ends the stream with an error line, not `success`. Check the last line for `error`.
 - API keys: the server compares keys in constant time. No change for clients.
 - Image input: a model with no vision tower or image encoder answers `400` before it fetches or decodes an image, on chat, Responses and Anthropic messages. The message names the model. Load an image-capable model, or send text only.
 - `blazr serve`: the startup log lists every route, and the key count names only the file's keys. Read the routes from the log.
 - `GET /health`: `gpu_memory` reports the GPU the `device` key names, not device 0. Recheck alerts set on `cuda:N` hosts.
+- `speak` with VoxCPM2: a long part is no longer refused, since each part gets caches sized to it. Rerun a script that failed on a long part.
+- `transcribe`, `/v1/audio/transcriptions`: a Whisper fine-tune that emits timestamp tokens, such as mesolitica's Malaysian Whisper, no longer writes `<|t.tt|>` into the text. blazr builds with voxr 0.9.2.
 - `README`: the quick start uses an `-Instruct` model and sends `model`. Copy the new example.
-- Docs: `/health` status, the hub cache lookup, the compute dtype default and the metrics list match the code. Reread `docs/deployment.md` and `docs/tuning.md`.
 
 ## [0.7.1] - 2026-11-06
 

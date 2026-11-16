@@ -76,6 +76,10 @@ pub async fn serve(
         );
     }
 
+    // API keys before any model loads, so a key file with no key stops
+    // the start at once.
+    let api_keys = super::api_keys::collect_api_keys(api_key, api_key_file.as_deref())?;
+
     // The build's runtime fixes the device type. A wgpu adapter opens here.
     let device = crate::runtime::open_device(gpu_index)?;
 
@@ -184,24 +188,7 @@ pub async fn serve(
         }
     }
 
-    // Collect API keys from --api-key and --api-key-file
-    let mut api_keys: Vec<String> = Vec::new();
-    if let Some(key) = api_key {
-        api_keys.push(key);
-    }
-    if let Some(ref path) = api_key_file {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read API key file {:?}: {}", path, e))?;
-        for line in content.lines() {
-            let line = line.trim();
-            if !line.is_empty() && !line.starts_with('#') {
-                api_keys.push(line.to_string());
-            }
-        }
-        tracing::info!("Loaded {} API key(s) from {:?}", api_keys.len(), path);
-    }
-
-    // Startup banner
+    // The address the server binds once every model below has loaded.
     let addr = server_config.addr();
     eprintln!();
     eprintln!("  {} v{}", "blazr".bold().cyan(), env!("CARGO_PKG_VERSION"));
@@ -211,7 +198,7 @@ pub async fn serve(
         "http"
     };
     eprintln!(
-        "  Listening on {}",
+        "  Address: {} (listens once the models load)",
         format!("{}://{}", scheme, addr).underline()
     );
     if let Some(ref m) = model {

@@ -3,33 +3,38 @@
 use anyhow::Result;
 use colored::Colorize;
 
-/// Query a running blazr server for loaded models
-pub async fn ps(server: String) -> Result<()> {
+/// Query a running blazr server for loaded models. `api_key` goes in
+/// `Authorization: Bearer <key>` when set.
+pub async fn ps(server: String, api_key: Option<String>) -> Result<()> {
     let url = format!("{}/api/ps", server.trim_end_matches('/'));
 
     crate::tls::install_crypto_provider();
     let client = reqwest::Client::new();
-    let response = match client.get(&url).send().await {
+    let mut request = client.get(&url);
+    if let Some(key) = &api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = match request.send().await {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "{} Could not connect to server at {}",
-                "Error:".red().bold(),
-                server.bold()
-            );
-            eprintln!("  {}", e);
-            eprintln!("\nMake sure {} is running.", "blazr serve".bold());
-            return Ok(());
-        }
+        Err(e) => anyhow::bail!(
+            "could not connect to the server at {server}: {e}. Start `blazr serve`, or pass \
+             its address with --server"
+        ),
     };
 
-    if !response.status().is_success() {
-        eprintln!(
-            "{} Server returned status {}",
-            "Error:".red().bold(),
-            response.status()
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let why = if api_key.is_some() {
+            "rejected the API key"
+        } else {
+            "needs an API key"
+        };
+        anyhow::bail!(
+            "the server at {url} answered 401: it {why}. Pass a key it accepts with --api-key, \
+             --api-key-file or BLAZR_API_KEY"
         );
-        return Ok(());
+    }
+    if !response.status().is_success() {
+        anyhow::bail!("the server at {url} answered {}", response.status());
     }
 
     let body: serde_json::Value = response.json().await?;

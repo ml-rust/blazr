@@ -144,3 +144,24 @@ impl SamplingArgs {
         }
     }
 }
+
+/// Parse `--api-key`. An empty or blank key is an error: no client can
+/// send it.
+pub(crate) fn parse_api_key(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("the key is empty. Pass a key, or omit --api-key to run without auth".into());
+    }
+    Ok(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_api_key_flag_is_refused() {
+        assert!(parse_api_key("").is_err());
+        assert!(parse_api_key("  ").is_err());
+        assert_eq!(parse_api_key("k-1"), Ok("k-1".to_string()));
+    }
+}

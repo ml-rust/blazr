@@ -73,7 +73,7 @@ pub struct SwarmArgs {
     pub host: Option<String>,
 
     /// API key for the leader's HTTP API [default: $BLAZR_API_KEY]
-    #[arg(long)]
+    #[arg(long, value_parser = super::args::parse_api_key)]
     pub api_key: Option<String>,
 }
 

@@ -71,10 +71,11 @@ pub enum Commands {
         data_parallel: Option<usize>,
 
         /// API key for authentication [default: $BLAZR_API_KEY]
-        #[arg(long)]
+        #[arg(long, value_parser = super::args::parse_api_key)]
         api_key: Option<String>,
 
-        /// File containing API keys (one per line)
+        /// File of API keys, one per line. Empty lines and `#` lines are
+        /// skipped. A file with no key stops the start.
         #[arg(long)]
         api_key_file: Option<std::path::PathBuf>,
 
@@ -313,6 +314,16 @@ pub enum Commands {
         /// Server URL (default: http://localhost:8080)
         #[arg(long, default_value = "http://localhost:8080")]
         server: String,
+
+        /// API key to send [default: the first key of --api-key-file, else
+        /// $BLAZR_API_KEY]
+        #[arg(long, value_parser = super::args::parse_api_key)]
+        api_key: Option<String>,
+
+        /// File of API keys. `ps` sends the first key line. Empty lines and
+        /// `#` lines are skipped.
+        #[arg(long)]
+        api_key_file: Option<std::path::PathBuf>,
     },
 
     /// Convert model format (delegates to compressr)

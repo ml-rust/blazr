@@ -260,8 +260,14 @@ async fn run() -> Result<()> {
             )
             .await?;
         }
-        Commands::Ps { server } => {
-            blazr::cli::ps(server).await?;
+        Commands::Ps {
+            server,
+            api_key,
+            api_key_file,
+        } => {
+            let env = EnvVars::from_process()?;
+            let key = blazr::cli::client_api_key(api_key, api_key_file.as_deref(), env.api_key)?;
+            blazr::cli::ps(server, key).await?;
         }
         Commands::Convert {
             input,

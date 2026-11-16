@@ -13,6 +13,7 @@ mod management;
 mod media;
 mod ollama_api;
 mod responses_api;
+pub mod route_list;
 mod routes;
 mod serving;
 mod text_api;

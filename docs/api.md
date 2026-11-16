@@ -205,6 +205,8 @@ Each field the request omits takes its value from the `generation` section of `~
 
 The Ollama routes also take a JSON number of seconds, such as `300`, `0` or `-1`.
 
+Any other value is an error, such as `"5min"`, `"1.5h"`, `"30S"`, or a duration too long to hold. The Ollama routes answer `400`. The OpenAI routes answer `422`, as for any field that does not parse.
+
 ## Completions
 
 `POST /v1/completions`
@@ -574,6 +576,7 @@ Chat messages accept image and audio parts in `content`.
 
 - Base64 that fails to decode fails with `Invalid image_url: expected a data: URI, an http(s) URL, or base64 (<decode error>)`.
 - A `http(s)` fetch that returns a non-success status returns `400`.
+- With `HF_HUB_OFFLINE` set, an `http(s)` URL returns `400` with a message that names the URL. Send the image inline instead.
 
 Image routing depends on the loaded model:
 
@@ -1456,9 +1459,9 @@ Downloads the model into `<model_dir>/<model-name>`. The server resolves `model_
 {"status":"success"}
 ```
 
-- A file that fails to download emits no `downloaded` line.
-- A failed client start emits one `{"error": "..."}` line and ends the stream.
-- The download includes `config.json`, `model.safetensors`, the tokenizer files, and each shard in `model.safetensors.index.json`.
+- Files: the server reads the repo's file list. It fetches the configs and tokenizer files the repo holds, then `model.safetensors`, the shards of `model.safetensors.index.json`, or the repo's one `.gguf` file.
+- Errors: the first error emits one `{"error": "..."}` line and ends the stream with no `success` line. A failed download, a repo with no weights, a repo with several GGUF files, and offline mode (`HF_HUB_OFFLINE`) are errors.
+- Several GGUF files: pull one with `blazr pull <repo> --file <name>`.
 
 ```bash
 curl http://localhost:8080/api/pull \

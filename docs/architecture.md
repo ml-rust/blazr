@@ -86,7 +86,7 @@ For SafeTensors, `detect_architecture_from_loader` (`src/loader/formats/safetens
 ### Keep and unload
 
 - Loaded models stay in the scheduler map until removed.
-- A request's `keep_alive` sets a per-model TTL. `parse_keep_alive` reads `"0"`, `"-1"`, `"5m"`, `"1h"`, `"30s"`, and bare seconds.
+- A request's `keep_alive` sets a per-model TTL. `parse_keep_alive` reads `"0"`, `"-1"`, `"5m"`, `"1h"`, `"30s"`, and bare seconds. Any other value is an error.
 - The reaper task calls `evict_expired` every 10 seconds (`src/server/serving/startup.rs`).
 - `Scheduler::unload` removes a model by name.
 - A keep-alive of `0` removes the model at once.

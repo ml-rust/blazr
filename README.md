@@ -126,33 +126,40 @@ cargo install blazr --locked --features audio,cuda     # NVIDIA CUDA
 `blazr run`, `generate`, `chat`, and `bench` take a model path. They never fetch a model. `blazr pull` downloads one first.
 
 ```bash
-blazr pull Qwen/Qwen2.5-0.5B      # writes ./models/Qwen2.5-0.5B
-blazr generate --model ./models/Qwen2.5-0.5B --prompt "Once upon a time" --max-tokens 100
-blazr run ./models/Qwen2.5-0.5B   # interactive REPL
+blazr pull Qwen/Qwen2.5-0.5B-Instruct      # writes ./models/Qwen2.5-0.5B-Instruct
+blazr generate --model ./models/Qwen2.5-0.5B-Instruct --prompt "Once upon a time" --max-tokens 100
+blazr run ./models/Qwen2.5-0.5B-Instruct   # interactive REPL
 ```
 
 `blazr pull` writes to `--output`, then `BLAZR_MODEL_DIR`, then the `model_dir` config key, then `./models`.
+
+- Files: `blazr pull` reads the repo's file list. It fetches the configs and tokenizer files the repo holds, then `model.safetensors`, the shards of `model.safetensors.index.json`, or the repo's one `.gguf` file.
+- Several GGUF files: `blazr pull` stops and lists them. Name one with `--file <name>`.
+- Errors: a failed download stops `blazr pull` with a non-zero exit.
 
 ### Start the server
 
 `blazr serve --model` takes a path, or a name that `blazr list` shows.
 
 ```bash
-blazr serve --model Qwen2.5-0.5B --port 8080
+blazr serve --model Qwen2.5-0.5B-Instruct --port 8080
 ```
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
+    "model": "Qwen2.5-0.5B-Instruct",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 100,
     "stream": true
   }'
 ```
 
+- `model` is required. Send a name that `GET /v1/models` lists.
+- The example model is an `-Instruct` model. A base model is not a chat model, see [Supported Models](#supported-models).
 - `blazr serve` does not download LLM weights. Run `blazr pull` first.
-- `blazr serve` fetches only Kokoro's G2P files, on first use.
+- `blazr serve` fetches Kokoro's G2P files on first use, and the image of an `http://` or `https://` image URL in a request. `HF_HUB_OFFLINE=1` blocks both. See [docs/deployment.md](docs/deployment.md#air-gapped-deployment).
 - Without `--model`, the server loads the `default_model` key when set. Otherwise it starts with no model.
 - Requests load the named model on first use. See [docs/deployment.md](docs/deployment.md#start-on-demand).
 

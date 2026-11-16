@@ -6,9 +6,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::extract::Request;
-use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{preflight_request_headers, AllowOrigin, Any, CorsLayer};
@@ -18,6 +17,7 @@ use tower_http::timeout::TimeoutLayer;
 use crate::config::{FileConfig, LiveConfig, ReasoningFormat, ServerConfig};
 use crate::engine::Scheduler;
 
+use super::auth::{auth_middleware, inject_api_keys};
 use super::concurrency::{limit_concurrency, ConcurrencyLimit};
 use super::config_watch;
 use super::metrics;
@@ -71,68 +71,6 @@ async fn request_logging(request: Request, next: Next) -> Response {
     );
 
     response
-}
-
-/// API key auth middleware
-async fn auth_middleware(request: Request, next: Next) -> Response {
-    let keys = request.extensions().get::<ApiKeys>().cloned();
-
-    if let Some(ApiKeys(valid_keys)) = keys {
-        if !valid_keys.is_empty() {
-            let auth_header = request
-                .headers()
-                .get(axum::http::header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok());
-
-            match auth_header {
-                Some(header) if header.starts_with("Bearer ") => {
-                    let token = &header[7..];
-                    if !valid_keys.iter().any(|k| k == token) {
-                        return (
-                            StatusCode::UNAUTHORIZED,
-                            axum::Json(serde_json::json!({
-                                "error": {
-                                    "message": "Invalid API key",
-                                    "type": "invalid_api_key"
-                                }
-                            })),
-                        )
-                            .into_response();
-                    }
-                }
-                _ => {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        axum::Json(serde_json::json!({
-                            "error": {
-                                "message": "Missing Authorization header. Use: Authorization: Bearer <api-key>",
-                                "type": "invalid_api_key"
-                            }
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        }
-    }
-
-    next.run(request).await
-}
-
-/// Wrapper to store valid API keys in request extensions
-#[derive(Clone)]
-struct ApiKeys(Vec<String>);
-
-/// Middleware layer that injects API keys into request extensions
-async fn inject_api_keys(
-    axum::extract::State(keys): axum::extract::State<Vec<String>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    if !keys.is_empty() {
-        request.extensions_mut().insert(ApiKeys(keys));
-    }
-    next.run(request).await
 }
 
 /// Middleware layer that injects request logging config into request extensions
@@ -266,30 +204,7 @@ pub async fn start_with_batch(
         });
     }
 
-    // CORS: respect cors_enabled and cors_origins config. `Vary` names the
-    // three preflight request headers on every response, whatever the
-    // origin policy.
-    let cors = if config.cors_enabled {
-        if config.cors_origins.is_empty() {
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        } else {
-            let origins: Vec<_> = config
-                .cors_origins
-                .iter()
-                .filter_map(|o| o.parse().ok())
-                .collect();
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(origins))
-                .allow_methods(Any)
-                .allow_headers(Any)
-        }
-    } else {
-        CorsLayer::new()
-    }
-    .vary(preflight_request_headers().collect::<Vec<_>>());
+    let cors = cors_layer(&config)?;
 
     // Protected routes (require auth if api_key is set)
     let protected = api_routes().route_layer(middleware::from_fn(auth_middleware));
@@ -406,6 +321,40 @@ pub async fn start_with_batch(
     Ok(())
 }
 
+/// The CORS layer `config` sets: off, any origin, or the `cors_origins`
+/// list. `Vary` names the three preflight request headers on every
+/// response, whatever the origin policy.
+///
+/// # Errors
+///
+/// An error naming the first `cors_origins` entry that is no origin.
+fn cors_layer(config: &ServerConfig) -> Result<CorsLayer> {
+    let cors = if !config.cors_enabled {
+        CorsLayer::new()
+    } else if config.cors_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        crate::config::check_cors_origins(&config.cors_origins).map_err(anyhow::Error::msg)?;
+        let origins = config
+            .cors_origins
+            .iter()
+            .map(|o| {
+                o.parse().map_err(|_| {
+                    anyhow::anyhow!("server.cors_origins entry {o:?} is not an origin")
+                })
+            })
+            .collect::<Result<Vec<axum::http::HeaderValue>>>()?;
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
+    Ok(cors.vary(preflight_request_headers().collect::<Vec<_>>()))
+}
+
 fn log_startup_info(scheme: &str, addr: &str, config: &ServerConfig, api_keys: &[String]) {
     tracing::info!("Server listening on {}://{}", scheme, addr);
     tracing::info!(
@@ -418,24 +367,12 @@ fn log_startup_info(scheme: &str, addr: &str, config: &ServerConfig, api_keys: &
         tracing::info!("  Authentication: enabled ({} key(s))", api_keys.len());
     }
     tracing::info!("API endpoints:");
-    tracing::info!("  GET  /health - Health check (no auth required)");
-    tracing::info!("  GET  /v1/models - List models (text + resident vision/ASR/TTS)");
-    tracing::info!("  GET  /v1/models/{{id}} - Model details");
-    tracing::info!("  POST /v1/completions - Text completion");
-    tracing::info!("  POST /v1/chat/completions - Chat completion");
-    tracing::info!("  POST /v1/infill - Fill-in-the-middle (FIM)");
-    tracing::info!("  POST /tokenize - Tokenize text");
-    tracing::info!("  POST /detokenize - Detokenize tokens");
-    #[cfg(feature = "audio")]
-    tracing::info!("  GET  /v1/audio/voices - List a TTS model's voices");
-    tracing::info!("  GET  /api/tags - List local models with metadata (+ vision/ASR/TTS)");
-    tracing::info!("  POST /api/show - Model details");
-    tracing::info!("  GET  /api/ps - Currently loaded models (+ resident vision/ASR/TTS)");
-    tracing::info!("  DEL  /api/delete - Delete local model");
-    tracing::info!("  POST /api/copy - Copy/alias model");
-    tracing::info!("  POST /api/pull - Pull model from HuggingFace");
-    tracing::info!("  GET  /api/slots - List inference slots");
-    tracing::info!("  POST /api/slots - Create inference slot");
-    tracing::info!("  DEL  /api/slots/{{id}} - Free inference slot");
-    tracing::info!("  GET  /metrics - Prometheus metrics (no auth required)");
+    for route in crate::server::route_list::served_routes() {
+        tracing::info!(
+            "  {:<6} {} - {}",
+            route.method,
+            crate::server::route_list::display_path(route.path),
+            route.what
+        );
+    }
 }

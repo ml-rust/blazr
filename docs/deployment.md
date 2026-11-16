@@ -95,12 +95,14 @@ The startup output prints the listen address, the model, and the backend: `Backe
 Fetch the model before the first start. `blazr serve` does not fetch a model named by `--model`.
 
 ```bash
-BLAZR_MODEL_DIR=/srv/blazr/models blazr pull Qwen/Qwen2.5-0.5B
+BLAZR_MODEL_DIR=/srv/blazr/models blazr pull Qwen/Qwen2.5-0.5B-Instruct
 BLAZR_MODEL_DIR=/srv/blazr/models blazr list
 BLAZR_MODEL_DIR=/srv/blazr/models blazr serve --model <name> --host 127.0.0.1 --port 8080
 ```
 
 `blazr pull` writes to the model directory when `--output` is absent. Replace `<name>` with a name that `blazr list` shows.
+
+`blazr pull` reads the repo's file list first. It fetches the configs and tokenizer files the repo holds, then `model.safetensors`, the shards of `model.safetensors.index.json`, or the repo's one `.gguf` file. A repo with several GGUF files stops the pull with their names: pass one with `--file <name>`. A failed download stops the pull with a non-zero exit.
 
 `--model` resolves in this order. Steps 2 to 5 use the model directory:
 
@@ -133,18 +135,16 @@ Requests take an optional `keep_alive` string that sets how long the model stays
 | `"30s"`, `"5m"`, `"1h"` | Expires after that duration.                                     |
 | `"300"`                 | Expires after 300 seconds. A bare number counts seconds.         |
 
-A model without `keep_alive` stays loaded until another model evicts it.
+A model without `keep_alive` stays loaded until another model evicts it. Any other `keep_alive` value is an error. See [keep_alive](api.md#keep_alive).
 
 ### Hugging Face cache and offline mode
 
-The cache lookup checks these directories in order:
+The cache lookup checks two directories in order:
 
-1. `$HF_HUB_CACHE`
-2. `$HF_HOME/hub`
-3. `$XDG_CACHE_HOME/huggingface/hub`
-4. `~/.cache/huggingface/hub`
+1. `$HF_HUB_CACHE`, when set.
+2. `<base>/hub`. `<base>` is `$HF_HOME`, else `$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`. `$XDG_CACHE_HOME` applies only when `$HF_HOME` is unset.
 
-Set `HF_HUB_OFFLINE=1` on hosts without outbound network access. Any non-empty value turns offline mode on, except `0` and `false`, which match case-insensitively. Offline mode blocks the fetch that `blazr serve` makes for Kokoro's G2P files. A `--tts-model` Kokoro load then fails when the cache lacks those files.
+Set `HF_HUB_OFFLINE=1` on hosts without outbound network access. Any non-empty value turns offline mode on, except `0` and `false`, which match case-insensitively. Offline mode blocks every request blazr makes to the Hugging Face hub or to a remote image URL. A file already in the hub cache still loads. See [Air-gapped deployment](#air-gapped-deployment) for the full list.
 
 ### GPU and CPU
 
@@ -321,6 +321,10 @@ Pass keys in one of three ways:
 
 Keys from the flag or variable and the file combine. Without any key, the server accepts all requests.
 
+- Empty key: `--api-key ""` is an error. An empty `BLAZR_API_KEY` counts as unset.
+- Empty file: a key file with no key line stops the start with an error that names the file. Auth never turns off in silence.
+- Comparison: the server compares keys in constant time.
+
 Protected routes require the header `Authorization: Bearer <key>`. A missing or wrong key returns `401` with a JSON body and type `invalid_api_key`. Only `GET /health` and `GET /metrics` skip the check.
 
 ```bash
@@ -337,7 +341,7 @@ Set both the certificate and the key. Each comes from a flag, or from `server.tl
 
 ### CORS
 
-CORS is enabled by default. With `server.cors_origins` empty, the server allows any origin, method, and header. Set `server.cors_origins` to a list to restrict browser origins. Set `server.cors_enabled` to `false` to turn CORS off.
+CORS is enabled by default. With `server.cors_origins` empty, the server allows any origin, method, and header. Set `server.cors_origins` to a list to restrict browser origins. Write each entry as `scheme://host[:port]`, such as `https://app.example.com`, with no path and no trailing `/`. An entry in another form stops the start with an error that names it. Set `server.cors_enabled` to `false` to turn CORS off.
 
 ### Limits
 
@@ -356,15 +360,16 @@ Request logging is on by default through `server.request_logging`. Each request 
 
 ### Health
 
-`GET /health` returns `200` with a JSON body. It needs no API key.
+`GET /health` returns a JSON body. It needs no API key. The status code is `200`, or `503` after an engine fault.
 
 | Field           | Type   | Meaning                                                                             |
 | --------------- | ------ | ----------------------------------------------------------------------------------- |
-| `status`        | string | Always `ok` while the process serves.                                               |
+| `status`        | string | `ok` with `200`. `unavailable` with `503` once a scheduler reports a fault, such as a swarm that lost a stage. |
+| `error`         | string | Why the server can no longer serve. Present only with `unavailable`.               |
 | `version`       | string | blazr crate version.                                                                |
 | `loaded_models` | array  | Names of loaded models.                                                             |
 | `data_parallel_replicas` | integer | Copies of the start model that serve requests. `1` without data parallelism. |
-| `gpu_memory`    | object | CUDA builds only: `used_bytes`, `free_bytes`, `total_bytes`, `used_gb`, `total_gb`. |
+| `gpu_memory`    | object | CUDA builds only: `used_bytes`, `free_bytes`, `total_bytes`, `used_gb`, `total_gb`, for the GPU the `device` key names. |
 
 `/health` returns `200` when no model is loaded. Use `loaded_models` to check the model state.
 
@@ -401,6 +406,20 @@ Request logging is on by default through `server.request_logging`. Each request 
 | `blazr_slo_batch_growth_held`       | gauge     | `1` while a P95 TTFT or ITL breach holds batch growth, else `0` |
 | `blazr_data_parallel_replicas`      | gauge     | Data-parallel replicas of the start model                |
 | `blazr_replica_active_requests`     | gauge     | Requests in flight on each replica. Label: `replica`.    |
+| `blazr_speculative_drafted_total`   | counter   | Speculative drafts fed to the target model               |
+| `blazr_speculative_accepted_total`  | counter   | Speculative drafts the target model accepted             |
+| `blazr_speculative_emitted_total`   | counter   | Tokens speculative decoding emitted                      |
+| `blazr_speculative_target_forwards_total` | counter | Target forwards speculative decoding ran            |
+| `blazr_speculative_fallbacks_total` | counter   | Requests with speculation on that decoded without it. Label: `reason` |
+| `blazr_decision_requests_total`     | counter   | Decision requests a worker finished. Labels: `model`, `outcome` (`answered`, `failed`) |
+| `blazr_decision_rows_total`         | counter   | Prompt rows of finished decision requests. Label: `model` |
+| `blazr_decision_prefill_tokens_total` | counter | Tokens decision runs prefilled, a shared prefix counted once. Label: `model` |
+| `blazr_decision_latency_seconds`    | histogram | Seconds from queueing a decision request to its answers. Label: `model` |
+| `blazr_decision_queue_rows`         | gauge     | Decision rows queued or running. Label: `model`          |
+| `blazr_decision_prefix_cache_hits_total` | counter | Decision requests whose prefix state the worker kept. Label: `model` |
+| `blazr_decision_prefix_cache_misses_total` | counter | Decision requests whose prefix the worker ran and offered to its cache. Label: `model` |
+| `blazr_decision_prefix_cache_evictions_total` | counter | Prefix states the decision worker removed from its cache. Label: `model` |
+| `blazr_decision_prefix_cache_bytes` | gauge     | Bytes the decision prefix cache holds. Label: `model`    |
 
 `blazr_token_budget_utilization_ratio` appears only when `server.max_inflight_tokens` is above `0`. `blazr_vram_used_bytes` and the `blazr_gpu_*` gauges update on CUDA builds at each scrape, for the server's device.
 
@@ -440,10 +459,103 @@ Set the thresholds under `server.slo` in `config.yaml`. A sample over its thresh
 ### Check running models
 
 ```bash
-blazr ps --server http://127.0.0.1:8080
+blazr ps --server http://127.0.0.1:8080 --api-key-file /etc/blazr/api-keys
 ```
 
-`blazr ps` reads `GET /api/ps` and prints the model names and sizes to standard error. It sends no API key. Against a server with API keys, it prints the `401` status as an error. It exits `0` when the server is unreachable or returns an error status.
+`blazr ps` reads `GET /api/ps` and prints the model names and sizes to standard error. It exits non-zero when the server is unreachable or returns an error status.
+
+It sends one key as `Authorization: Bearer <key>`, from the first source that is set:
+
+1. `--api-key <KEY>`. An empty value is an error.
+2. `--api-key-file <PATH>`: the first line that is not empty and does not start with `#`. A file with no key is an error.
+3. `BLAZR_API_KEY`.
+
+With none set, it sends no key. A `401` reply fails with an error that names `--api-key`, `--api-key-file` and `BLAZR_API_KEY`.
+
+## Air-gapped deployment
+
+blazr runs on a host with no network access. Fetch every file on a connected machine, carry the files across, and set `HF_HUB_OFFLINE=1` on the offline host.
+
+### What blazr sends over the network
+
+| Request | Trigger | Code | `HF_HUB_OFFLINE=1` |
+| --- | --- | --- | --- |
+| Hugging Face hub: file list and file downloads | `blazr pull` | `src/cli/catalog/pull.rs` | Blocked |
+| Hugging Face hub: file list and file downloads | `POST /api/pull` | `src/server/management/pull.rs` | Blocked |
+| Hugging Face hub: speech model download | `speak`, `transcribe`, `sound-review`, when the model is not on disk | `src/loader/hub/download.rs`, `src/loader/hub/search.rs` | Blocked |
+| Hugging Face hub: `config.json` or the file list of a speech model | `speak`, `transcribe`, when the model is not on disk | `src/loader/hub/search.rs`, `src/cli/narration/weights.rs` | Blocked |
+| Hugging Face hub: Kokoro G2P files `fs90/kokoro-g2p` | `serve --tts-model` with a Kokoro model, `speak` with Kokoro, when the files are not on disk | `src/loader/speech_load/tts/kokoro_g2p.rs` | Blocked |
+| The image of an `http://` or `https://` URL | A chat, Responses, Anthropic, or embeddings request with an image URL | `src/server/media/multimodal.rs` | Blocked |
+| HTTP to the server `--server` names | `blazr ps` | `src/cli/serving/ps.rs` | Not blocked |
+| nexar connections to the peers the operator names | `swarm`, `disagg` (`distributed` builds) | `src/cli/cluster/` | Not blocked |
+
+- Hub requests go to `https://huggingface.co`, or to `$HF_ENDPOINT` when set.
+- Nothing else leaves the host. blazr has no update check and no telemetry. `/metrics` answers scrapes and pushes nothing.
+- `blazr ps`, `swarm`, and `disagg` reach only the addresses you pass. Use them on the local host or the local network.
+- A blocked request fails with an error that names the model, file, or URL it needed, and the next action.
+- A model loaded by local path never reaches the network: chat and embedding models (`--model`, a request's `model`), `--vision-model`, `--asr-model` (Whisper), and `--tts-model` (VoxCPM2, VITS). A Kokoro `--tts-model` also needs its G2P files on disk.
+- A speech model spec that looks like a path and does not exist is an error, never a hub id. A path starts with `.`, `/` or `~`, holds a backslash or a drive prefix such as `C:`, or holds more than one `/`.
+
+### Steps
+
+1. On a connected machine, fetch the release archive and its checksums:
+
+   ```bash
+   curl -LO https://github.com/ml-rust/blazr/releases/latest/download/blazr-linux-x64.tar.gz
+   curl -LO https://github.com/ml-rust/blazr/releases/latest/download/SHA256SUMS
+   ```
+
+2. Fetch the models. `blazr pull` writes a plain model directory. `hf download` writes the same files:
+
+   ```bash
+   blazr pull Qwen/Qwen2.5-0.5B-Instruct --output ./carry/models
+   hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ./carry/models/Qwen2.5-0.5B-Instruct
+   ```
+
+   For a Kokoro TTS model, also fetch its G2P files: `hf download fs90/kokoro-g2p --local-dir ./carry/models/kokoro-g2p`.
+
+3. Check the archive on the connected machine: `sha256sum --check --ignore-missing SHA256SUMS`. Stop at `FAILED`, and fetch again.
+4. Carry the archive, `SHA256SUMS`, and `./carry/models` across on removable media.
+5. On the offline host, check the archive again, then install it:
+
+   ```bash
+   sha256sum --check --ignore-missing SHA256SUMS
+   tar -xzf blazr-linux-x64.tar.gz
+   sudo install -m 755 blazr /usr/local/bin/blazr
+   sudo mkdir -p /srv/blazr && sudo cp -r ./carry/models /srv/blazr/models
+   ```
+
+6. Set the offline switch, and point blazr at the local model paths:
+
+   ```bash
+   export HF_HUB_OFFLINE=1
+   export BLAZR_MODEL_DIR=/srv/blazr/models
+   export BOOSTR_MODELS_DIR=/srv/blazr/models   # the Kokoro G2P files, by name
+   blazr serve --model Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8080
+   ```
+
+   In a systemd unit, set each variable with `Environment=`.
+
+### Check that blazr needs no network
+
+Run the server in a Linux network namespace with no interface but loopback. `unshare --net --map-root-user` needs no root on a kernel that allows user namespaces:
+
+```bash
+unshare --net --map-root-user sh -c '
+  ip link set lo up
+  HF_HUB_OFFLINE=1 BLAZR_MODEL_DIR=/srv/blazr/models \
+    blazr serve --model Qwen2.5-0.5B-Instruct --host 127.0.0.1 --port 8080 &
+  pid=$!
+  until curl -sf http://127.0.0.1:8080/health; do sleep 2; done
+  curl -s http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
+    -d "{\"model\": \"Qwen2.5-0.5B-Instruct\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}"
+  kill "$pid"
+'
+```
+
+- The chat reply proves the server runs with no route off the host.
+- A firewall rule does the same on a running host: drop all outbound traffic of the `blazr` user, such as `iptables -A OUTPUT -m owner --uid-owner blazr -j DROP`. Allow the loopback interface first if clients connect on `127.0.0.1`.
+- A request that needs the network fails at once with the offline error. It never waits on a timeout.
 
 ## Multi-node
 

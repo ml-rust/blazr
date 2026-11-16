@@ -12,6 +12,32 @@ preview on crates.io that shares no code with it.
 
 ## [Unreleased]
 
+### Changed
+
+- `HF_HUB_OFFLINE`: blocks every outbound request, `blazr pull`, `POST /api/pull` and remote image URLs included. Set it on an air-gapped host, see `docs/deployment.md`.
+- `blazr pull`, `POST /api/pull`: pick files from the repo's file list, and fetch `generation_config.json` too. Pass `--file <name>` for a repo with several GGUF files.
+- `keep_alive`: a value that is no duration, such as `5min`, is an error, not "keep loaded". Send seconds, or a whole number with `s`, `m` or `h`.
+- `server.cors_origins`: an entry that is not `scheme://host[:port]` stops the start. Remove the path or trailing `/`.
+- `--api-key-file`: a file with no key stops the start. Add a key, or omit the flag.
+- `--api-key`: an empty value is an error. Pass a key, or omit the flag.
+- `speak`, `transcribe`, `sound-review`: a model path that does not exist is an error, never a hub download. Fix the path.
+- `blazr serve`: the banner shows `Address:`, and the log shows `Server listening` once the port binds. Watch for that line, not the banner.
+- `blazr ps`: an unreachable server or an error status exits non-zero. Scripts that relied on exit 0 check the code.
+
+### Added
+
+- `blazr ps`: sends an API key from `--api-key`, `--api-key-file` or `BLAZR_API_KEY`. Pass the key a server with auth accepts.
+
+### Fixed
+
+- `blazr pull`: a failed download exits non-zero, and a GGUF repo fetches its GGUF file. Rerun a pull that printed an error.
+- `POST /api/pull`: a failed download ends the stream with an error line, not `success`. Check the last line for `error`.
+- API keys: the server compares keys in constant time. No change for clients.
+- `blazr serve`: the startup log lists every route, and the key count names only the file's keys. Read the routes from the log.
+- `GET /health`: `gpu_memory` reports the GPU the `device` key names, not device 0. Recheck alerts set on `cuda:N` hosts.
+- `README`: the quick start uses an `-Instruct` model and sends `model`. Copy the new example.
+- Docs: `/health` status, the hub cache lookup, the compute dtype default and the metrics list match the code. Reread `docs/deployment.md` and `docs/tuning.md`.
+
 ## [0.7.1] - 2026-11-06
 
 ### Changed

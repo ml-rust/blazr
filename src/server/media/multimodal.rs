@@ -155,7 +155,8 @@ pub async fn decode_image(url: &str) -> Result<DecodedImage, String> {
         let mime_type = meta.split(';').next().unwrap_or("image/png");
         decode_base64_image(mime_type, data)
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        // Remote URL
+        // Remote URL. Offline mode blocks the fetch.
+        crate::offline::guard(url, crate::offline::Need::RemoteImage).map_err(|e| e.to_string())?;
         crate::tls::install_crypto_provider();
         let response = reqwest::get(url)
             .await

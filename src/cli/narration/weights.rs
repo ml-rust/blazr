@@ -6,7 +6,8 @@ use std::path::Path;
 
 use voxr_narrate::CommandError;
 
-use crate::loader::hub::{offline, repo_files, ModelKind, ModelSearch};
+use crate::loader::hub::{repo_files, ModelKind, ModelSearch};
+use crate::offline::is_offline as offline;
 
 /// The weights file voxr's VITS and Whisper loaders read.
 const WEIGHTS: &str = "model.safetensors";

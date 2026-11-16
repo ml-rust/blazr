@@ -104,6 +104,7 @@ pub mod distributed;
 pub mod engine;
 pub mod loader;
 pub mod model;
+pub mod offline;
 pub mod runtime;
 #[cfg(feature = "server")]
 pub mod server;

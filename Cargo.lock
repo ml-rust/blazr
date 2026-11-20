@@ -412,7 +412,7 @@ dependencies = [
  "rustls",
  "rustyline",
  "serde",
- "serde-saphyr",
+ "serde-saphyr 2.1.1",
  "serde_json",
  "sha2",
  "splintr",
@@ -473,9 +473,9 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.11.1"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e01546ec41dff13e943ed24766fd64759acee6d732e870aebc6d7a41442cd15"
+checksum = "7b42acd192a6ae41534495e27a658ce275f76728d45d5f068fd8a454105b4b9b"
 dependencies = [
  "anyhow",
  "blake3",
@@ -491,7 +491,7 @@ dependencies = [
  "rayon",
  "regexr",
  "serde",
- "serde-saphyr",
+ "serde-saphyr 1.3.0",
  "serde_json",
  "splintr",
  "thiserror 2.0.21",
@@ -1504,6 +1504,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "granit-parser"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd04d0d9c7079b416b458d2317aea4aa964c81938cb7c20f559758c4f422dc8"
+dependencies = [
+ "arraydeque",
+ "smallvec",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2315,9 +2325,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "3.0.0"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13345868cfa94eadafc067112ff29271380a820d5594d9ee6ba81a8d00ea5dc2"
+checksum = "509eeb2603a84eccabb4d75f6ec8ba23b46bbf441aaeb863d6b83a5887fd51e4"
 dependencies = [
  "indexmap",
  "serde",
@@ -2325,9 +2335,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "3.0.0"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd9a0180a822fa9c843c36c442dbc9ca4b0d3eca5e501a6fac6a9cc1ed230a49"
+checksum = "64b62a39daf92d02b89f7888ab57f08d15d22dab862e5c95353253f91e9344f0"
 dependencies = [
  "minijinja",
 ]
@@ -2490,9 +2500,9 @@ dependencies = [
 
 [[package]]
 name = "nexar"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53627a1f76e05d05513598b28e102a3a93ef0ff927560c7c2dbec02dd1c130c4"
+checksum = "9a5b87f2334dfc6dbbbc8ba10bc259ff330120e743ba41f5c2aa93f63435f6ea"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -3728,12 +3738,11 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustyline"
-version = "18.0.1"
+version = "19.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53f6a737db68eb1a8ccff86b584b2fc13eca6a7bb6f78ebc7c529547e3ab9684"
+checksum = "56e1d6bd81c2d5feafd2419138df9183c45a10a492c4e873b8b0acb8eb2b549e"
 dependencies = [
  "bitflags",
- "cfg-if",
  "clipboard-win",
  "home",
  "libc",
@@ -3835,9 +3844,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.22.1",
+ "base64 0.23.1",
  "encoding_rs_io",
- "granit-parser",
+ "granit-parser 1.3.0",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "smallvec",
+ "zmij",
+]
+
+[[package]]
+name = "serde-saphyr"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
+dependencies = [
+ "annotate-snippets",
+ "base64 0.23.1",
+ "encoding_rs_io",
+ "granit-parser 2.2.0",
  "nohash-hasher",
  "num-traits",
  "serde_core",
@@ -3867,10 +3893,11 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
+ "foldhash",
  "indexmap",
  "itoa",
  "memchr",
@@ -3926,9 +3953,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -4053,9 +4080,9 @@ dependencies = [
 
 [[package]]
 name = "splintr"
-version = "0.22.1"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4edf1189e7aceeacc2a7c2b678bc30c0a9b39471c5fa477997ba3b5fbc1e4296"
+checksum = "57daccb555b67c6f739d274f1686790911d76bab26966c9eeef34758d19ec5b6"
 dependencies = [
  "aho-corasick",
  "base64 0.23.1",
@@ -4981,9 +5008,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.28.0"
+version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
